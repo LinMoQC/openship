@@ -55,6 +55,7 @@ vi.mock("@repo/db", () => ({
       upsertServiceDeployment: (...args: unknown[]) => h.upsertServiceDeployment(...args),
       updateServiceDeployment: (...args: unknown[]) => h.updateServiceDeployment(...args),
       markServiceDeploymentFailed: async () => undefined,
+      markServiceDeploymentSkipped: async () => undefined,
     },
     deployment: {
       findById: async () => h.previousDeployment,
@@ -167,6 +168,35 @@ function startingRuntime() {
   } as unknown as MultiServiceRuntimeAdapter;
 }
 
+function conditionedRuntime(
+  events: string[],
+  failCompletion = false,
+  unsupportedKeys: string[] = [],
+) {
+  return {
+    name: "docker",
+    unsupportedComposeKeys: new Set(unsupportedKeys),
+    supports: (capability: string) => capability === "containerIp",
+    ensureServiceGroup: vi.fn(async () => ({ id: "group-1" })),
+    deployServiceWorkload: vi.fn(async (_group, config) => {
+      events.push(`deploy:${config.serviceName}`);
+      return {
+        status: "running",
+        containerId: `container-${config.serviceName}`,
+        ip: "172.18.0.3",
+      };
+    }),
+    waitForServiceCondition: vi.fn(async (containerId, condition) => {
+      events.push(`wait:${containerId}:${condition}`);
+      if (failCompletion && condition === "service_completed_successfully") {
+        throw new Error("migration exited with code 1");
+      }
+    }),
+    destroy: vi.fn(async () => undefined),
+    getContainerIp: vi.fn(async () => "172.18.0.3"),
+  } as unknown as MultiServiceRuntimeAdapter;
+}
+
 const project = { id: "p1", slug: "app", organizationId: "org1" } as unknown as Project;
 const dep = {
   id: "d1",
@@ -271,6 +301,202 @@ function addDisabledPreviousService() {
 }
 
 describe("compose deploy — host channel unavailable", () => {
+  it("waits for healthy state and a successful one-shot migration before starting dependents", async () => {
+    h.services = [
+      {
+        id: "svc-db",
+        projectId: "p1",
+        name: "db",
+        enabled: true,
+        dependsOn: [],
+        advanced: { healthcheck: { test: ["CMD", "pg_isready"] } },
+        ports: [],
+        image: "postgres:16",
+        exposed: false,
+      },
+      {
+        id: "svc-migrate",
+        projectId: "p1",
+        name: "migrate",
+        enabled: true,
+        dependsOn: ["db"],
+        advanced: {
+          dependsOnConditions: { db: { condition: "service_healthy", required: true } },
+          runToCompletion: true,
+        },
+        ports: [],
+        image: "ghcr.io/acme/app:release",
+        exposed: false,
+      },
+      {
+        id: "svc-app",
+        projectId: "p1",
+        name: "app",
+        enabled: true,
+        dependsOn: ["migrate"],
+        advanced: {
+          dependsOnConditions: {
+            migrate: { condition: "service_completed_successfully", required: true },
+          },
+        },
+        ports: [],
+        image: "ghcr.io/acme/app:release",
+        exposed: false,
+      },
+    ];
+    h.previousServiceRows = [];
+    const events: string[] = [];
+    const { logger } = recordingLogger();
+
+    const result = await deployComposeServices(
+      { ...project, activeDeploymentId: null, routeStrategy: "container-ip" } as never,
+      dep,
+      conditionedRuntime(events),
+      logger,
+    );
+
+    expect(result.status).toBe("ready");
+    expect(events).toEqual([
+      "deploy:db",
+      "wait:container-db:service_healthy",
+      "deploy:migrate",
+      "wait:container-migrate:service_completed_successfully",
+      "deploy:app",
+    ]);
+    expect(result.services.find((service) => service.serviceName === "migrate")?.status).toBe(
+      "completed",
+    );
+  });
+
+  it("reuses an established migration result during a later app-only deployment", async () => {
+    h.services = [
+      {
+        id: "svc-migrate",
+        projectId: "p1",
+        name: "migrate",
+        enabled: true,
+        dependsOn: [],
+        advanced: { runToCompletion: true },
+        ports: [],
+        image: "ghcr.io/acme/app:release",
+        exposed: false,
+      },
+      {
+        id: "svc-app",
+        projectId: "p1",
+        name: "app",
+        enabled: true,
+        dependsOn: ["migrate"],
+        advanced: {
+          dependsOnConditions: {
+            migrate: { condition: "service_completed_successfully", required: true },
+          },
+        },
+        ports: [],
+        image: "ghcr.io/acme/app:release",
+        exposed: false,
+      },
+    ];
+    h.previousServiceRows = [];
+    const events: string[] = [];
+    const { logger } = recordingLogger();
+
+    const result = await deployComposeServices(
+      { ...project, activeDeploymentId: "d-old", routeStrategy: "container-ip" } as never,
+      dep,
+      conditionedRuntime(events),
+      logger,
+      { targetServiceIds: new Set(["svc-app"]) },
+    );
+
+    expect(result.status).toBe("ready");
+    expect(events).toEqual(["deploy:app"]);
+    expect(result.services.find((service) => service.serviceName === "migrate")).toMatchObject({
+      status: "completed",
+      carried: true,
+    });
+  });
+
+  it("does not start an app when its one-shot migration fails", async () => {
+    h.services = [
+      {
+        id: "svc-migrate",
+        projectId: "p1",
+        name: "migrate",
+        enabled: true,
+        dependsOn: [],
+        advanced: { runToCompletion: true },
+        ports: [],
+        image: "ghcr.io/acme/app:release",
+        exposed: false,
+      },
+      {
+        id: "svc-app",
+        projectId: "p1",
+        name: "app",
+        enabled: true,
+        dependsOn: ["migrate"],
+        advanced: {
+          dependsOnConditions: {
+            migrate: { condition: "service_completed_successfully", required: true },
+          },
+        },
+        ports: [],
+        image: "ghcr.io/acme/app:release",
+        exposed: false,
+      },
+    ];
+    h.previousServiceRows = [];
+    const events: string[] = [];
+    const runtime = conditionedRuntime(events, true);
+    const { logger } = recordingLogger();
+
+    const result = await deployComposeServices(
+      { ...project, activeDeploymentId: null, routeStrategy: "container-ip" } as never,
+      dep,
+      runtime,
+      logger,
+    );
+
+    expect(result.status).toBe("failed");
+    expect(events).toEqual([
+      "deploy:migrate",
+      "wait:container-migrate:service_completed_successfully",
+    ]);
+    expect(vi.mocked(runtime.destroy)).toHaveBeenCalledWith("container-migrate");
+    expect(result.services.find((service) => service.serviceName === "app")?.status).toBe("failed");
+  });
+
+  it("keeps unsupported one-shot semantics advisory instead of failing activation", async () => {
+    h.services = [
+      {
+        id: "svc-task",
+        projectId: "p1",
+        name: "task",
+        enabled: true,
+        dependsOn: [],
+        advanced: { runToCompletion: true },
+        ports: [],
+        image: "ghcr.io/acme/task:release",
+        exposed: false,
+      },
+    ];
+    h.previousServiceRows = [];
+    const events: string[] = [];
+    const { logger } = recordingLogger();
+
+    const result = await deployComposeServices(
+      { ...project, activeDeploymentId: null, routeStrategy: "container-ip" } as never,
+      dep,
+      conditionedRuntime(events, false, ["runToCompletion"]),
+      logger,
+    );
+
+    expect(result.status).toBe("ready");
+    expect(events).toEqual(["deploy:task"]);
+    expect(result.services[0]?.status).toBe("running");
+  });
+
   it("aborts an exact cohort before activation when a later service is missing required env", async () => {
     const runtime = startingRuntime();
     const deployServiceWorkload = vi.mocked(runtime.deployServiceWorkload);

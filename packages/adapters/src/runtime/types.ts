@@ -610,6 +610,13 @@ export interface MultiServiceRuntimeAdapter extends RuntimeAdapter {
     onLog?: LogCallback,
   ): Promise<MultiServiceDeployResult>;
 
+  /** Wait for a Compose dependency condition on an already-created workload. */
+  waitForServiceCondition?(
+    containerId: string,
+    condition: "service_started" | "service_healthy" | "service_completed_successfully",
+    timeoutMs?: number,
+  ): Promise<void>;
+
   /**
    * Optional batch build: clone/prune the shared source ONCE and build every
    * image from it (transferring once for SSH). Implemented by runtimes where all

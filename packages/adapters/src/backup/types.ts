@@ -61,6 +61,10 @@ export interface ServiceHandle {
    *  fallback in listSources resolves the same name deploy used. False for
    *  grandfathered pre-migration services (bare names). */
   namespaceVolumes: boolean;
+  /** Compose-resolved named volumes that are explicitly external or use
+   *  top-level `name:`. These names already identify the daemon volume and
+   *  must not receive the Openship project prefix in backup fallbacks. */
+  externalVolumeNames?: string[];
 }
 
 export interface ExecExitInfo {

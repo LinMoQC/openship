@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { mapComposeService } from "../../src/commands/service";
+import { mapComposeService, markComposeCompletionTasks } from "../../src/commands/service";
 
 /**
  * `openship service sync` maps `docker compose config --format json` to the sync
@@ -151,6 +151,50 @@ describe("service sync — compose config JSON mapping", () => {
     );
     expect(svc.advanced).toEqual({ networkMode: "service:gluetun", pidMode: "container:abc" });
     expect(errors).toEqual([]);
+  });
+
+  it("preserves Compose-resolved volume names and dependency conditions", () => {
+    const errors: string[] = [];
+    const svc = mapComposeService(
+      "migrate",
+      {
+        image: "ghcr.io/acme/app:release",
+        volumes: [{ type: "volume", source: "db-data", target: "/data", volume: {} }],
+        depends_on: { db: { condition: "service_healthy", required: true } },
+      },
+      "/repo",
+      errors,
+      new Map([["db-data", "magic_prod_postgres"]]),
+    );
+
+    expect(svc).toMatchObject({
+      volumes: ["magic_prod_postgres:/data"],
+      dependsOn: ["db"],
+      advanced: {
+        externalVolumeNames: ["magic_prod_postgres"],
+        dependsOnConditions: { db: { condition: "service_healthy", required: true } },
+      },
+    });
+    expect(errors).toEqual([]);
+  });
+
+  it("marks a service used as a successful-completion gate as one-shot", () => {
+    const services: Array<Record<string, unknown>> = [
+      { name: "migrate", image: "ghcr.io/acme/app:release" },
+      {
+        name: "api",
+        advanced: {
+          dependsOnConditions: {
+            migrate: { condition: "service_completed_successfully", required: true },
+          },
+        },
+      },
+    ];
+
+    markComposeCompletionTasks(services);
+
+    expect(services[0]).toMatchObject({ advanced: { runToCompletion: true } });
+    expect(services[1]?.advanced).not.toHaveProperty("runToCompletion");
   });
 
   it("reports `host` as an error rather than syncing a service without it", () => {

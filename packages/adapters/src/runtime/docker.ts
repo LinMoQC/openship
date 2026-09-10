@@ -3807,6 +3807,36 @@ export class DockerRuntime implements RuntimeAdapter {
     };
   }
 
+  async waitForServiceCondition(
+    containerId: string,
+    condition: "service_started" | "service_healthy" | "service_completed_successfully",
+    timeoutMs = 120_000,
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    const container = this.docker.getContainer(containerId);
+    while (Date.now() < deadline) {
+      const state = (await container.inspect()).State;
+      if (condition === "service_started") {
+        if (state.Running) return;
+        throw new Error(`Dependency container exited before it reached service_started`);
+      }
+      if (condition === "service_healthy") {
+        const health = state.Health?.Status;
+        if (health === "healthy") return;
+        if (!state.Running) {
+          throw new Error(`Dependency container exited before it became healthy`);
+        }
+        if (!health) throw new Error(`Dependency declares service_healthy without a healthcheck`);
+        if (health === "unhealthy") throw new Error(`Dependency container became unhealthy`);
+      } else if (!state.Running) {
+        if (state.ExitCode === 0) return;
+        throw new Error(`Dependency task exited with code ${state.ExitCode ?? "unknown"}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    throw new Error(`Timed out waiting for dependency condition ${condition}`);
+  }
+
   /**
    * Containers labeled for this deployment, with live state — the reconcile
    * read-back. `State` is dockerode's `running | exited | paused | ...`; map it
@@ -5186,7 +5216,12 @@ export class DockerRuntime implements RuntimeAdapter {
     if (!config.namespaceVolumes) {
       await this.assertNoForeignNamedVolumeCollision(config);
     }
-    const scopedBinds = scopeVolumeBinds(config.slug, config.volumes, config.namespaceVolumes);
+    const scopedBinds = scopeVolumeBinds(
+      config.slug,
+      config.volumes,
+      config.namespaceVolumes,
+      config.advanced?.externalVolumeNames,
+    );
     const binds = scopedBinds.length > 0 ? scopedBinds : undefined;
     const restartPolicy = resolveRestartPolicy(config.restart);
     const healthcheck = toDockerHealthcheck(config.advanced?.healthcheck);

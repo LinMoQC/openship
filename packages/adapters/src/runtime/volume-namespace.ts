@@ -69,9 +69,11 @@ export function scopeVolumeBinds(
   slug: string,
   rawVolumes: string[],
   enabled: boolean,
+  externalVolumeNames: readonly string[] = [],
 ): string[] {
   if (!enabled) return rawVolumes;
   const prefix = `openship-${slug}-`;
+  const external = new Set(externalVolumeNames);
   return rawVolumes.map((spec) => {
     const modeMatch = spec.match(MODE_SUFFIX);
     const mode = modeMatch ? modeMatch[0] : "";
@@ -83,7 +85,7 @@ export function scopeVolumeBinds(
 
     const source = parts[0];
     // Bind mount (host path) or already-scoped → leave as-is.
-    if (isHostPathSource(source) || source.startsWith(prefix)) return spec;
+    if (isHostPathSource(source) || source.startsWith(prefix) || external.has(source)) return spec;
 
     parts[0] = scopedVolumeName(slug, source);
     return parts.join(":") + mode;

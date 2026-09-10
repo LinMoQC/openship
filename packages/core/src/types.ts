@@ -231,6 +231,19 @@ export type ComposeAdvancedPatch = {
 };
 
 export type ComposeAdvanced = {
+  /** Long-form Compose dependency semantics keyed by sibling service name. */
+  dependsOnConditions?: Record<
+    string,
+    {
+      condition: "service_started" | "service_healthy" | "service_completed_successfully";
+      required?: boolean;
+    }
+  >;
+  /** Docker volume names that Compose resolved explicitly (external/name).
+   * These pass through without the Openship project prefix. */
+  externalVolumeNames?: string[];
+  /** This service is a one-shot task whose successful exit is its healthy state. */
+  runToCompletion?: boolean;
   /**
    * Provenance for a Compose `image:` expression. `resolved` remains in the
    * service's ordinary `image` column for display and rollback snapshots; this
