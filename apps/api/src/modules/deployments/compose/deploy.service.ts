@@ -290,6 +290,46 @@ function dependencyCondition(
   };
 }
 
+/** Resolve the one external network a Compose service group can faithfully use. */
+export function externalNetworkForServices(
+  services: Array<Pick<Service, "name" | "advanced">>,
+  unsupportedKeys: ReadonlySet<keyof ComposeAdvanced>,
+): string | undefined {
+  if (unsupportedKeys.has("externalNetworkName")) return undefined;
+
+  const endpointOwners = services.filter(
+    (service) => !(service.advanced as ComposeAdvanced | null)?.networkMode,
+  );
+  const requested = new Set(
+    endpointOwners
+      .map(
+        (service) =>
+          (service.advanced as ComposeAdvanced | null)?.externalNetworkName?.trim() || undefined,
+      )
+      .filter((name): name is string => !!name),
+  );
+  if (requested.size === 0) return undefined;
+  if (requested.size > 1) {
+    throw new Error(
+      "Compose services request multiple external networks; one shared network is required",
+    );
+  }
+
+  const [name] = requested;
+  const missing = endpointOwners
+    .filter(
+      (service) =>
+        (service.advanced as ComposeAdvanced | null)?.externalNetworkName?.trim() !== name,
+    )
+    .map((service) => service.name);
+  if (missing.length > 0) {
+    throw new Error(
+      `External network "${name}" must be selected by every networked service; missing: ${missing.join(", ")}`,
+    );
+  }
+  return name;
+}
+
 export function topoSort(services: Service[]): Service[] {
   const byName = new Map(services.map((s) => [s.name, s]));
   const sorted: Service[] = [];
@@ -1058,11 +1098,17 @@ async function deployComposeServicesUnlocked(
 
   logger.log("Preparing shared service group for project services...\n");
 
+  const externalNetworkName = externalNetworkForServices(
+    ordered,
+    runtime.unsupportedComposeKeys ?? new Set(),
+  );
+
   const group = await runtime.ensureServiceGroup({
     deploymentId: dep.id,
     projectId: project.id,
     slug: project.slug,
     resources: opts?.resources,
+    externalNetworkName,
   });
   logger.log(`Service group ready for ${project.slug}.\n`);
   throwIfDeploymentCancelled(opts?.signal);

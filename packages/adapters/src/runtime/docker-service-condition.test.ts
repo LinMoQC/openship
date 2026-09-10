@@ -43,3 +43,33 @@ describe("DockerRuntime.waitForServiceCondition", () => {
     ).rejects.toThrow("exited with code 1");
   });
 });
+
+describe("DockerRuntime.ensureNetwork", () => {
+  it("reuses an exact external network and never creates a replacement", async () => {
+    const runtime = Object.create(DockerRuntime.prototype) as DockerRuntime;
+    const createNetwork = vi.fn();
+    (runtime as unknown as { _docker: unknown })._docker = {
+      listNetworks: vi.fn(async () => [{ Id: "network-existing", Name: "magic-prod_default" }]),
+      createNetwork,
+    };
+
+    await expect(runtime.ensureNetwork("ignored", "magic-prod_default")).resolves.toBe(
+      "network-existing",
+    );
+    expect(createNetwork).not.toHaveBeenCalled();
+  });
+
+  it("fails when a required external network is missing", async () => {
+    const runtime = Object.create(DockerRuntime.prototype) as DockerRuntime;
+    const createNetwork = vi.fn();
+    (runtime as unknown as { _docker: unknown })._docker = {
+      listNetworks: vi.fn(async () => []),
+      createNetwork,
+    };
+
+    await expect(runtime.ensureNetwork("ignored", "missing-network")).rejects.toThrow(
+      "does not exist",
+    );
+    expect(createNetwork).not.toHaveBeenCalled();
+  });
+});

@@ -601,6 +601,7 @@ export interface MultiServiceRuntimeAdapter extends RuntimeAdapter {
     projectId: string;
     slug: string;
     resources?: ResourceConfig;
+    externalNetworkName?: string;
   }): Promise<MultiServiceGroupHandle>;
 
   /** Deploy one service workload into a prepared group */

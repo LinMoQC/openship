@@ -178,6 +178,10 @@ export function parseComposeFile(
   missingRequiredSinks.set(interpolationEnv, missingRequired);
   const rawServices = doc.services ?? {};
   const resolvedVolumeNames = parseResolvedVolumeNames(doc.volumes, interpolationEnv);
+  const resolvedExternalNetworkNames = parseResolvedExternalNetworkNames(
+    doc.networks,
+    interpolationEnv,
+  );
   const services: ComposeService[] = [];
   const unsupported: ComposeUnsupportedField[] = [];
 
@@ -214,6 +218,10 @@ export function parseComposeFile(
     const externalVolumeNames = volumes
       .map((volume) => volume.split(":", 1)[0])
       .filter((source) => [...resolvedVolumeNames.values()].includes(source));
+    const externalNetworkName = resolveSingleExternalNetworkName(
+      svc.networks,
+      resolvedExternalNetworkNames,
+    );
     let advanced: ComposeAdvanced | undefined =
       parsedAdvanced || imageTemplate || hasEnvironmentDeclaration || hasBuildDeclaration
         ? {
@@ -227,16 +235,17 @@ export function parseComposeFile(
             }),
           }
         : undefined;
-    if (dependsOnConditions || externalVolumeNames.length > 0) {
+    if (dependsOnConditions || externalVolumeNames.length > 0 || externalNetworkName) {
       advanced = {
         ...(advanced ?? {}),
         ...(dependsOnConditions && { dependsOnConditions }),
         ...(externalVolumeNames.length > 0 && {
           externalVolumeNames: [...new Set(externalVolumeNames)],
         }),
+        ...(externalNetworkName && { externalNetworkName }),
       };
     }
-    collectUnsupported(name, svc, unsupported, interpolationEnv);
+    collectUnsupported(name, svc, unsupported, interpolationEnv, resolvedExternalNetworkNames);
 
     services.push({
       name,
@@ -575,6 +584,36 @@ function parseResolvedVolumeNames(raw: unknown, env: Record<string, string>): Ma
   return names;
 }
 
+function parseResolvedExternalNetworkNames(
+  raw: unknown,
+  env: Record<string, string>,
+): Map<string, string> {
+  const names = new Map<string, string>();
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return names;
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const def = value as Record<string, unknown>;
+    if (def.external !== true) continue;
+    names.set(key, typeof def.name === "string" ? interpolateComposeString(def.name, env) : key);
+  }
+  return names;
+}
+
+function composeNetworkNames(raw: unknown): string[] {
+  if (Array.isArray(raw)) return raw.filter((name): name is string => typeof name === "string");
+  if (raw && typeof raw === "object") return Object.keys(raw as Record<string, unknown>);
+  return [];
+}
+
+function resolveSingleExternalNetworkName(
+  raw: unknown,
+  resolved: ReadonlyMap<string, string>,
+): string | undefined {
+  const names = composeNetworkNames(raw);
+  if (names.length !== 1) return undefined;
+  return resolved.get(names[0]);
+}
+
 function replaceVolumeSource(spec: string, names: ReadonlyMap<string, string>): string {
   const separator = spec.indexOf(":");
   if (separator <= 0) return spec;
@@ -824,6 +863,7 @@ function collectUnsupported(
   svc: Record<string, unknown>,
   unsupported: ComposeUnsupportedField[],
   env: Record<string, string>,
+  resolvedExternalNetworkNames: ReadonlyMap<string, string>,
 ): void {
   for (const [key, reason] of Object.entries(UNSUPPORTED_SERVICE_KEYS)) {
     if (!requestsSomething(svc[key])) continue;
@@ -852,12 +892,12 @@ function collectUnsupported(
   // project network, so the topology flattens. They still resolve each other by
   // name, which is why this is a warning rather than a refusal.
   const networks = svc.networks;
-  const networkNames = Array.isArray(networks)
-    ? networks.filter((n): n is string => typeof n === "string")
-    : networks && typeof networks === "object"
-      ? Object.keys(networks)
-      : [];
-  if (networkNames.length > 0) {
+  const networkNames = composeNetworkNames(networks);
+  const supportedExternalNetwork = resolveSingleExternalNetworkName(
+    networks,
+    resolvedExternalNetworkNames,
+  );
+  if (networkNames.length > 0 && !supportedExternalNetwork) {
     unsupported.push({
       service: serviceName,
       field: "networks",

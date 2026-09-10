@@ -4883,8 +4883,8 @@ export class DockerRuntime implements RuntimeAdapter {
    * All services in a compose project share this network and can
    * reach each other by service name as hostname.
    */
-  async ensureNetwork(slug: string): Promise<string> {
-    const networkName = `openship-${slug}`;
+  async ensureNetwork(slug: string, externalNetworkName?: string): Promise<string> {
+    const networkName = externalNetworkName || `openship-${slug}`;
     // list-then-create is check-then-act: two concurrent deploys for the same
     // slug would both miss and both create, yielding two networks with the same
     // name (Docker allows it) and ambiguous name lookups. Serialize per server.
@@ -4896,6 +4896,10 @@ export class DockerRuntime implements RuntimeAdapter {
       // listNetworks does substring matching, verify exact name
       const existing = networks.find((n) => n.Name === networkName);
       if (existing) return existing.Id;
+
+      if (externalNetworkName) {
+        throw new Error(`Required external Docker network "${externalNetworkName}" does not exist`);
+      }
 
       const network = await this.docker.createNetwork({
         Name: networkName,
@@ -4911,9 +4915,10 @@ export class DockerRuntime implements RuntimeAdapter {
     deploymentId: string;
     projectId: string;
     slug: string;
+    externalNetworkName?: string;
   }): Promise<MultiServiceGroupHandle> {
     void config.deploymentId;
-    const networkId = await this.ensureNetwork(config.slug);
+    const networkId = await this.ensureNetwork(config.slug, config.externalNetworkName);
     // Self-heal network membership. A container joins the network only at
     // CREATE time (see deployServiceWorkload). Normal/partial/smart redeploys
     // are fine — the network is reused by name so its id is stable and

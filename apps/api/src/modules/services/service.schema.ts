@@ -98,6 +98,9 @@ const AdvancedSchema = Type.Object(
         Type.Null(),
       ]),
     ),
+    externalNetworkName: Type.Optional(
+      Type.Union([Type.String({ minLength: 1, maxLength: 255 }), Type.Null()]),
+    ),
     runToCompletion: Type.Optional(Type.Union([Type.Boolean(), Type.Null()])),
     monitoringEnabled: Type.Optional(Type.Union([Type.Boolean(), Type.Null()])),
     /**

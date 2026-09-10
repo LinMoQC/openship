@@ -794,6 +794,25 @@ volumes:
     expect(parsed.services[0]?.advanced?.externalVolumeNames).toEqual(["existing_prod_pgdata"]);
   });
 
+  it("preserves a single external Compose network by its resolved daemon name", () => {
+    const parsed = parseComposeFile(
+      `
+services:
+  api:
+    image: ghcr.io/acme/api:release
+    networks: [magic-network]
+networks:
+  magic-network:
+    external: true
+    name: \${MAGIC_NETWORK_NAME}
+`,
+      { env: { MAGIC_NETWORK_NAME: "magic-prod_default" } },
+    );
+
+    expect(parsed.services[0]?.advanced?.externalNetworkName).toBe("magic-prod_default");
+    expect(parsed.unsupported.some((issue) => issue.field === "networks")).toBe(false);
+  });
+
   it("folds long-form `read_only: true` into a :ro bind (read-only intent survives)", () => {
     const parsed = parseComposeFile(`
 services:

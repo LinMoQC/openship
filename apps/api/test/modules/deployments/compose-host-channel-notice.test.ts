@@ -108,8 +108,31 @@ vi.mock("../../../src/modules/deployments/observed-host-port-claims", () => ({
 }));
 
 const { resolveServerExecutor } = await import("../../../src/lib/deployment-runtime");
-const { deployComposeServices } =
+const { deployComposeServices, externalNetworkForServices } =
   await import("../../../src/modules/deployments/compose/deploy.service");
+
+describe("externalNetworkForServices", () => {
+  it("requires one external network on every networked service", () => {
+    const services = [
+      { name: "db", advanced: { externalNetworkName: "magic-prod_default" } },
+      { name: "api", advanced: { externalNetworkName: "magic-prod_default" } },
+    ];
+    expect(externalNetworkForServices(services as never, new Set())).toBe("magic-prod_default");
+    expect(() =>
+      externalNetworkForServices(
+        [...services, { name: "worker", advanced: {} }] as never,
+        new Set(),
+      ),
+    ).toThrow("missing: worker");
+  });
+
+  it("drops the request only when the selected runtime declares it unsupported", () => {
+    const services = [{ name: "api", advanced: { externalNetworkName: "magic-prod_default" } }];
+    expect(externalNetworkForServices(services as never, new Set(["externalNetworkName"]))).toBe(
+      undefined,
+    );
+  });
+});
 
 /** Collects what the deploy log was told, in order. */
 function recordingLogger() {

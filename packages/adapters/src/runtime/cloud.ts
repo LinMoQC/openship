@@ -516,6 +516,7 @@ export class CloudRuntime implements MultiServiceRuntimeAdapter {
     "healthcheck",
     "dependsOnConditions",
     "externalVolumeNames",
+    "externalNetworkName",
     "runToCompletion",
     // Namespace sharing has no Oblien equivalent — a workspace is not a container
     // whose netns/pidns a peer can join. Declared here so the deploy warns once

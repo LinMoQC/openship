@@ -242,6 +242,8 @@ export type ComposeAdvanced = {
   /** Docker volume names that Compose resolved explicitly (external/name).
    * These pass through without the Openship project prefix. */
   externalVolumeNames?: string[];
+  /** Existing Docker network selected by an imported single-network Compose stack. */
+  externalNetworkName?: string;
   /** This service is a one-shot task whose successful exit is its healthy state. */
   runToCompletion?: boolean;
   /**

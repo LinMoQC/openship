@@ -178,6 +178,23 @@ describe("service sync — compose config JSON mapping", () => {
     expect(errors).toEqual([]);
   });
 
+  it("preserves the resolved name of one external Compose network", () => {
+    const errors: string[] = [];
+    const svc = mapComposeService(
+      "api",
+      { image: "ghcr.io/acme/api:release", networks: { "magic-network": null } },
+      "/repo",
+      errors,
+      new Map(),
+      new Map([["magic-network", "magic-prod_default"]]),
+    );
+
+    expect(svc).toMatchObject({
+      advanced: { externalNetworkName: "magic-prod_default" },
+    });
+    expect(errors).toEqual([]);
+  });
+
   it("marks a service used as a successful-completion gate as one-shot", () => {
     const services: Array<Record<string, unknown>> = [
       { name: "migrate", image: "ghcr.io/acme/app:release" },

@@ -378,6 +378,24 @@ function normalizedVolumeNames(raw: unknown): Map<string, string> {
   return names;
 }
 
+function normalizedExternalNetworkNames(raw: unknown): Map<string, string> {
+  const names = new Map<string, string>();
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return names;
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const def = value as Record<string, unknown>;
+    if (def.external !== true) continue;
+    names.set(key, typeof def.name === "string" && def.name ? def.name : key);
+  }
+  return names;
+}
+
+function serviceNetworkNames(raw: unknown): string[] {
+  if (Array.isArray(raw)) return raw.filter((name): name is string => typeof name === "string");
+  if (raw && typeof raw === "object") return Object.keys(raw as Record<string, unknown>);
+  return [];
+}
+
 function mapBuildArgs(raw: unknown): Record<string, string | null> | undefined {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
   const args: Record<string, string | null> = {};
@@ -421,6 +439,7 @@ export function mapComposeService(
   baseDir: string,
   errors: string[],
   resolvedVolumeNames: ReadonlyMap<string, string> = new Map(),
+  resolvedExternalNetworkNames: ReadonlyMap<string, string> = new Map(),
 ): Record<string, unknown> {
   const d = (def ?? {}) as Record<string, unknown>;
   const svc: Record<string, unknown> = { name };
@@ -478,6 +497,11 @@ export function mapComposeService(
     .filter((source) => [...resolvedVolumeNames.values()].includes(source));
   if (externalVolumeNames.length > 0) {
     advanced.externalVolumeNames = [...new Set(externalVolumeNames)];
+  }
+  const networkNames = serviceNetworkNames(d.networks);
+  if (networkNames.length === 1) {
+    const externalNetworkName = resolvedExternalNetworkNames.get(networkNames[0]);
+    if (externalNetworkName) advanced.externalNetworkName = externalNetworkName;
   }
   if (d.healthcheck && typeof d.healthcheck === "object" && !Array.isArray(d.healthcheck)) {
     const health = d.healthcheck as Record<string, unknown>;
@@ -563,7 +587,11 @@ const syncCmd = stackCommand("sync")
       err(`  docker compose config failed:\n${(proc.stderr || "").trim()}`);
       process.exit(1);
     }
-    let doc: { services?: Record<string, unknown>; volumes?: Record<string, unknown> };
+    let doc: {
+      services?: Record<string, unknown>;
+      volumes?: Record<string, unknown>;
+      networks?: Record<string, unknown>;
+    };
     try {
       doc = JSON.parse(proc.stdout);
     } catch {
@@ -574,8 +602,9 @@ const syncCmd = stackCommand("sync")
     const baseDir = path.dirname(abs);
     const mapErrors: string[] = [];
     const volumeNames = normalizedVolumeNames(doc.volumes);
+    const networkNames = normalizedExternalNetworkNames(doc.networks);
     const services = Object.entries(doc.services ?? {}).map(([name, def]) =>
-      mapComposeService(name, def, baseDir, mapErrors, volumeNames),
+      mapComposeService(name, def, baseDir, mapErrors, volumeNames, networkNames),
     );
     markComposeCompletionTasks(services);
     if (services.length === 0) {
