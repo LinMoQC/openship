@@ -155,3 +155,32 @@ describe("static host artifact trust", () => {
     ).toBe(false);
   });
 });
+
+describe("stateless health preflight opt-in", () => {
+  const build = (readiness?: object, advanced?: object) =>
+    createServiceRuntimeConfig({
+      project: { ...project, readiness } as never,
+      dep: { id: "deployment-1" } as never,
+      service: { ...service, advanced } as never,
+      image: "example/web:stable",
+      environment: {},
+    });
+  it("stays off unless explicitly enabled", () => {
+    expect(build().healthcheckPreflight).toBeUndefined();
+    expect(build({ enabled: true, stabilization: true }).healthcheckPreflight).toBeUndefined();
+  });
+  it("carries project preflight and its bounded health timeout to Docker", () => {
+    expect(build({ preflight: true, stabilizationSeconds: 120 }).healthcheckPreflight).toEqual({
+      timeoutMs: 120000,
+    });
+  });
+  it("respects the complete per-service override", () => {
+    expect(
+      build({ preflight: true }, { readiness: { preflight: false } }).healthcheckPreflight,
+    ).toBeUndefined();
+    expect(
+      build(undefined, { readiness: { preflight: true, stabilizationSeconds: 15 } })
+        .healthcheckPreflight,
+    ).toEqual({ timeoutMs: 15000 });
+  });
+});

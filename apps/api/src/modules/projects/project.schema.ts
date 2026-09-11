@@ -244,6 +244,7 @@ const ReadinessSchema = Type.Object({
   path: Type.Optional(Type.String({ maxLength: 2000 })),
   port: Type.Optional(Type.Number({ minimum: 1, maximum: 65535 })),
   timeoutSeconds: Type.Optional(Type.Number({ minimum: 1, maximum: 600 })),
+  preflight: Type.Optional(Type.Boolean()),
   stabilization: Type.Optional(Type.Boolean()),
   stabilizationSeconds: Type.Optional(Type.Number({ minimum: 1, maximum: 600 })),
   onFailure: Type.Optional(Type.Union([Type.Literal("warn"), Type.Literal("fail")])),

@@ -308,6 +308,7 @@ function parseReadiness(ctx: Ctx, v: unknown, path: string): OpenshipReadiness |
     path: ctx.str(v.path, `${path}.path`),
     port: ctx.int(v.port, `${path}.port`, 1, 65535),
     timeoutSeconds: ctx.int(v.timeoutSeconds, `${path}.timeoutSeconds`, 1, 600),
+    preflight: ctx.bool(v.preflight, `${path}.preflight`),
     stabilization: ctx.bool(v.stabilization, `${path}.stabilization`),
     stabilizationSeconds: ctx.int(v.stabilizationSeconds, `${path}.stabilizationSeconds`, 1, 600),
     onFailure: ctx.enumOf(v.onFailure, `${path}.onFailure`, OPENSHIP_READINESS_FAILURE_ACTIONS),

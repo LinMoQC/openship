@@ -198,12 +198,16 @@ export type OpenshipReadiness = {
   stabilization?: boolean;
   /** How long to watch for a restart loop. Default 15. */
   stabilizationSeconds?: number;
+  /** Docker services only: explicitly allow a second, temporary stateless process
+   * with no published ports. Requires a Docker healthcheck, no volumes or shared
+   * namespaces, and no completion job. Failure vetoes cutover. Defaults off. */
+  preflight?: boolean;
   /**
    * What a failed check does.
    *   "warn" (default) — the deploy stays `ready` and carries an
    *                      action-required warning. Never destroys anything.
-   *   "fail"           — the deploy fails and reverts to the previous
-   *                      deployment, which keeps serving.
+   *   "fail"           — veto the deployment. Single-app deploys attempt a revert;
+   *                      Compose needs explicit stateless preflight for retained-container recovery.
    */
   onFailure?: OpenshipReadinessFailureAction;
 };
