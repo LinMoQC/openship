@@ -1441,6 +1441,7 @@ export async function requestBuildAccess(
   if (!project) {
     throw new NotFoundError("Project", projectId);
   }
+  const deployEnvironment = resolveDeploymentEnvironment(project, environment);
   // Validate an explicit host-root capability before compose reconciliation,
   // route persistence, or deployment-row creation. Runtime/preflight reuse the
   // same guard; this early call makes invalid/foreign targeting atomic even for
@@ -1471,7 +1472,6 @@ export async function requestBuildAccess(
   // interpolation is part of deployment configuration, so the source refresh
   // and the eventual build must see the exact same values. Keep the encrypted
   // map for the deployment row and decrypt only the in-memory interpolation copy.
-  const deployEnvironment = environment || "production";
   let deploymentEnvVars: Record<string, string> | null;
   let submittedProjectEnv: Array<{ key: string; value: string; isSecret: boolean }> | undefined;
   if (envVars && Object.keys(envVars).length > 0) {
@@ -2136,6 +2136,7 @@ export async function redeployBuildSession(
   opts?: { useExistingCommit?: boolean; trigger?: string },
 ) {
   const { dep: oldDep, project } = await loadDeployment(deploymentId);
+  const environment = resolveDeploymentEnvironment(project);
   // The Openship control plane updates itself via the CLI — never a redeploy.
   // The apply-update endpoint (updates.service) reaches redeploy directly, and
   // the self-app is a repo-less release project so the GitHub gate below
@@ -2250,7 +2251,7 @@ export async function redeployBuildSession(
   // reconcileComposeSource. A composePath bootstrap is intentionally strict;
   // an explicitly frozen single-app deployment must remain single and must not
   // materialize compose rows as a side effect of redeploying it.
-  let currentProjectEnv = await repos.project.getEnvMap(project.id, oldDep.environment, null);
+  let currentProjectEnv = await repos.project.getEnvMap(project.id, environment, null);
   let currentSourceInfo: SourceEnvInfo | undefined;
   if (meta.serviceDeploymentMode !== "single") {
     currentSourceInfo = await reconcileComposeSource(ctx, project, branch, {
@@ -2261,7 +2262,7 @@ export async function redeployBuildSession(
   const sourceEnv = mergeSourceEnvDefaults(currentProjectEnv, currentSourceInfo);
   currentProjectEnv = sourceEnv.encrypted ?? {};
   if (sourceEnv.additions.length > 0) {
-    await repos.project.mergeEnvVars(project.id, oldDep.environment, sourceEnv.additions, []);
+    await repos.project.mergeEnvVars(project.id, environment, sourceEnv.additions, []);
   }
 
   const currentComposeRows = await listProjectComposeServices(project.id).catch(() => []);
@@ -2293,7 +2294,7 @@ export async function redeployBuildSession(
     commitSha,
     commitMessage,
     trigger: opts?.trigger ?? "redeploy",
-    environment: oldDep.environment,
+    environment,
     framework: oldDep.framework || refreshedMeta.framework,
     meta: metaWithPrevious(refreshedMeta, project),
     envVars: Object.keys(currentProjectEnv).length > 0 ? currentProjectEnv : null,
@@ -2360,6 +2361,26 @@ export async function startBuild(deploymentId: string) {
     deployment_id: dep.id,
     project_id: project.id,
   };
+}
+
+/** A project row represents one environment. Never borrow another scope's secrets. */
+function resolveDeploymentEnvironment(
+  project: Pick<Project, "environmentType">,
+  requested?: string,
+) {
+  const environment = project.environmentType ?? "production";
+  if (
+    !["production", "preview", "development"].includes(environment) ||
+    (requested !== undefined && requested !== environment)
+  ) {
+    throw new AppError(
+      "Deployment environment does not match the project's configured environment. " +
+        "Deploy from the project using its current environment.",
+      400,
+      "PROJECT_ENVIRONMENT_MISMATCH",
+    );
+  }
+  return environment;
 }
 
 export async function triggerDeployment(
@@ -2458,6 +2479,7 @@ export async function triggerDeployment(
   if (!project) {
     throw new NotFoundError("Project", data.projectId);
   }
+  const environment = resolveDeploymentEnvironment(project, data.environment);
   if (data.serverId) await requireOrgServer(data.serverId, ctx.organizationId);
   // The Openship control plane IS the running host service, not a redeployable
   // workload — it updates itself via the CLI. It's a release-provider project, so
@@ -2512,7 +2534,6 @@ export async function triggerDeployment(
   }
 
   const branch = await resolveProjectBranch(ctx, project, data.branch);
-  const environment = data.environment ?? "production";
   // Before the dedupe below and before anything stores it: one canonical sha, so
   // the row a webhook compares against and the row the drift check reads are
   // written in the same alphabet. See canonicalizeCommitRef.
