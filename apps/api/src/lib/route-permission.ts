@@ -607,18 +607,39 @@ export function requirePermission(spec: PermissionSpec): MiddlewareHandler {
       });
       leafId = "*";
     } else if (spec.collection) {
-      // Collection-scoped write/admin (e.g. POST /deployments, POST
-      // /deployments/prepare). No :id in the URL; org scope comes from
-      // the request (X-Organization-Id header or session default).
-      // Same resolution path as list reads, just with the route's
-      // declared action so role/grants still apply.
-      await permission.assert(getRequestContext(c), {
-        resourceType: parsed.leaf,
-        resourceId: "*",
-        action: parsed.action as Action,
-        scope: "list",
-        projectCreate: spec.projectCreate,
-      });
+      if (parsed.root !== parsed.leaf) {
+        // A nested collection mutation belongs to the concrete parent named in
+        // the URL, just like a nested list. Authorizing `{service,"*"}` here
+        // made a project-scoped MCP token see the sync tool but receive
+        // `service '*' not found` when it called it. The parent grant is the
+        // collection scope and the route's write/admin action is preserved.
+        const parentParamName =
+          idsMap[parsed.root] ?? DEFAULT_ID_PARAMS[parsed.root] ?? "id";
+        const parentId = c.req.param(parentParamName);
+        if (!parentId) {
+          return c.json(
+            {
+              error: `Missing route param :${parentParamName} required by tag "${spec.tag}"`,
+            },
+            400,
+          );
+        }
+        await permission.assert(getRequestContext(c), {
+          resourceType: parsed.root,
+          resourceId: parentId,
+          action: parsed.action as Action,
+        });
+      } else {
+        // Top-level collection mutation has no concrete parent. Org scope comes
+        // from the request (X-Organization-Id header or session default).
+        await permission.assert(getRequestContext(c), {
+          resourceType: parsed.leaf,
+          resourceId: "*",
+          action: parsed.action as Action,
+          scope: "list",
+          projectCreate: spec.projectCreate,
+        });
+      }
       leafId = "*";
     } else {
       // Resolve the leaf resource's id from URL param. For resources

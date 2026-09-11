@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const assertPermission = vi.fn(async () => {});
 
 vi.mock("../../src/lib/permission", () => ({
-  permission: { assert: assertPermission },
+  permission: { assert: assertPermission, resolveRequestScopeOrg: vi.fn(() => undefined) },
   ORG_SINGLETON_RESOURCES: new Set<string>(),
 }));
 vi.mock("@repo/db", () => ({ repos: {} }));
@@ -69,6 +69,37 @@ describe("nested list permission scope", () => {
     const next = vi.fn(async () => {});
 
     const response = await requirePermission({ tag: "project:service:list" })(c as never, next);
+
+    expect(response).toEqual(expect.objectContaining({ status: 400 }));
+    expect(assertPermission).not.toHaveBeenCalled();
+    expect(next).not.toHaveBeenCalled();
+  });
+});
+
+describe("nested collection write permission scope", () => {
+  beforeEach(() => assertPermission.mockClear());
+
+  it("authorizes a service sync against the concrete parent project", async () => {
+    const c = context({ id: "project-1" });
+    const next = vi.fn(async () => {});
+
+    await requirePermission({ tag: "project:service:write", collection: true })(c as never, next);
+
+    expect(assertPermission).toHaveBeenCalledWith(
+      expect.anything(),
+      { resourceType: "project", resourceId: "project-1", action: "write" },
+    );
+    expect(next).toHaveBeenCalledOnce();
+  });
+
+  it("fails closed when a nested collection write has no parent id", async () => {
+    const c = context({});
+    const next = vi.fn(async () => {});
+
+    const response = await requirePermission({ tag: "project:service:write", collection: true })(
+      c as never,
+      next,
+    );
 
     expect(response).toEqual(expect.objectContaining({ status: 400 }));
     expect(assertPermission).not.toHaveBeenCalled();
