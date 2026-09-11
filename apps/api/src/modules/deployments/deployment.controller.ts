@@ -327,12 +327,14 @@ export async function skipPortCheck(c: Context) {
 }
 
 export async function cancel(c: Context) {
-  const ctx = getRequestContext(c);
   const id = param(c, "id");
+  // Match the route's deployment:write contract: a project-scoped CI identity
+  // that can start a deployment must also be able to stop its pending worker.
+  // Resource authorization still resolves the deployment's owning project.
   await permission.assert(getRequestContext(c), {
     resourceType: "deployment",
     resourceId: id,
-    action: "admin",
+    action: "write",
   });
   try {
     const result = await buildService.cancelBuildSession(id);
