@@ -32,6 +32,7 @@ const h = vi.hoisted(() => ({
   allocateAndReservePinnedHostPort: vi.fn(),
   releaseNewPinnedHostPortClaims: vi.fn(),
   reserveResolvedLoopbackRoutes: vi.fn(),
+  ensureEdge: vi.fn(),
   upsertServiceDeployment: vi.fn(),
   updateServiceDeployment: vi.fn(),
   services: [] as Array<Record<string, unknown>>,
@@ -41,6 +42,14 @@ const h = vi.hoisted(() => ({
     unknown
   >,
 }));
+
+vi.mock("@repo/adapters", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@repo/adapters")>();
+  return {
+    ...actual,
+    ensureEdge: (...args: unknown[]) => h.ensureEdge(...args),
+  };
+});
 
 vi.mock("@repo/db", () => ({
   repos: {
@@ -290,6 +299,7 @@ beforeEach(() => {
   }));
   h.releaseNewPinnedHostPortClaims.mockResolvedValue(0);
   h.reserveResolvedLoopbackRoutes.mockResolvedValue([]);
+  h.ensureEdge.mockResolvedValue({ ok: true, migrated: false });
   h.convergeTargetHostPortClaims.mockResolvedValue({ released: 0, retained: [] });
   h.convergeTargetHostPortClaimsUnlocked.mockResolvedValue({ released: 0, retained: [] });
   h.upsertServiceDeployment.mockResolvedValue(undefined);
@@ -324,6 +334,43 @@ function addDisabledPreviousService() {
 }
 
 describe("compose deploy — host channel unavailable", () => {
+  it("does not prepare Edge when every service is private", async () => {
+    h.services = [
+      {
+        id: "svc-private",
+        projectId: "p1",
+        name: "private",
+        enabled: true,
+        dependsOn: [],
+        advanced: null,
+        ports: ["127.0.0.1:19081:80"],
+        image: "nginx:alpine",
+        exposed: false,
+        publicEndpoints: [],
+      },
+    ];
+    h.previousServiceRows = [];
+    const system = { ensureFeature: vi.fn(async () => undefined) };
+    const { logger } = recordingLogger();
+
+    const result = await deployComposeServices(
+      { ...project, activeDeploymentId: null, routeStrategy: "loopback-port" } as never,
+      dep,
+      startingRuntime(),
+      logger,
+      {
+        executor: { exec: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })) } as never,
+        hostPortTarget: localHostPortTarget,
+        system: system as never,
+      },
+    );
+
+    expect(result.status).toBe("ready");
+    expect(system.ensureFeature).toHaveBeenCalledTimes(1);
+    expect(system.ensureFeature).toHaveBeenCalledWith("deploy", expect.any(Function));
+    expect(h.ensureEdge).not.toHaveBeenCalled();
+  });
+
   it("waits for healthy state and a successful one-shot migration before starting dependents", async () => {
     h.services = [
       {

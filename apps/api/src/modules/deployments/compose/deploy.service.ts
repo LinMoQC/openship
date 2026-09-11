@@ -1165,14 +1165,17 @@ async function deployComposeServicesUnlocked(
         usesManagedRouting: opts.usesManagedRouting ?? false,
       }),
     ];
-    const needsStrictLoopbackInventory = usesHostLoopback && Boolean(opts.executor);
-
     await opts.system.ensureFeature("deploy", systemLog);
     // Routing/SSL toolchain is best-effort — domains are optional, so failing to
     // install OpenResty/certbot must NOT fail the deploy. The services still run;
     // routing is flagged action-required and retried later.
     try {
-      if (plannedRoutes.length > 0 || needsStrictLoopbackInventory) {
+      // A private Compose stack may publish an operator-owned loopback port
+      // without asking Openship to route it. Preparing Edge in that case would
+      // demand control of 80/443 even though there is no route to register.
+      // Host-port allocation below already checks the exact routed-port set, so
+      // Edge inventory is needed only when this deployment actually has routes.
+      if (plannedRoutes.length > 0) {
         // Components + edge convergence as ONE step — see ensureRoutingReady for why
         // the second half can't live inside ensureFeature. Without an executor
         // there's no box to converge (cloud), so components alone are correct.
