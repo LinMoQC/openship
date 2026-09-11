@@ -3,6 +3,7 @@ import { Hono } from "hono";
 
 const h = vi.hoisted(() => ({
   createEnvironment: vi.fn(),
+  findGrant: vi.fn(),
   grant: vi.fn(),
   audit: vi.fn(),
 }));
@@ -34,7 +35,11 @@ vi.mock("@repo/db", async (importOriginal) => {
     ...actual,
     repos: {
       ...actual.repos,
-      patGrant: { ...actual.repos.patGrant, createMany: h.grant },
+      patGrant: {
+        ...actual.repos.patGrant,
+        findForResource: h.findGrant,
+        createMany: h.grant,
+      },
     },
   };
 });
@@ -57,6 +62,7 @@ describe("create project environment with a scoped PAT", () => {
       type: "preview",
       gitBranch: "main",
     });
+    h.findGrant.mockResolvedValue({ permissions: ["read", "write"] });
   });
 
   it("grants the token control of the sibling project it created", async () => {
@@ -67,11 +73,12 @@ describe("create project environment with a scoped PAT", () => {
     });
 
     expect(response.status).toBe(201);
+    expect(h.findGrant).toHaveBeenCalledWith("token-1", "project", "proj-prod");
     expect(h.grant).toHaveBeenCalledWith("token-1", [
       {
         resourceType: "project",
         resourceId: "proj_prt-1",
-        permissions: ["read", "write", "admin"],
+        permissions: ["read", "write"],
       },
     ]);
   });
