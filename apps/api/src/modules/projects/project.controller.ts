@@ -474,6 +474,15 @@ export async function createEnvironment(c: Context) {
 
   try {
     const data = await projectService.createProjectEnvironment(id, ctx, body);
+    // A create-scoped PAT owns projects it creates. Environment rows are real
+    // projects too, so grant the newly created sibling explicitly just like the
+    // top-level create handler does. Without this, the response returns an id
+    // that the same token immediately receives as NOT_FOUND.
+    if (ctx.tokenScope) {
+      await repos.patGrant.createMany(ctx.tokenScope.tokenId, [
+        { resourceType: "project", resourceId: data.id, permissions: ["read", "write", "admin"] },
+      ]);
+    }
     audit.recordAsync(auditContextFrom(c, organizationId, userId), {
       eventType: "project.updated",
       resourceType: "project",
