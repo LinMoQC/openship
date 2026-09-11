@@ -3,7 +3,8 @@
 import React from "react";
 import { useProjectSettings } from "@/context/ProjectSettingsContext";
 import { DeploymentsContent } from "@/app/(dashboard)/deployments/components";
-import { deployApi, projectsApi, isAbortError } from "@/lib/api";
+import { projectsApi, isAbortError } from "@/lib/api";
+import { triggerProjectDeployment } from "@/lib/project-deployment";
 import type { PendingAction } from "@/lib/api/projects";
 import { openTriggeredBuild } from "@/lib/deploy-nav";
 import { type Service } from "@/lib/api/services";
@@ -136,13 +137,7 @@ export const Deployments = () => {
       if (!projectData?.id) return;
       setIsRedeploying(true); // drive the loading state for menu paths too
       try {
-        const body =
-          mode === "all"
-            ? { projectId: projectData.id, forceAll: true }
-            : mode === "refresh"
-              ? { projectId: projectData.id, refresh: true }
-              : { projectId: projectData.id, smartRoute: true };
-        const res = await deployApi.trigger(body);
+        const res = await triggerProjectDeployment(projectData, mode);
         openTriggeredBuild(router, res, projectData.id);
       } catch (error) {
         // A timeout almost certainly means the server started the deploy but was
@@ -168,7 +163,7 @@ export const Deployments = () => {
         setIsRedeploying(false); // success navigates away; only clear on failure
       }
     },
-    [projectData?.id, router, showToast, t],
+    [projectData, router, showToast, t],
   );
 
   const handleRedeploy = async () => {
