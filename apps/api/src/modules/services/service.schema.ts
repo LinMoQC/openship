@@ -344,6 +344,17 @@ export const UpdateServiceBody = Type.Object(
  *
  * `services: []` is left to the handler, which rejects it with its own message.
  */
+export const SyncComposeDocumentBody = Type.Object({
+  compose: Type.String({ minLength: 1, maxLength: 1048576 }),
+  environment: EnvironmentScopeSchema,
+  expectedServices: Type.Array(Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9_.-]*$" }), {
+    minItems: 1,
+    maxItems: 100,
+    uniqueItems: true,
+  }),
+}, { additionalProperties: false });
+export type TSyncComposeDocumentBody = Static<typeof SyncComposeDocumentBody>;
+
 export const SyncServicesBody = Type.Object({
   services: Type.Array(
     Type.Object(
