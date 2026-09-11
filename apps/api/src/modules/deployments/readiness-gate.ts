@@ -17,7 +17,9 @@
  * A project opts in when it wants the deploy itself to refuse to go green. Even
  * then `onFailure` defaults to "warn": the deploy stays ready and carries an
  * action-required warning. Only an explicit `onFailure: "fail"` vetoes a deploy,
- * and that path now reverts to the previous deployment instead of destroying it.
+ * Single-app deployments attempt a revert. Compose stateless deployments must
+ * explicitly enable readiness.preflight to retain the incumbent through these
+ * post-start checks; stateful services keep their existing deployment policy.
  */
 
 import { SYSTEM } from "@repo/core";

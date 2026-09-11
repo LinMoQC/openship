@@ -755,6 +755,7 @@ export function createServiceRuntimeConfig(opts: {
   // never have `startCommand` set, so a single `??` chain covers both:
   // monorepo → startCommand (with command fallback if missing), compose →
   // command. No branching on kind needed.
+  const readiness = service.advanced?.readiness ?? project.readiness;
   const runtimeCommand = service.startCommand ?? service.command ?? undefined;
   // #332: pass the structured argv for a compose `command` (docker-compose Cmd,
   // no `sh -c`). Only for compose rows — a monorepo sub-app's `startCommand` is a
@@ -780,6 +781,10 @@ export function createServiceRuntimeConfig(opts: {
     // pull-if-missing.
     forcePull: !opts.imageAlreadyPrepared && deploymentForcesImagePull(dep, opts.forcePullImages),
     imageAlreadyPrepared: opts.imageAlreadyPrepared,
+    healthcheckPreflight:
+      readiness?.preflight === true
+        ? { timeoutMs: Math.max(1, Math.min(600, readiness.stabilizationSeconds ?? 120)) * 1000 }
+        : undefined,
     advanced: service.advanced ?? undefined,
     // Operator-chosen east-west alias (service.advanced.alias) resolving
     // alongside the default service name. Normalized here; skipped when it
@@ -993,7 +998,38 @@ export async function deployComposeServices(
 ): Promise<ComposeDeployResult> {
   const runUnlocked = (): Promise<ComposeDeployResult> => {
     throwIfDeploymentCancelled(opts?.signal);
-    const run = () => deployComposeServicesUnlocked(project, dep, runtime, logger, opts);
+    const run = async () => {
+      const activations = new Map<string, NonNullable<MultiServiceDeployResult["activation"]>>();
+      try {
+        const result = await deployComposeServicesUnlocked(
+          project,
+          dep,
+          runtime,
+          logger,
+          opts,
+          (id, activation) => activations.set(id, activation),
+        );
+        throwIfDeploymentCancelled(opts?.signal);
+        for (const [id, activation] of activations) {
+          const service = result.services.find((row) => row.serviceId === id);
+          if (result.status !== "failed" && service?.status === "running")
+            await activation.commit();
+          else await activation.rollback();
+        }
+        return result;
+      } catch (error) {
+        const restored = await Promise.allSettled(
+          [...activations.values()].map((activation) => activation.rollback()),
+        );
+        const failures = restored.filter((item) => item.status === "rejected");
+        if (failures.length)
+          throw new AggregateError(
+            [error, ...failures.map((item) => item.reason)],
+            "Compose deployment failed and stateless recovery is incomplete; manual recovery required",
+          );
+        throw error;
+      }
+    };
     return opts?.signal && opts.executor?.runWithAbortSignal
       ? opts.executor.runWithAbortSignal(opts.signal, run)
       : run();
@@ -1021,6 +1057,10 @@ async function deployComposeServicesUnlocked(
   runtime: MultiServiceRuntimeAdapter,
   logger: BuildLogger,
   opts?: ComposeDeployOptions,
+  registerActivation?: (
+    serviceId: string,
+    activation: NonNullable<MultiServiceDeployResult["activation"]>,
+  ) => void,
 ): Promise<ComposeDeployResult> {
   // Generated app secrets, BEFORE any env is read below. A catalog app whose install died
   // part-way keeps a service row with the generated values missing, and the installer only
@@ -3072,6 +3112,12 @@ async function deployComposeServicesUnlocked(
           isPreparedLocalImage(svc, image, opts?.preparedLocalImages),
       });
 
+      if (serviceRuntimeConfig.healthcheckPreflight) {
+        if (runtime.name !== "docker")
+          throw new Error("Health preflight requires the Docker runtime");
+        serviceRuntimeConfig.healthcheckPreflight.signal = opts?.signal;
+      }
+
       // Generated app config is host state and must exist before Docker receives
       // the corresponding bind. Explicit cohorts validated and write-probed every
       // selected file above; the stable path is replaced atomically only when this
@@ -3239,6 +3285,7 @@ async function deployComposeServicesUnlocked(
             // Runtime ownership starts as soon as Docker returns the container.
             // Record it before waiting on a one-shot task so a failed migration
             // can still be destroyed by the ordinary activation rollback path.
+            if (result.activation) registerActivation?.(svc.id, result.activation);
             deployedContainerId = result.containerId;
             serviceResult = result;
             if (runToCompletion) {
@@ -3302,6 +3349,9 @@ async function deployComposeServicesUnlocked(
           {
             config: serviceDeployConfig,
             previousContainerId: previous?.containerId ?? undefined,
+            // The Docker preflight transaction owns stop/retain/restore. The
+            // generic stop-first pipeline must not delete its incumbent first.
+            deactivatePrevious: !serviceRuntimeConfig.healthcheckPreflight,
             domains: routeDomains,
             routing: routeDomains.length ? routeContext?.routing : undefined,
             ssl: routeDomains.length ? routeContext?.trackedSsl : undefined,

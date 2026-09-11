@@ -30,6 +30,7 @@
 // `.d.ts` files (#448).
 /// <reference path="./tar-fs.d.ts" />
 import Dockerode from "dockerode";
+import { deployPreflightedService } from "./docker-preflight";
 import * as tarFs from "tar-fs";
 import { randomUUID } from "node:crypto";
 import { createGzip } from "node:zlib";
@@ -5193,6 +5194,17 @@ export class DockerRuntime implements RuntimeAdapter {
   ): Promise<MultiServiceDeployResult> {
     const log = onLog ?? (() => {});
     const containerName = `openship-${config.slug}-${config.serviceName}`;
+    if (
+      config.healthcheckPreflight &&
+      (config.volumes.length > 0 ||
+        config.namespaces?.network ||
+        config.namespaces?.pid ||
+        config.advanced?.runToCompletion)
+    ) {
+      throw new Error(
+        "Health preflight supports only stateless services without volumes, shared namespaces, or completion jobs",
+      );
+    }
 
     // Resolve and validate the complete create payload before any irreversible
     // action. A malformed later port/volume/health setting must not be discovered
@@ -5257,18 +5269,6 @@ export class DockerRuntime implements RuntimeAdapter {
       }
     }
 
-    // Stop and remove any existing container with the same name. A container that
-    // declared a shutdown grace period (compose stop_grace_period, #388) gets a
-    // graceful stop first so a redeploy of e.g. Postgres flushes instead of being
-    // SIGKILLed mid-write; those that didn't opt in skip straight to force-remove.
-    try {
-      const existing = this.docker.getContainer(containerName);
-      await gracefulStopForGrace(existing);
-      await existing.remove({ force: true });
-    } catch {
-      // Does not exist - fine
-    }
-
     // Environment variables. Inject PORT=<service port> (like the single-app
     // deploy path) so an app that binds `process.env.PORT` listens on the port
     // the route proxies to — otherwise a monorepo/compose backend (e.g. Express
@@ -5313,7 +5313,7 @@ export class DockerRuntime implements RuntimeAdapter {
       });
     }
 
-    const container = await this.docker.createContainer({
+    const createPayload: Dockerode.ContainerCreateOptions = {
       name: containerName,
       Image: config.image,
       Cmd: cmd,
@@ -5362,43 +5362,75 @@ export class DockerRuntime implements RuntimeAdapter {
             },
           }
         : {}),
-    });
+    };
 
-    try {
-      await container.start();
-    } catch (startErr) {
-      // Clean up the created container so it doesn't become orphaned
+    let container: Dockerode.Container;
+    let activation: MultiServiceDeployResult["activation"];
+    if (config.healthcheckPreflight) {
+      log({
+        timestamp: new Date().toISOString(),
+        level: "info",
+        message: `Checking stateless candidate before replacing ${containerName}...\n`,
+      });
+      const transaction = await deployPreflightedService(
+        this.docker,
+        createPayload,
+        config.healthcheckPreflight,
+        (message) => log({ timestamp: new Date().toISOString(), level: "warn", message }),
+      );
+      container = transaction.container;
+      activation = { commit: transaction.commit, rollback: transaction.rollback };
+    } else {
+      // Stop and remove any existing container with the same name. A container that
+      // declared a shutdown grace period (compose stop_grace_period, #388) gets a
+      // graceful stop first so a redeploy of e.g. Postgres flushes instead of being
+      // SIGKILLed mid-write; those that didn't opt in skip straight to force-remove.
       try {
-        await container.remove({ force: true });
+        const existing = this.docker.getContainer(containerName);
+        await gracefulStopForGrace(existing);
+        await existing.remove({ force: true });
       } catch {
-        /* best effort */
+        // Does not exist - fine
       }
-      throw startErr;
+
+      container = await this.docker.createContainer(createPayload);
+      try {
+        await container.start();
+      } catch (startErr) {
+        await container.remove({ force: true }).catch(() => undefined);
+        throw startErr;
+      }
     }
 
-    // Get container IP on the project network
-    const data = await container.inspect();
-    const { ip, hostPort, hostPortByContainerPort } = extractNetworkInfo(data);
+    try {
+      // Get container IP on the project network
+      const data = await container.inspect();
+      const { ip, hostPort, hostPortByContainerPort } = extractNetworkInfo(data);
 
-    // Record the content-addressable digest actually running so the update
-    // scanner can later detect a moved mutable tag. Best-effort: a locally-built
-    // image has no RepoDigests, and any inspect failure must not fail the deploy.
-    const imageDigest = await this.resolveImageDigest(config.image).catch(() => undefined);
+      // Record the content-addressable digest actually running so the update
+      // scanner can later detect a moved mutable tag. Best-effort: a locally-built
+      // image has no RepoDigests, and any inspect failure must not fail the deploy.
+      const imageDigest = await this.resolveImageDigest(config.image).catch(() => undefined);
 
-    log({
-      timestamp: new Date().toISOString(),
-      message: `Service ${config.serviceName} started (${container.id.slice(0, 12)})${ip ? ` at ${ip}` : ""}.\n`,
-      level: "info",
-    });
+      log({
+        timestamp: new Date().toISOString(),
+        message: `Service ${config.serviceName} started (${container.id.slice(0, 12)})${ip ? ` at ${ip}` : ""}.\n`,
+        level: "info",
+      });
 
-    return {
-      containerId: container.id,
-      status: "running",
-      ip,
-      hostPort,
-      ...(hostPortByContainerPort ? { hostPortByContainerPort } : {}),
-      imageDigest,
-    };
+      return {
+        ...(activation ? { activation } : {}),
+        containerId: container.id,
+        status: "running",
+        ip,
+        hostPort,
+        ...(hostPortByContainerPort ? { hostPortByContainerPort } : {}),
+        imageDigest,
+      };
+    } catch (error) {
+      await activation?.rollback();
+      throw error;
+    }
   }
 
   /**

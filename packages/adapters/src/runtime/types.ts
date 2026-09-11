@@ -521,6 +521,8 @@ export interface MultiServiceDeployConfig {
    * already pulled during cohort preparation. Docker must not infer this from
    * the tag text: a registry image can legitimately use Openship's tag shape. */
   imageAlreadyPrepared?: boolean;
+  /** Opt-in stateless candidate and activation health checks before retiring the incumbent. */
+  healthcheckPreflight?: { timeoutMs: number; signal?: AbortSignal };
   /** Extended compose fields (healthcheck, …). Docker honors them; runtimes
    *  that can't (cloud) warn-and-drop. See ComposeAdvanced in @repo/core. */
   advanced?: ComposeAdvanced;
@@ -562,6 +564,9 @@ export interface MultiServiceDeployConfig {
 }
 
 export interface MultiServiceDeployResult {
+  /** In-memory stateless cutover transaction. Caller MUST settle it after ALL
+   * deployment gates, or roll it back on errors/cancellation. Never serialize. */
+  activation?: { commit(): Promise<void>; rollback(): Promise<void> };
   containerId: string;
   status: string;
   ip?: string;
