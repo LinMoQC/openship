@@ -369,6 +369,7 @@ describe("compose deploy — host channel unavailable", () => {
     expect(system.ensureFeature).toHaveBeenCalledTimes(1);
     expect(system.ensureFeature).toHaveBeenCalledWith("deploy", expect.any(Function));
     expect(h.ensureEdge).not.toHaveBeenCalled();
+    expect(h.prepareTargetPinnedHostPorts).not.toHaveBeenCalled();
   });
 
   it("waits for healthy state and a successful one-shot migration before starting dependents", async () => {

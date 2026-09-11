@@ -1854,7 +1854,7 @@ async function deployComposeServicesUnlocked(
   }
 
   const pinnedHostPortClaims =
-    usesHostLoopback && opts?.executor
+    usesHostLoopback && opts?.executor && hostLoopbackRoutePortDemands.size > 0
       ? hostPortTarget
         ? await prepareTargetPinnedHostPorts({
             target: hostPortTarget,
