@@ -559,6 +559,38 @@ describe("triggerDeployment", () => {
     kickoffBuild.mockResolvedValue("session-1");
   });
 
+  it.each(["preview", "development", "production"])(
+    "uses the project's %s variable scope when a manual trigger omits environment",
+    async (environment) => {
+      repos.project.findById.mockResolvedValue(baseProject({ environmentType: environment }));
+      repos.project.getEnvMap.mockImplementation(async (_id, scope) => {
+        if (scope !== environment)
+          throw new Error("Wrong environment: required Compose variables absent");
+        return { VITE_API_BASE_URL: "https://test.invalid" };
+      });
+      await triggerDeployment(ctx, { projectId: "project-1", smartRoute: true });
+      expect(repos.project.getEnvMap).toHaveBeenCalledWith("project-1", environment, null);
+      expect(repos.deployment.create).toHaveBeenCalledWith(
+        expect.objectContaining({ environment }),
+      );
+    },
+  );
+
+  it.each(["production", "development", "prt", ""])(
+    "rejects a PRT trigger with mismatched environment %j before any deployment work",
+    async (environment) => {
+      repos.project.findById.mockResolvedValue(baseProject({ environmentType: "preview" }));
+      await expect(
+        triggerDeployment(ctx, { projectId: "project-1", environment }),
+      ).rejects.toMatchObject({ statusCode: 400, code: "PROJECT_ENVIRONMENT_MISMATCH" });
+      expect(repos.project.getEnvMap).not.toHaveBeenCalled();
+      expect(resolveProjectInfo).not.toHaveBeenCalled();
+      expect(repos.service.reconcileFromCompose).not.toHaveBeenCalled();
+      expect(repos.deployment.create).not.toHaveBeenCalled();
+      expect(kickoffBuild).not.toHaveBeenCalled();
+    },
+  );
+
   it("passes compose service mode into preflight for manual services deploys", async () => {
     await triggerDeployment(ctx, {
       projectId: "project-1",
@@ -1497,6 +1529,19 @@ describe("redeployBuildSession environment snapshot", () => {
     kickoffBuild.mockResolvedValue("session-new");
   });
 
+  it("retries an old mislabelled PRT deployment with the project's actual scope", async () => {
+    repos.service.reconcileFromCompose.mockResolvedValue({ driftedNames: [] });
+    resolveProjectInfo.mockResolvedValue({ services: composeServices });
+    repos.project.findById.mockResolvedValue(
+      baseProject({ environmentType: "preview", activeDeploymentId: "dep-old" }),
+    );
+    await redeployBuildSession(ctx, "dep-old");
+    expect(repos.project.getEnvMap).toHaveBeenCalledWith("project-1", "preview", null);
+    expect(repos.deployment.create).toHaveBeenCalledWith(
+      expect.objectContaining({ environment: "preview" }),
+    );
+  });
+
   it("uses current project env and keeps service scopes out of the flat snapshot", async () => {
     await redeployBuildSession(ctx, "dep-old");
     expect(repos.project.getEnvMap).toHaveBeenCalledWith("project-1", "production", null);
@@ -1753,6 +1798,26 @@ describe("requestBuildAccess — folder-upload compose services", () => {
     scanFolderSession.mockImplementation(async (session) => ({ services: session.services }));
     resolveFolderSessionSourceEnv.mockResolvedValue(undefined);
     resolveProjectSourceEnv.mockResolvedValue(undefined);
+  });
+
+  it("uses preview variables for the PRT wizard without an explicit environment", async () => {
+    repos.project.findById.mockResolvedValue(baseProject({ environmentType: "preview" }));
+    await requestBuildAccess(ctx, { projectId: "project-1" });
+    expect(repos.project.getEnvMap).toHaveBeenCalledWith("project-1", "preview", null);
+    expect(repos.deployment.create).toHaveBeenCalledWith(
+      expect.objectContaining({ environment: "preview" }),
+    );
+  });
+
+  it("rejects a wizard environment mismatch before synchronizing or writing anything", async () => {
+    repos.project.findById.mockResolvedValue(baseProject({ environmentType: "preview" }));
+    await expect(
+      requestBuildAccess(ctx, { projectId: "project-1", environment: "production" }),
+    ).rejects.toMatchObject({ statusCode: 400, code: "PROJECT_ENVIRONMENT_MISMATCH" });
+    expect(repos.project.getEnvMap).not.toHaveBeenCalled();
+    expect(repos.project.mergeEnvVars).not.toHaveBeenCalled();
+    expect(repos.service.syncFromCompose).not.toHaveBeenCalled();
+    expect(repos.deployment.create).not.toHaveBeenCalled();
   });
 
   it("rejects a foreign folder target before service or deployment writes", async () => {
