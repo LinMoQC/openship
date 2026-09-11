@@ -116,7 +116,9 @@ jobs:
           test -f "$dashboard_asset.sha256"
           (cd "$(dirname "$asset")" && sha256sum --check "$(basename "$asset").sha256")
           sha256sum --check "$dashboard_asset.sha256"
-          tar -tzf "$dashboard_asset" | grep -q '^./apps/dashboard/server.js$'
+          mkdir -p /tmp/openship-dashboard-check
+          tar -xzf "$dashboard_asset" -C /tmp/openship-dashboard-check
+          test -f /tmp/openship-dashboard-check/apps/dashboard/server.js
           mkdir -p /tmp/openship-runtime-check
           tar -xzf "$asset" -C /tmp/openship-runtime-check
           actual="$(node /tmp/openship-runtime-check/dist/index.js --version)"
