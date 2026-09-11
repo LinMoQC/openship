@@ -183,6 +183,7 @@ export async function getHome(c: Context) {
   let result: {
     rows: Awaited<ReturnType<typeof projectService.listProjects>>["rows"];
     total: number;
+    environmentRows?: Awaited<ReturnType<typeof projectService.listProjects>>["rows"];
   };
   try {
     result = await projectService.listProjects(organizationId, {
@@ -190,6 +191,8 @@ export async function getHome(c: Context) {
       // Scoped tokens own few projects but they may sit anywhere in the org's
       // set, so widen the fetch before filtering to the owned ids below.
       perPage: scopedIds ? 1000 : 100,
+      includeEnvironments: true,
+      visibleProjectIds: scopedIds,
     });
   } catch (err) {
     // Migrations not yet applied — PGlite first-boot case. Return an
@@ -237,7 +240,9 @@ export async function getHome(c: Context) {
   // regardless of project count. The dashboard derives "needs cloud
   // reconnect" client-side from `deployTarget === 'cloud'` +
   // CloudContext.connected — no duplicate server-side flag.
-  const projectIds = result.rows.map((p) => p.id);
+  const environmentRows = (result.environmentRows ?? result.rows)
+    .filter(p => !scopedIds || scopedIds.has(p.id));
+  const projectIds = environmentRows.map((p) => p.id);
   const [
     enrichedProjectsResolved,
     latestByProject,
@@ -245,7 +250,7 @@ export async function getHome(c: Context) {
     servicesByProject,
     deployStats,
   ] = await Promise.all([
-    projectService.enrichProjectsBatch(result.rows),
+    projectService.enrichProjectsBatch(environmentRows),
     repos.deployment.findLatestByProjects(projectIds),
     repos.domain.getPrimariesByProjects(projectIds),
     repos.service.listByProjects(projectIds),
@@ -254,8 +259,15 @@ export async function getHome(c: Context) {
     repos.deployment.statsByProjects(projectIds),
   ]);
 
-  const projects = enrichedProjectsResolved.map((enriched, idx) => {
-    const original = result.rows[idx];
+  const enrichedById = new Map(enrichedProjectsResolved.map(p => [p.id, p]));
+  const environmentsByGroup = new Map<string, typeof enrichedProjectsResolved>();
+  for (const environment of enrichedProjectsResolved) {
+    const siblings = environmentsByGroup.get(environment.groupId) ?? [];
+    siblings.push(environment);
+    environmentsByGroup.set(environment.groupId, siblings);
+  }
+  const projects = result.rows.map((original) => {
+    const enriched = enrichedById.get(original.id)!;
     const latest = latestByProject.get(original.id);
     const primary = primariesByProject.get(original.id);
     const services = servicesByProject.get(original.id) ?? [];
@@ -266,6 +278,29 @@ export async function getHome(c: Context) {
 
     return {
       ...enriched,
+      environments: (environmentsByGroup.get(original.groupId) ?? []).map(environment => {
+        const latestEnvironment = latestByProject.get(environment.id);
+        return {
+          id: environment.id,
+          name: environment.environmentName,
+          slug: environment.environmentSlug,
+          type: environment.environmentType,
+          isApp: environment.isApp,
+          appTemplateId: environment.appTemplateId,
+          hasServer: environment.hasServer,
+          activeDeploymentId: environment.activeDeploymentId,
+          activeDeploymentStatus: environment.activeDeploymentStatus,
+          latestDeploymentId: latestEnvironment?.id ?? null,
+          latestDeploymentStatus: latestEnvironment?.status ?? null,
+          latestDeploymentBlocked: projectService.deploymentIsBlocked(latestEnvironment),
+          enabled: environment.enabled,
+          awaitingDecision: environment.awaitingDecision,
+          routingUnsynced: environment.routingUnsynced,
+          activeMigration: environment.activeMigration,
+          deletedAt: environment.deletedAt,
+          deletionInProgress: environment.deletionInProgress,
+        };
+      }),
       latestDeploymentId: latest?.id ?? null,
       latestDeploymentStatus: latest?.status ?? null,
       latestDeploymentBlocked: projectService.deploymentIsBlocked(latest),
@@ -371,7 +406,7 @@ export async function list(c: Context) {
   const perPage = Number(c.req.query("perPage") ?? 20);
   const result = await projectService.listProjects(
     organizationId,
-    scopedIds ? { page: 1, perPage: 1000 } : { page, perPage },
+    scopedIds ? { page: 1, perPage: 1000, visibleProjectIds: scopedIds } : { page, perPage },
   );
   // Scoped-token isolation: keep only the projects this token may see.
   const rows = scopedIds ? result.rows.filter((p) => scopedIds.has(p.id)) : result.rows;
@@ -2469,6 +2504,9 @@ export async function getInfo(c: Context) {
     rows: rawDomains,
     target: deployTarget ?? "local",
     port: project.port ?? null,
+    // "local" describes a workload on the control-plane host. Only the desktop
+    // app can assume that host is also the machine opening the browser link.
+    allowLocalhost: env.DEPLOY_MODE === "desktop",
   });
 
   // Push auto-deploy state travels WITH the project payload, not only with

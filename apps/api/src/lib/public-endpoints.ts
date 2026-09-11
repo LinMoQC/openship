@@ -1013,6 +1013,8 @@ export function resolveProjectAccess(input: {
   rows: ProjectDomainRow[] | null | undefined;
   target: "local" | "server" | "cloud";
   port: number | null;
+  /** Whether the viewer is on the same machine as this local workload. */
+  allowLocalhost?: boolean;
 }): ProjectAccess {
   const { rows, target, port } = input;
   const primaryRow = pickCanonicalDomainRow(rows);
@@ -1041,7 +1043,7 @@ export function resolveProjectAccess(input: {
     }
   }
 
-  if (target === "local") {
+  if (target === "local" && input.allowLocalhost !== false) {
     const host = `localhost:${port ?? 3000}`;
     return { url: `http://${host}`, host, kind: "local", isLocal: true, urls: [] };
   }

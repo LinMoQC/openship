@@ -434,6 +434,18 @@ describe("pickCanonicalDomainRow", () => {
 });
 
 describe("resolveProjectAccess", () => {
+  it("does not turn a remote self-hosted server's local workload into browser localhost", () => {
+    expect(resolveProjectAccess({ rows: [], target: "local", port: 3000, allowLocalhost: false })).toEqual({
+      url: null, host: null, kind: "none", isLocal: false, urls: [],
+    });
+  });
+  it("still uses the recorded public domain when localhost links are disabled", () => {
+    expect(resolveProjectAccess({
+      rows: [row({hostname: "beta.app.example.com", verified: true, isPrimary: true})],
+      target: "local", port: 3000, allowLocalhost: false,
+    }).url).toBe("https://beta.app.example.com");
+  });
+
   it("resolves a project whose only domains are service-scoped (the openship repro)", () => {
     // Multi-service project: both verified custom domains live on service-scoped
     // rows, so project-level publicEndpoints is empty — the exact case that used

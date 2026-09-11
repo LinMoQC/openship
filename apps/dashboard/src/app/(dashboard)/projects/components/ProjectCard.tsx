@@ -17,6 +17,7 @@ import { type Project } from "@/constants/mock";
 import { AppLogo } from "@/components/AppLogo";
 import { getFrameworkConfig } from "@/components/import-project/Frameworks";
 import { getProjectStatus, projectDisplayDomain } from "@/utils/project-status";
+import { ProjectEnvironmentLinks } from "./ProjectEnvironmentLinks";
 import { ProjectStatusBadge } from "@/components/shared/ProjectStatusBadge";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 import { useModal } from "@/context/ModalContext";
@@ -129,7 +130,7 @@ const ProjectCard: React.FC<Props> = ({ project, preferAppLogo, updateAvailable,
 
       {/* Icon — on the Apps page show the catalog app's brand logo; otherwise
           the project favicon, falling back to the framework/service glyph. */}
-      <div className="w-10 h-10 rounded-xl bg-muted/60 flex items-center justify-center shrink-0 group-hover:bg-muted transition-colors overflow-hidden">
+      <div className={`w-10 h-10 rounded-xl bg-muted/60 flex items-center justify-center shrink-0 group-hover:bg-muted transition-colors overflow-hidden ${project.environments?.length ? "max-sm:hidden" : ""}`}>
         {preferAppLogo && project.isApp ? (
           <AppLogo appId={appTemplateId} className="w-6 h-6 object-contain" />
         ) : hasFavicon ? (
@@ -145,7 +146,7 @@ const ProjectCard: React.FC<Props> = ({ project, preferAppLogo, updateAvailable,
       </div>
 
       {/* Name + domain */}
-      <div className="min-w-0 flex-shrink-0 w-44 lg:w-56 text-start">
+      <div className={`min-w-0 flex-shrink-0 sm:w-44 lg:w-56 text-start ${project.environments?.length ? "w-full max-sm:flex-1" : "w-44"}`}>
         <div className="flex items-center gap-1.5">
           <p className="text-sm font-medium text-foreground truncate">{project.name}</p>
           {project.activeVersion != null && (
@@ -165,10 +166,15 @@ const ProjectCard: React.FC<Props> = ({ project, preferAppLogo, updateAvailable,
           )}
         </div>
         {domain && <p className="text-xs text-muted-foreground truncate mt-0.5">{domain}</p>}
+        {project.environments?.length ? (
+          <div className="mt-2">
+            <ProjectEnvironmentLinks environments={project.environments} />
+          </div>
+        ) : null}
       </div>
 
       {/* Meta badges */}
-      <div className="flex-1 min-w-0 flex items-center gap-3 overflow-hidden">
+      <div className={`flex-1 min-w-0 flex items-center gap-3 overflow-hidden ${project.environments?.length ? "max-sm:hidden" : ""}`}>
         {/* Stack */}
         <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-muted/60 text-xs text-muted-foreground shrink-0">
           {fw.name}
@@ -227,17 +233,19 @@ const ProjectCard: React.FC<Props> = ({ project, preferAppLogo, updateAvailable,
       </div>
 
       {/* Right side */}
-      <div className="flex items-center gap-3 shrink-0">
+      <div className={`flex items-center gap-3 shrink-0 ${project.environments?.length && !isDraftApp ? "max-sm:hidden" : ""}`}>
         {/* Time */}
         <span className="hidden lg:block text-xs text-muted-foreground">
           {timeAgo(project.updatedAt || project.createdAt, t)}
         </span>
 
         {/* Status pill (badge only — no dot) */}
-        <ProjectStatusBadge
-          project={project}
-          className="rounded-full px-2 py-0.5 text-[10px] font-medium"
-        />
+        {!project.environments?.length && (
+          <ProjectStatusBadge
+            project={project}
+            className="rounded-full px-2 py-0.5 text-[10px] font-medium"
+          />
+        )}
 
         {/* Draft apps get a "delete app" menu (deployed apps delete from the
             project page). Stops row navigation. */}
