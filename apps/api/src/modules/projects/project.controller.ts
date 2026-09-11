@@ -474,6 +474,26 @@ export async function createEnvironment(c: Context) {
 
   try {
     const data = await projectService.createProjectEnvironment(id, ctx, body);
+    // Environment rows are real projects. Carry this token's exact access on
+    // the source environment to the new sibling; otherwise the response returns
+    // an id that the same token immediately receives as NOT_FOUND. Copying the
+    // source permissions also avoids upgrading a read/write grant to admin.
+    if (ctx.tokenScope) {
+      const sourceGrant = await repos.patGrant.findForResource(
+        ctx.tokenScope.tokenId,
+        "project",
+        id,
+      );
+      if (sourceGrant) {
+        await repos.patGrant.createMany(ctx.tokenScope.tokenId, [
+          {
+            resourceType: "project",
+            resourceId: data.id,
+            permissions: sourceGrant.permissions.filter((p) => p !== "create"),
+          },
+        ]);
+      }
+    }
     audit.recordAsync(auditContextFrom(c, organizationId, userId), {
       eventType: "project.updated",
       resourceType: "project",

@@ -53,7 +53,10 @@ const pkg = JSON.parse(readFileSync(join(CLI_DIR, "package.json"), "utf8")) as {
 // The release job runs on a tag push, so GITHUB_REF_NAME is the version tag
 // (e.g. v0.5.0); local builds fall back to v<version>. The asset name mirrors
 // the dashboard bundle's `openship-dashboard-<tag>.tar.gz`.
-const TAG = process.env.GITHUB_REF_NAME || `v${pkg.version}`;
+// `bun run` restores GitHub's actual ref name for child scripts, so a workflow
+// cannot reliably override GITHUB_REF_NAME for a branch-dispatched build.
+// Use a dedicated input for immutable compatibility-runtime assets.
+const TAG = process.env.OPENSHIP_RELEASE_TAG || process.env.GITHUB_REF_NAME || `v${pkg.version}`;
 const ASSET = `openship-cli-${TAG}.tar.gz`;
 
 if (!existsSync(join(DIST, "index.js"))) {

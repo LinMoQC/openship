@@ -623,6 +623,31 @@ services:
     expect(parsed.services[0]?.dependsOn).toEqual(["db", "cache"]);
   });
 
+  it("preserves dependency conditions and marks one-shot providers", () => {
+    const parsed = parseComposeFile(`
+services:
+  db:
+    image: postgres:16
+  migrate:
+    image: app
+    depends_on:
+      db:
+        condition: service_healthy
+  api:
+    image: app
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+`);
+    const migrate = parsed.services.find((service) => service.name === "migrate");
+    const api = parsed.services.find((service) => service.name === "api");
+    expect(migrate?.advanced?.runToCompletion).toBe(true);
+    expect(migrate?.advanced?.dependsOnConditions?.db?.condition).toBe("service_healthy");
+    expect(api?.advanced?.dependsOnConditions?.migrate?.condition).toBe(
+      "service_completed_successfully",
+    );
+  });
+
   it("extracts restart policy", () => {
     const parsed = parseComposeFile(`
 services:
@@ -746,6 +771,46 @@ services:
       "pgdata:/var/lib/postgresql/data",
       "./init.sql:/docker-entrypoint-initdb.d/init.sql:ro",
     ]);
+  });
+
+  it("resolves external Compose volume names without changing ordinary named volumes", () => {
+    const parsed = parseComposeFile(`
+services:
+  db:
+    image: postgres:16
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - cache:/cache
+volumes:
+  pgdata:
+    external: true
+    name: existing_prod_pgdata
+  cache: {}
+`);
+    expect(parsed.services[0]?.volumes).toEqual([
+      "existing_prod_pgdata:/var/lib/postgresql/data",
+      "cache:/cache",
+    ]);
+    expect(parsed.services[0]?.advanced?.externalVolumeNames).toEqual(["existing_prod_pgdata"]);
+  });
+
+  it("preserves a single external Compose network by its resolved daemon name", () => {
+    const parsed = parseComposeFile(
+      `
+services:
+  api:
+    image: ghcr.io/acme/api:release
+    networks: [magic-network]
+networks:
+  magic-network:
+    external: true
+    name: \${MAGIC_NETWORK_NAME}
+`,
+      { env: { MAGIC_NETWORK_NAME: "magic-prod_default" } },
+    );
+
+    expect(parsed.services[0]?.advanced?.externalNetworkName).toBe("magic-prod_default");
+    expect(parsed.unsupported.some((issue) => issue.field === "networks")).toBe(false);
   });
 
   it("folds long-form `read_only: true` into a :ro bind (read-only intent survives)", () => {

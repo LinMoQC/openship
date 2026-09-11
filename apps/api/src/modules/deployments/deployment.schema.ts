@@ -33,6 +33,29 @@ export const TriggerDeployBody = Type.Object({
   branch: Type.Optional(Type.String({ default: "main" })),
   commitSha: Type.Optional(Type.String()),
   environment: Type.Optional(Type.Union([Type.Literal("production"), Type.Literal("preview")])),
+  forceAll: Type.Optional(
+    Type.Boolean({
+      description: "Rebuild every enabled service. Mutually exclusive with serviceIds.",
+    }),
+  ),
+  serviceIds: Type.Optional(
+    Type.Array(Type.String({ minLength: 1 }), {
+      minItems: 1,
+      uniqueItems: true,
+      description:
+        "Only redeploy these service ids; services outside the list keep their current containers.",
+    }),
+  ),
+  smartRoute: Type.Optional(
+    Type.Boolean({
+      description: "Resolve the changed service set from the active deployment and source diff.",
+    }),
+  ),
+  refresh: Type.Optional(
+    Type.Boolean({
+      description: "Re-apply the active release and current environment without rebuilding it.",
+    }),
+  ),
 });
 
 /** Public endpoint (domain/route) as sent by the deploy wizard. */

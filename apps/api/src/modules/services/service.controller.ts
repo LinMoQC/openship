@@ -18,11 +18,13 @@ import { parseOptionalEnvironmentScope } from "../../lib/environment-scope";
 import { audit, auditContextFrom } from "../../lib/audit";
 import { sshManager } from "../../lib/ssh-manager";
 import * as serviceService from "./service.service";
+import { syncComposeDocument as syncDocument } from "./compose-sync.service";
 import { ServiceConfigStaleError } from "../deployments/env-drift";
 import type {
   TCreateServiceBody,
   TUpdateServiceBody,
   TSetServiceEnvVarsBody,
+  TSyncComposeDocumentBody,
 } from "./service.schema";
 
 // ─── List services for a project ─────────────────────────────────────────────
@@ -238,6 +240,20 @@ export async function activeContainers(c: Context) {
 }
 
 // ─── Sync from compose file ──────────────────────────────────────────────────
+
+export async function syncComposeDocument(c: Context) {
+  try {
+    const services = await syncDocument(
+      getRequestContext(c), param(c, "id"), await c.req.json<TSyncComposeDocumentBody>(),
+    );
+    return c.json({ success: true, services });
+  } catch (err) {
+    if (err instanceof AppError) {
+      return c.json({ success: false, error: err.message }, err.statusCode as 400 | 403 | 404);
+    }
+    return c.json({ success: false, error: "Compose document sync failed" }, 500);
+  }
+}
 
 export async function syncFromCompose(c: Context) {
   const ctx = getRequestContext(c);

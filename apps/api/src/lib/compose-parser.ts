@@ -177,6 +177,11 @@ export function parseComposeFile(
   const missingRequired = new Map<string, string | undefined>();
   missingRequiredSinks.set(interpolationEnv, missingRequired);
   const rawServices = doc.services ?? {};
+  const resolvedVolumeNames = parseResolvedVolumeNames(doc.volumes, interpolationEnv);
+  const resolvedExternalNetworkNames = parseResolvedExternalNetworkNames(
+    doc.networks,
+    interpolationEnv,
+  );
   const services: ComposeService[] = [];
   const unsupported: ComposeUnsupportedField[] = [];
 
@@ -208,7 +213,16 @@ export function parseComposeFile(
     // and therefore still treats an omitted buildArgs field as "no opinion".
     const hasEnvironmentDeclaration = Object.hasOwn(svc, "environment");
     const hasBuildDeclaration = Object.hasOwn(svc, "build");
-    const advanced: ComposeAdvanced | undefined =
+    const volumes = parseVolumes(svc.volumes, interpolationEnv, resolvedVolumeNames);
+    const dependsOnConditions = parseDependsOnConditions(svc.depends_on);
+    const externalVolumeNames = volumes
+      .map((volume) => volume.split(":", 1)[0])
+      .filter((source) => [...resolvedVolumeNames.values()].includes(source));
+    const externalNetworkName = resolveSingleExternalNetworkName(
+      svc.networks,
+      resolvedExternalNetworkNames,
+    );
+    let advanced: ComposeAdvanced | undefined =
       parsedAdvanced || imageTemplate || hasEnvironmentDeclaration || hasBuildDeclaration
         ? {
             ...(parsedAdvanced ?? {}),
@@ -221,7 +235,17 @@ export function parseComposeFile(
             }),
           }
         : undefined;
-    collectUnsupported(name, svc, unsupported, interpolationEnv);
+    if (dependsOnConditions || externalVolumeNames.length > 0 || externalNetworkName) {
+      advanced = {
+        ...(advanced ?? {}),
+        ...(dependsOnConditions && { dependsOnConditions }),
+        ...(externalVolumeNames.length > 0 && {
+          externalVolumeNames: [...new Set(externalVolumeNames)],
+        }),
+        ...(externalNetworkName && { externalNetworkName }),
+      };
+    }
+    collectUnsupported(name, svc, unsupported, interpolationEnv, resolvedExternalNetworkNames);
 
     services.push({
       name,
@@ -238,7 +262,7 @@ export function parseComposeFile(
       ...(Object.keys(environment.metadata).length > 0 && {
         environmentMeta: environment.metadata,
       }),
-      volumes: parseVolumes(svc.volumes, interpolationEnv),
+      volumes,
       ...parseCommand(svc.command, interpolationEnv),
       restart:
         typeof svc.restart === "string"
@@ -246,6 +270,18 @@ export function parseComposeFile(
           : undefined,
       ...(advanced && { advanced }),
     });
+  }
+
+  const completionTargets = new Set(
+    services.flatMap((service) =>
+      Object.entries(service.advanced?.dependsOnConditions ?? {})
+        .filter(([, value]) => value.condition === "service_completed_successfully")
+        .map(([name]) => name),
+    ),
+  );
+  for (const service of services) {
+    if (!completionTargets.has(service.name)) continue;
+    service.advanced = { ...(service.advanced ?? {}), runToCompletion: true };
   }
 
   const volumes = doc.volumes ? Object.keys(doc.volumes) : [];
@@ -422,6 +458,27 @@ function parseDependsOn(deps: unknown): string[] {
   return [];
 }
 
+function parseDependsOnConditions(
+  deps: unknown,
+): ComposeAdvanced["dependsOnConditions"] | undefined {
+  if (!deps || typeof deps !== "object" || Array.isArray(deps)) return undefined;
+  const result: NonNullable<ComposeAdvanced["dependsOnConditions"]> = {};
+  for (const [service, raw] of Object.entries(deps as Record<string, unknown>)) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const condition = (raw as Record<string, unknown>).condition;
+    if (
+      condition !== "service_started" &&
+      condition !== "service_healthy" &&
+      condition !== "service_completed_successfully"
+    ) {
+      continue;
+    }
+    const required = (raw as Record<string, unknown>).required;
+    result[service] = { condition, ...(typeof required === "boolean" ? { required } : {}) };
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
 function parseEnvironment(
   env: unknown,
   interpolationEnv: Record<string, string>,
@@ -512,17 +569,78 @@ export function inferComposeEnvironmentTemplates(
   return templates;
 }
 
-function parseVolumes(vols: unknown, env: Record<string, string>): string[] {
+function parseResolvedVolumeNames(raw: unknown, env: Record<string, string>): Map<string, string> {
+  const names = new Map<string, string>();
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return names;
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const def = value as Record<string, unknown>;
+    if (typeof def.name === "string") {
+      names.set(key, interpolateComposeString(def.name, env));
+    } else if (def.external === true) {
+      names.set(key, key);
+    }
+  }
+  return names;
+}
+
+function parseResolvedExternalNetworkNames(
+  raw: unknown,
+  env: Record<string, string>,
+): Map<string, string> {
+  const names = new Map<string, string>();
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return names;
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const def = value as Record<string, unknown>;
+    if (def.external !== true) continue;
+    names.set(key, typeof def.name === "string" ? interpolateComposeString(def.name, env) : key);
+  }
+  return names;
+}
+
+function composeNetworkNames(raw: unknown): string[] {
+  if (Array.isArray(raw)) return raw.filter((name): name is string => typeof name === "string");
+  if (raw && typeof raw === "object") return Object.keys(raw as Record<string, unknown>);
+  return [];
+}
+
+function resolveSingleExternalNetworkName(
+  raw: unknown,
+  resolved: ReadonlyMap<string, string>,
+): string | undefined {
+  const names = composeNetworkNames(raw);
+  if (names.length !== 1) return undefined;
+  return resolved.get(names[0]);
+}
+
+function replaceVolumeSource(spec: string, names: ReadonlyMap<string, string>): string {
+  const separator = spec.indexOf(":");
+  if (separator <= 0) return spec;
+  const source = spec.slice(0, separator);
+  const resolved = names.get(source);
+  return resolved ? `${resolved}${spec.slice(separator)}` : spec;
+}
+
+function parseVolumes(
+  vols: unknown,
+  env: Record<string, string>,
+  resolvedVolumeNames: ReadonlyMap<string, string> = new Map(),
+): string[] {
   if (!Array.isArray(vols)) return [];
   return vols.map((v) => {
-    if (typeof v === "string") return interpolateComposeString(v, env);
+    if (typeof v === "string") {
+      return replaceVolumeSource(interpolateComposeString(v, env), resolvedVolumeNames);
+    }
     if (v && typeof v === "object") {
       // Long form → short form via the SHARED fold. The CLI's sync mapper spelled
       // this itself and dropped `read_only`, turning every declared-read-only bind
       // into a writable one; one implementation is why that can't recur (#533).
-      const spec = composeMountToSpec(v as Record<string, unknown>, (s) =>
-        interpolateComposeString(s, env),
-      );
+      const mount = { ...(v as Record<string, unknown>) };
+      if (typeof mount.source === "string") {
+        mount.source = resolvedVolumeNames.get(mount.source) ?? mount.source;
+      }
+      const spec = composeMountToSpec(mount, (s) => interpolateComposeString(s, env));
       if (spec !== undefined) return spec;
     }
     return String(v);
@@ -745,6 +863,7 @@ function collectUnsupported(
   svc: Record<string, unknown>,
   unsupported: ComposeUnsupportedField[],
   env: Record<string, string>,
+  resolvedExternalNetworkNames: ReadonlyMap<string, string>,
 ): void {
   for (const [key, reason] of Object.entries(UNSUPPORTED_SERVICE_KEYS)) {
     if (!requestsSomething(svc[key])) continue;
@@ -773,12 +892,12 @@ function collectUnsupported(
   // project network, so the topology flattens. They still resolve each other by
   // name, which is why this is a warning rather than a refusal.
   const networks = svc.networks;
-  const networkNames = Array.isArray(networks)
-    ? networks.filter((n): n is string => typeof n === "string")
-    : networks && typeof networks === "object"
-      ? Object.keys(networks)
-      : [];
-  if (networkNames.length > 0) {
+  const networkNames = composeNetworkNames(networks);
+  const supportedExternalNetwork = resolveSingleExternalNetworkName(
+    networks,
+    resolvedExternalNetworkNames,
+  );
+  if (networkNames.length > 0 && !supportedExternalNetwork) {
     unsupported.push({
       service: serviceName,
       field: "networks",

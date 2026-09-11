@@ -19,6 +19,7 @@
 
 import { repos, type Service } from "@repo/db";
 import type { BackupExecutor, ServiceHandle } from "@repo/adapters";
+import type { ComposeAdvanced } from "@repo/core";
 import { decryptEnvMap } from "../../lib/encryption";
 
 /**
@@ -95,6 +96,9 @@ export async function serviceHandleFor(
     containerRunning: target.containerRunning ?? null,
     projectSlug: target.projectSlug,
     namespaceVolumes: serviceRow.namespaceVolumes,
+    externalVolumeNames: (
+      (serviceRow.advanced as ComposeAdvanced | null)?.externalVolumeNames ?? []
+    ).slice(),
   };
 }
 

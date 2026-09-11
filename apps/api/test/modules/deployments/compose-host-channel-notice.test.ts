@@ -32,6 +32,7 @@ const h = vi.hoisted(() => ({
   allocateAndReservePinnedHostPort: vi.fn(),
   releaseNewPinnedHostPortClaims: vi.fn(),
   reserveResolvedLoopbackRoutes: vi.fn(),
+  ensureEdge: vi.fn(),
   upsertServiceDeployment: vi.fn(),
   updateServiceDeployment: vi.fn(),
   services: [] as Array<Record<string, unknown>>,
@@ -41,6 +42,14 @@ const h = vi.hoisted(() => ({
     unknown
   >,
 }));
+
+vi.mock("@repo/adapters", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@repo/adapters")>();
+  return {
+    ...actual,
+    ensureEdge: (...args: unknown[]) => h.ensureEdge(...args),
+  };
+});
 
 vi.mock("@repo/db", () => ({
   repos: {
@@ -55,6 +64,7 @@ vi.mock("@repo/db", () => ({
       upsertServiceDeployment: (...args: unknown[]) => h.upsertServiceDeployment(...args),
       updateServiceDeployment: (...args: unknown[]) => h.updateServiceDeployment(...args),
       markServiceDeploymentFailed: async () => undefined,
+      markServiceDeploymentSkipped: async () => undefined,
     },
     deployment: {
       findById: async () => h.previousDeployment,
@@ -107,8 +117,31 @@ vi.mock("../../../src/modules/deployments/observed-host-port-claims", () => ({
 }));
 
 const { resolveServerExecutor } = await import("../../../src/lib/deployment-runtime");
-const { deployComposeServices } =
+const { deployComposeServices, externalNetworkForServices } =
   await import("../../../src/modules/deployments/compose/deploy.service");
+
+describe("externalNetworkForServices", () => {
+  it("requires one external network on every networked service", () => {
+    const services = [
+      { name: "db", advanced: { externalNetworkName: "magic-prod_default" } },
+      { name: "api", advanced: { externalNetworkName: "magic-prod_default" } },
+    ];
+    expect(externalNetworkForServices(services as never, new Set())).toBe("magic-prod_default");
+    expect(() =>
+      externalNetworkForServices(
+        [...services, { name: "worker", advanced: {} }] as never,
+        new Set(),
+      ),
+    ).toThrow("missing: worker");
+  });
+
+  it("drops the request only when the selected runtime declares it unsupported", () => {
+    const services = [{ name: "api", advanced: { externalNetworkName: "magic-prod_default" } }];
+    expect(externalNetworkForServices(services as never, new Set(["externalNetworkName"]))).toBe(
+      undefined,
+    );
+  });
+});
 
 /** Collects what the deploy log was told, in order. */
 function recordingLogger() {
@@ -162,6 +195,35 @@ function startingRuntime() {
       containerId: "container-new",
       ip: "172.18.0.3",
     })),
+    destroy: vi.fn(async () => undefined),
+    getContainerIp: vi.fn(async () => "172.18.0.3"),
+  } as unknown as MultiServiceRuntimeAdapter;
+}
+
+function conditionedRuntime(
+  events: string[],
+  failCompletion = false,
+  unsupportedKeys: string[] = [],
+) {
+  return {
+    name: "docker",
+    unsupportedComposeKeys: new Set(unsupportedKeys),
+    supports: (capability: string) => capability === "containerIp",
+    ensureServiceGroup: vi.fn(async () => ({ id: "group-1" })),
+    deployServiceWorkload: vi.fn(async (_group, config) => {
+      events.push(`deploy:${config.serviceName}`);
+      return {
+        status: "running",
+        containerId: `container-${config.serviceName}`,
+        ip: "172.18.0.3",
+      };
+    }),
+    waitForServiceCondition: vi.fn(async (containerId, condition) => {
+      events.push(`wait:${containerId}:${condition}`);
+      if (failCompletion && condition === "service_completed_successfully") {
+        throw new Error("migration exited with code 1");
+      }
+    }),
     destroy: vi.fn(async () => undefined),
     getContainerIp: vi.fn(async () => "172.18.0.3"),
   } as unknown as MultiServiceRuntimeAdapter;
@@ -237,6 +299,7 @@ beforeEach(() => {
   }));
   h.releaseNewPinnedHostPortClaims.mockResolvedValue(0);
   h.reserveResolvedLoopbackRoutes.mockResolvedValue([]);
+  h.ensureEdge.mockResolvedValue({ ok: true, migrated: false });
   h.convergeTargetHostPortClaims.mockResolvedValue({ released: 0, retained: [] });
   h.convergeTargetHostPortClaimsUnlocked.mockResolvedValue({ released: 0, retained: [] });
   h.upsertServiceDeployment.mockResolvedValue(undefined);
@@ -271,6 +334,240 @@ function addDisabledPreviousService() {
 }
 
 describe("compose deploy — host channel unavailable", () => {
+  it("does not prepare Edge when every service is private", async () => {
+    h.services = [
+      {
+        id: "svc-private",
+        projectId: "p1",
+        name: "private",
+        enabled: true,
+        dependsOn: [],
+        advanced: null,
+        ports: ["127.0.0.1:19081:80"],
+        image: "nginx:alpine",
+        exposed: false,
+        publicEndpoints: [],
+      },
+    ];
+    h.previousServiceRows = [];
+    const system = { ensureFeature: vi.fn(async () => undefined) };
+    const { logger } = recordingLogger();
+
+    const result = await deployComposeServices(
+      { ...project, activeDeploymentId: null, routeStrategy: "loopback-port" } as never,
+      dep,
+      startingRuntime(),
+      logger,
+      {
+        executor: { exec: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })) } as never,
+        hostPortTarget: localHostPortTarget,
+        system: system as never,
+      },
+    );
+
+    expect(result.status).toBe("ready");
+    expect(system.ensureFeature).toHaveBeenCalledTimes(1);
+    expect(system.ensureFeature).toHaveBeenCalledWith("deploy", expect.any(Function));
+    expect(h.ensureEdge).not.toHaveBeenCalled();
+    expect(h.prepareTargetPinnedHostPorts).not.toHaveBeenCalled();
+  });
+
+  it("waits for healthy state and a successful one-shot migration before starting dependents", async () => {
+    h.services = [
+      {
+        id: "svc-db",
+        projectId: "p1",
+        name: "db",
+        enabled: true,
+        dependsOn: [],
+        advanced: { healthcheck: { test: ["CMD", "pg_isready"] } },
+        ports: [],
+        image: "postgres:16",
+        exposed: false,
+      },
+      {
+        id: "svc-migrate",
+        projectId: "p1",
+        name: "migrate",
+        enabled: true,
+        dependsOn: ["db"],
+        advanced: {
+          dependsOnConditions: { db: { condition: "service_healthy", required: true } },
+          runToCompletion: true,
+        },
+        ports: [],
+        image: "ghcr.io/acme/app:release",
+        exposed: false,
+      },
+      {
+        id: "svc-app",
+        projectId: "p1",
+        name: "app",
+        enabled: true,
+        dependsOn: ["migrate"],
+        advanced: {
+          dependsOnConditions: {
+            migrate: { condition: "service_completed_successfully", required: true },
+          },
+        },
+        ports: [],
+        image: "ghcr.io/acme/app:release",
+        exposed: false,
+      },
+    ];
+    h.previousServiceRows = [];
+    const events: string[] = [];
+    const { logger } = recordingLogger();
+
+    const result = await deployComposeServices(
+      { ...project, activeDeploymentId: null, routeStrategy: "container-ip" } as never,
+      dep,
+      conditionedRuntime(events),
+      logger,
+    );
+
+    expect(result.status).toBe("ready");
+    expect(events).toEqual([
+      "deploy:db",
+      "wait:container-db:service_healthy",
+      "deploy:migrate",
+      "wait:container-migrate:service_completed_successfully",
+      "deploy:app",
+    ]);
+    expect(result.services.find((service) => service.serviceName === "migrate")?.status).toBe(
+      "completed",
+    );
+  });
+
+  it("reuses an established migration result during a later app-only deployment", async () => {
+    h.services = [
+      {
+        id: "svc-migrate",
+        projectId: "p1",
+        name: "migrate",
+        enabled: true,
+        dependsOn: [],
+        advanced: { runToCompletion: true },
+        ports: [],
+        image: "ghcr.io/acme/app:release",
+        exposed: false,
+      },
+      {
+        id: "svc-app",
+        projectId: "p1",
+        name: "app",
+        enabled: true,
+        dependsOn: ["migrate"],
+        advanced: {
+          dependsOnConditions: {
+            migrate: { condition: "service_completed_successfully", required: true },
+          },
+        },
+        ports: [],
+        image: "ghcr.io/acme/app:release",
+        exposed: false,
+      },
+    ];
+    h.previousServiceRows = [];
+    const events: string[] = [];
+    const { logger } = recordingLogger();
+
+    const result = await deployComposeServices(
+      { ...project, activeDeploymentId: "d-old", routeStrategy: "container-ip" } as never,
+      dep,
+      conditionedRuntime(events),
+      logger,
+      { targetServiceIds: new Set(["svc-app"]) },
+    );
+
+    expect(result.status).toBe("ready");
+    expect(events).toEqual(["deploy:app"]);
+    expect(result.services.find((service) => service.serviceName === "migrate")).toMatchObject({
+      status: "completed",
+      carried: true,
+    });
+  });
+
+  it("does not start an app when its one-shot migration fails", async () => {
+    h.services = [
+      {
+        id: "svc-migrate",
+        projectId: "p1",
+        name: "migrate",
+        enabled: true,
+        dependsOn: [],
+        advanced: { runToCompletion: true },
+        ports: [],
+        image: "ghcr.io/acme/app:release",
+        exposed: false,
+      },
+      {
+        id: "svc-app",
+        projectId: "p1",
+        name: "app",
+        enabled: true,
+        dependsOn: ["migrate"],
+        advanced: {
+          dependsOnConditions: {
+            migrate: { condition: "service_completed_successfully", required: true },
+          },
+        },
+        ports: [],
+        image: "ghcr.io/acme/app:release",
+        exposed: false,
+      },
+    ];
+    h.previousServiceRows = [];
+    const events: string[] = [];
+    const runtime = conditionedRuntime(events, true);
+    const { logger } = recordingLogger();
+
+    const result = await deployComposeServices(
+      { ...project, activeDeploymentId: null, routeStrategy: "container-ip" } as never,
+      dep,
+      runtime,
+      logger,
+    );
+
+    expect(result.status).toBe("failed");
+    expect(events).toEqual([
+      "deploy:migrate",
+      "wait:container-migrate:service_completed_successfully",
+    ]);
+    expect(vi.mocked(runtime.destroy)).toHaveBeenCalledWith("container-migrate");
+    expect(result.services.find((service) => service.serviceName === "app")?.status).toBe("failed");
+  });
+
+  it("keeps unsupported one-shot semantics advisory instead of failing activation", async () => {
+    h.services = [
+      {
+        id: "svc-task",
+        projectId: "p1",
+        name: "task",
+        enabled: true,
+        dependsOn: [],
+        advanced: { runToCompletion: true },
+        ports: [],
+        image: "ghcr.io/acme/task:release",
+        exposed: false,
+      },
+    ];
+    h.previousServiceRows = [];
+    const events: string[] = [];
+    const { logger } = recordingLogger();
+
+    const result = await deployComposeServices(
+      { ...project, activeDeploymentId: null, routeStrategy: "container-ip" } as never,
+      dep,
+      conditionedRuntime(events, false, ["runToCompletion"]),
+      logger,
+    );
+
+    expect(result.status).toBe("ready");
+    expect(events).toEqual(["deploy:task"]);
+    expect(result.services[0]?.status).toBe("running");
+  });
+
   it("aborts an exact cohort before activation when a later service is missing required env", async () => {
     const runtime = startingRuntime();
     const deployServiceWorkload = vi.mocked(runtime.deployServiceWorkload);

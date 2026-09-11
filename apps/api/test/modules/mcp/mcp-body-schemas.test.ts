@@ -4,7 +4,7 @@ import type { TSchema } from "@sinclair/typebox";
 import { SetSleepModeBody, LinkRepoBody, SetOptionsBody } from "../../../src/modules/projects/project.schema";
 import { CreateChannelBody, UpsertSubscriptionBody } from "../../../src/modules/notifications/notification.schema";
 import { CreateConnectionBody, CreateBundleBody } from "../../../src/modules/projects/project-connection.schema";
-import { PrepareDeployBody, BuildRespondBody } from "../../../src/modules/deployments/deployment.schema";
+import { TriggerDeployBody, PrepareDeployBody, BuildRespondBody } from "../../../src/modules/deployments/deployment.schema";
 
 /**
  * The MCP write-tool body schemas are wired via `spec.body`, so they both
@@ -65,5 +65,25 @@ describe("MCP write-tool body schemas", () => {
     expect(ok(PrepareDeployBody, { source: "svn" })).toBe(false);
     expect(ok(BuildRespondBody, { action: "approve" })).toBe(true);
     expect(ok(BuildRespondBody, {})).toBe(false);
+  });
+
+  it("TriggerDeployBody exposes safe targeted redeploy controls to MCP", () => {
+    expect(ok(TriggerDeployBody, {
+      projectId: "project-1",
+      environment: "production",
+      serviceIds: ["service-app"],
+      refresh: true,
+    })).toBe(true);
+    expect(ok(TriggerDeployBody, { projectId: "project-1", forceAll: true })).toBe(true);
+    expect(ok(TriggerDeployBody, { projectId: "project-1", smartRoute: true })).toBe(true);
+    expect(ok(TriggerDeployBody, { projectId: "project-1", serviceIds: [] })).toBe(false);
+    expect(ok(TriggerDeployBody, {
+      projectId: "project-1",
+      serviceIds: ["service-app", "service-app"],
+    })).toBe(false);
+    expect(ok(TriggerDeployBody, { projectId: "project-1", refresh: "yes" })).toBe(false);
+    expect(TriggerDeployBody.properties).toHaveProperty("serviceIds");
+    expect(TriggerDeployBody.properties).toHaveProperty("refresh");
+    expect(TriggerDeployBody.properties).not.toHaveProperty("trigger");
   });
 });

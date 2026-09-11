@@ -118,7 +118,10 @@ describe("serviceHandleFor", () => {
     );
     expect(handle.env.POSTGRES_DB).toBe("inline-compose");
 
-    h.envVars = [projectVar("POSTGRES_DB", "project-level"), serviceVar("POSTGRES_DB", "service-scoped")];
+    h.envVars = [
+      projectVar("POSTGRES_DB", "project-level"),
+      serviceVar("POSTGRES_DB", "service-scoped"),
+    ];
     handle = await serviceHandleFor(
       serviceRow({ environment: { POSTGRES_DB: "inline-compose" } }),
       TARGET,
@@ -196,10 +199,7 @@ describe("serviceHandleFor", () => {
   });
 
   it("reads a null environment and a null volumes column as empty", async () => {
-    const handle = await serviceHandleFor(
-      serviceRow({ environment: null, volumes: null }),
-      TARGET,
-    );
+    const handle = await serviceHandleFor(serviceRow({ environment: null, volumes: null }), TARGET);
 
     expect(handle.env).toEqual({});
     expect(handle.volumes).toEqual([]);
@@ -215,6 +215,15 @@ describe("serviceHandleFor", () => {
 
     expect(handle.containerId).toBeNull();
     expect(handle.projectSlug).toBe("shop");
+  });
+
+  it("carries Compose-resolved external volume names to the backup executor", async () => {
+    const handle = await serviceHandleFor(
+      serviceRow({ advanced: { externalVolumeNames: ["magic_prod_postgres"] } }),
+      TARGET,
+    );
+
+    expect(handle.externalVolumeNames).toEqual(["magic_prod_postgres"]);
   });
 });
 

@@ -26,6 +26,7 @@ import {
   CreateServiceBody,
   SetServiceEnvVarsBody,
   SyncServicesBody,
+  SyncComposeDocumentBody,
   UpdateServiceBody,
 } from "./service.schema";
 
@@ -76,6 +77,17 @@ r.post(
   },
   cloudProjectProxy,
   ctrl.syncFromCompose,
+);
+r.post(
+  "/sync-compose",
+  {
+    tag: "project:service:write",
+    collection: true,
+    body: SyncComposeDocumentBody,
+    mcp: { description: "Sync a complete digest-locked Compose document using this project's stored environment, without returning secrets. Does not deploy containers." },
+  },
+  cloudProjectProxy,
+  ctrl.syncComposeDocument,
 );
 r.get(
   "/:serviceId",

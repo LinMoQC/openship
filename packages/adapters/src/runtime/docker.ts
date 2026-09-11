@@ -3807,6 +3807,36 @@ export class DockerRuntime implements RuntimeAdapter {
     };
   }
 
+  async waitForServiceCondition(
+    containerId: string,
+    condition: "service_started" | "service_healthy" | "service_completed_successfully",
+    timeoutMs = 120_000,
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    const container = this.docker.getContainer(containerId);
+    while (Date.now() < deadline) {
+      const state = (await container.inspect()).State;
+      if (condition === "service_started") {
+        if (state.Running) return;
+        throw new Error(`Dependency container exited before it reached service_started`);
+      }
+      if (condition === "service_healthy") {
+        const health = state.Health?.Status;
+        if (health === "healthy") return;
+        if (!state.Running) {
+          throw new Error(`Dependency container exited before it became healthy`);
+        }
+        if (!health) throw new Error(`Dependency declares service_healthy without a healthcheck`);
+        if (health === "unhealthy") throw new Error(`Dependency container became unhealthy`);
+      } else if (!state.Running) {
+        if (state.ExitCode === 0) return;
+        throw new Error(`Dependency task exited with code ${state.ExitCode ?? "unknown"}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    throw new Error(`Timed out waiting for dependency condition ${condition}`);
+  }
+
   /**
    * Containers labeled for this deployment, with live state — the reconcile
    * read-back. `State` is dockerode's `running | exited | paused | ...`; map it
@@ -4853,8 +4883,8 @@ export class DockerRuntime implements RuntimeAdapter {
    * All services in a compose project share this network and can
    * reach each other by service name as hostname.
    */
-  async ensureNetwork(slug: string): Promise<string> {
-    const networkName = `openship-${slug}`;
+  async ensureNetwork(slug: string, externalNetworkName?: string): Promise<string> {
+    const networkName = externalNetworkName || `openship-${slug}`;
     // list-then-create is check-then-act: two concurrent deploys for the same
     // slug would both miss and both create, yielding two networks with the same
     // name (Docker allows it) and ambiguous name lookups. Serialize per server.
@@ -4866,6 +4896,10 @@ export class DockerRuntime implements RuntimeAdapter {
       // listNetworks does substring matching, verify exact name
       const existing = networks.find((n) => n.Name === networkName);
       if (existing) return existing.Id;
+
+      if (externalNetworkName) {
+        throw new Error(`Required external Docker network "${externalNetworkName}" does not exist`);
+      }
 
       const network = await this.docker.createNetwork({
         Name: networkName,
@@ -4881,9 +4915,10 @@ export class DockerRuntime implements RuntimeAdapter {
     deploymentId: string;
     projectId: string;
     slug: string;
+    externalNetworkName?: string;
   }): Promise<MultiServiceGroupHandle> {
     void config.deploymentId;
-    const networkId = await this.ensureNetwork(config.slug);
+    const networkId = await this.ensureNetwork(config.slug, config.externalNetworkName);
     // Self-heal network membership. A container joins the network only at
     // CREATE time (see deployServiceWorkload). Normal/partial/smart redeploys
     // are fine — the network is reused by name so its id is stable and
@@ -5186,7 +5221,12 @@ export class DockerRuntime implements RuntimeAdapter {
     if (!config.namespaceVolumes) {
       await this.assertNoForeignNamedVolumeCollision(config);
     }
-    const scopedBinds = scopeVolumeBinds(config.slug, config.volumes, config.namespaceVolumes);
+    const scopedBinds = scopeVolumeBinds(
+      config.slug,
+      config.volumes,
+      config.namespaceVolumes,
+      config.advanced?.externalVolumeNames,
+    );
     const binds = scopedBinds.length > 0 ? scopedBinds : undefined;
     const restartPolicy = resolveRestartPolicy(config.restart);
     const healthcheck = toDockerHealthcheck(config.advanced?.healthcheck);

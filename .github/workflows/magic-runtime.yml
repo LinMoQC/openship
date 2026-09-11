@@ -1,0 +1,150 @@
+name: Magic runtime bundle
+
+on:
+  push:
+    tags:
+      - "magic-runtime-*"
+  workflow_dispatch: {}
+
+concurrency:
+  group: magic-runtime-${{ github.sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  gate:
+    name: Release gate
+    uses: ./.github/workflows/release-gate.yml
+
+  package:
+    name: Build pinned CLI and server bundle
+    needs: gate
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Read Bun version
+        id: bun-version
+        run: echo "version=$(cat .bun-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ steps.bun-version.outputs.version }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      - name: Restore Bun cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Derive immutable runtime identity
+        id: runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          short_sha="${GITHUB_SHA:0:12}"
+          tag="magic-runtime-${short_sha}"
+          version="0.7.2-magic.${short_sha}"
+          node -e '
+            const fs = require("node:fs");
+            const path = "apps/cli/package.json";
+            const pkg = JSON.parse(fs.readFileSync(path, "utf8"));
+            pkg.version = process.argv[1];
+            fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + "\n");
+          ' "$version"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build self-contained CLI and server payload
+        env:
+          OPENSHIP_RELEASE_TAG: ${{ steps.runtime.outputs.tag }}
+        run: bun run --cwd apps/cli build:payload
+
+      - name: Build matching dashboard bundle
+        env:
+          NODE_ENV: production
+          CLOUD_MODE: "false"
+          OPENSHIP_TARGET: local
+          NEXT_PUBLIC_API_PROXY: "true"
+        run: bun run --cwd apps/dashboard build
+
+      - name: Package matching dashboard bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.runtime.outputs.tag }}"
+          staging="dashboard-dist"
+          artifact="openship-dashboard-${tag}.tar.gz"
+          rm -rf "$staging"
+          mkdir -p "$staging"
+          cp -a apps/dashboard/.next/standalone/. "$staging"/
+          mkdir -p "$staging/apps/dashboard/.next"
+          cp -a apps/dashboard/.next/static "$staging/apps/dashboard/.next/static"
+          if [ -d apps/dashboard/public ]; then
+            cp -a apps/dashboard/public "$staging/apps/dashboard/public"
+          fi
+          cp apps/dashboard/standalone-server.mjs "$staging/apps/dashboard/standalone-server.mjs"
+          tar -czf "$artifact" -C "$staging" .
+          sha256sum "$artifact" > "$artifact.sha256"
+
+      - name: Verify artifact identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset="apps/cli/.cli-payload/openship-cli-${{ steps.runtime.outputs.tag }}.tar.gz"
+          dashboard_asset="openship-dashboard-${{ steps.runtime.outputs.tag }}.tar.gz"
+          test -f "$asset"
+          test -f "$asset.sha256"
+          test -f "$dashboard_asset"
+          test -f "$dashboard_asset.sha256"
+          (cd "$(dirname "$asset")" && sha256sum --check "$(basename "$asset").sha256")
+          sha256sum --check "$dashboard_asset.sha256"
+          mkdir -p /tmp/openship-dashboard-check
+          tar -xzf "$dashboard_asset" -C /tmp/openship-dashboard-check
+          test -f /tmp/openship-dashboard-check/apps/dashboard/server.js
+          mkdir -p /tmp/openship-runtime-check
+          tar -xzf "$asset" -C /tmp/openship-runtime-check
+          actual="$(node /tmp/openship-runtime-check/dist/index.js --version)"
+          test "$actual" = "${{ steps.runtime.outputs.version }}"
+
+      - name: Publish immutable prerelease assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUNTIME_TAG: ${{ steps.runtime.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset="apps/cli/.cli-payload/openship-cli-${RUNTIME_TAG}.tar.gz"
+          dashboard_asset="openship-dashboard-${RUNTIME_TAG}.tar.gz"
+          if gh release view "$RUNTIME_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RUNTIME_TAG" \
+              "$asset" "$asset.sha256" \
+              "$dashboard_asset" "$dashboard_asset.sha256" \
+              --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$RUNTIME_TAG" \
+              "$asset" "$asset.sha256" \
+              "$dashboard_asset" "$dashboard_asset.sha256" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --prerelease \
+              --title "Magic OpenShip runtime ${GITHUB_SHA:0:12}" \
+              --notes "Pinned OpenShip 0.7.2 compatibility runtime for Magic Resume. Built from ${GITHUB_SHA}."
+          fi

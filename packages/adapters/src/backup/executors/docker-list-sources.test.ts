@@ -123,6 +123,15 @@ describe("DockerBackupExecutor.listSources", () => {
     expect(sources.map((s) => s.source)).toEqual(["openship-clincai-pgdata"]);
   });
 
+  it("preserves an explicitly external volume name in the DB fallback", async () => {
+    const sources = await executor.listSources(
+      handle(["magic_prod_postgres:/var/lib/postgresql/data"], {
+        externalVolumeNames: ["magic_prod_postgres"],
+      }),
+    );
+    expect(sources.map((s) => s.source)).toEqual(["magic_prod_postgres"]);
+  });
+
   it("leaves bind mounts and grandfathered services alone", async () => {
     const fallback = executorForDeclaredBinds({}, new Set(["/srv/data"]));
     const binds = await fallback.executor.listSources(handle(["/srv/data:/data"]));

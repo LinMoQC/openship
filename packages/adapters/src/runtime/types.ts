@@ -601,6 +601,7 @@ export interface MultiServiceRuntimeAdapter extends RuntimeAdapter {
     projectId: string;
     slug: string;
     resources?: ResourceConfig;
+    externalNetworkName?: string;
   }): Promise<MultiServiceGroupHandle>;
 
   /** Deploy one service workload into a prepared group */
@@ -609,6 +610,13 @@ export interface MultiServiceRuntimeAdapter extends RuntimeAdapter {
     config: MultiServiceDeployConfig,
     onLog?: LogCallback,
   ): Promise<MultiServiceDeployResult>;
+
+  /** Wait for a Compose dependency condition on an already-created workload. */
+  waitForServiceCondition?(
+    containerId: string,
+    condition: "service_started" | "service_healthy" | "service_completed_successfully",
+    timeoutMs?: number,
+  ): Promise<void>;
 
   /**
    * Optional batch build: clone/prune the shared source ONCE and build every

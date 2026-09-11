@@ -276,6 +276,60 @@ export function effectiveDependencies(svc: Pick<Service, "dependsOn" | "advanced
     : [...declared, ...namespaces.filter((n) => !declared.includes(n))];
 }
 
+function dependencyCondition(
+  svc: Pick<Service, "advanced">,
+  serviceName: string,
+): {
+  condition: "service_started" | "service_healthy" | "service_completed_successfully";
+  required: boolean;
+} {
+  const configured = (svc.advanced as ComposeAdvanced | null)?.dependsOnConditions?.[serviceName];
+  return {
+    condition: configured?.condition ?? "service_started",
+    required: configured?.required !== false,
+  };
+}
+
+/** Resolve the one external network a Compose service group can faithfully use. */
+export function externalNetworkForServices(
+  services: Array<Pick<Service, "name" | "advanced">>,
+  unsupportedKeys: ReadonlySet<keyof ComposeAdvanced>,
+): string | undefined {
+  if (unsupportedKeys.has("externalNetworkName")) return undefined;
+
+  const endpointOwners = services.filter(
+    (service) => !(service.advanced as ComposeAdvanced | null)?.networkMode,
+  );
+  const requested = new Set(
+    endpointOwners
+      .map(
+        (service) =>
+          (service.advanced as ComposeAdvanced | null)?.externalNetworkName?.trim() || undefined,
+      )
+      .filter((name): name is string => !!name),
+  );
+  if (requested.size === 0) return undefined;
+  if (requested.size > 1) {
+    throw new Error(
+      "Compose services request multiple external networks; one shared network is required",
+    );
+  }
+
+  const [name] = requested;
+  const missing = endpointOwners
+    .filter(
+      (service) =>
+        (service.advanced as ComposeAdvanced | null)?.externalNetworkName?.trim() !== name,
+    )
+    .map((service) => service.name);
+  if (missing.length > 0) {
+    throw new Error(
+      `External network "${name}" must be selected by every networked service; missing: ${missing.join(", ")}`,
+    );
+  }
+  return name;
+}
+
 export function topoSort(services: Service[]): Service[] {
   const byName = new Map(services.map((s) => [s.name, s]));
   const sorted: Service[] = [];
@@ -1044,11 +1098,17 @@ async function deployComposeServicesUnlocked(
 
   logger.log("Preparing shared service group for project services...\n");
 
+  const externalNetworkName = externalNetworkForServices(
+    ordered,
+    runtime.unsupportedComposeKeys ?? new Set(),
+  );
+
   const group = await runtime.ensureServiceGroup({
     deploymentId: dep.id,
     projectId: project.id,
     slug: project.slug,
     resources: opts?.resources,
+    externalNetworkName,
   });
   logger.log(`Service group ready for ${project.slug}.\n`);
   throwIfDeploymentCancelled(opts?.signal);
@@ -1105,14 +1165,17 @@ async function deployComposeServicesUnlocked(
         usesManagedRouting: opts.usesManagedRouting ?? false,
       }),
     ];
-    const needsStrictLoopbackInventory = usesHostLoopback && Boolean(opts.executor);
-
     await opts.system.ensureFeature("deploy", systemLog);
     // Routing/SSL toolchain is best-effort — domains are optional, so failing to
     // install OpenResty/certbot must NOT fail the deploy. The services still run;
     // routing is flagged action-required and retried later.
     try {
-      if (plannedRoutes.length > 0 || needsStrictLoopbackInventory) {
+      // A private Compose stack may publish an operator-owned loopback port
+      // without asking Openship to route it. Preparing Edge in that case would
+      // demand control of 80/443 even though there is no route to register.
+      // Host-port allocation below already checks the exact routed-port set, so
+      // Edge inventory is needed only when this deployment actually has routes.
+      if (plannedRoutes.length > 0) {
         // Components + edge convergence as ONE step — see ensureRoutingReady for why
         // the second half can't live inside ensureFeature. Without an executor
         // there's no box to converge (cloud), so components alone are correct.
@@ -1592,6 +1655,10 @@ async function deployComposeServicesUnlocked(
    */
   const registeredRoutes: PlannedRouteDomain[] = [];
   const unavailableServiceNames = new Set<string>();
+  /** One-shot services whose successful completion is already established for
+   * this release. A scoped deploy can reuse that fact without requiring the
+   * exited task container to stay around forever. */
+  const satisfiedCompletionServiceNames = new Set<string>();
   /**
    * serviceName → the container id currently backing it, for resolving a sibling's
    * `network_mode: service:<name>` / `pid: service:<name>`. Filled as each service
@@ -1787,7 +1854,7 @@ async function deployComposeServicesUnlocked(
   }
 
   const pinnedHostPortClaims =
-    usesHostLoopback && opts?.executor
+    usesHostLoopback && opts?.executor && hostLoopbackRoutePortDemands.size > 0
       ? hostPortTarget
         ? await prepareTargetPinnedHostPorts({
             target: hostPortTarget,
@@ -2206,6 +2273,40 @@ async function deployComposeServicesUnlocked(
       // Ownership guard - ensure this service actually belongs to the project
       if (svc.projectId !== project.id) continue;
 
+      const advanced = svc.advanced as ComposeAdvanced | null;
+      const runToCompletion =
+        advanced?.runToCompletion === true &&
+        !runtime.unsupportedComposeKeys.has("runToCompletion");
+      if (
+        project.activeDeploymentId &&
+        runToCompletion &&
+        opts?.targetServiceIds &&
+        !opts.targetServiceIds.has(svc.id)
+      ) {
+        await repos.service.markServiceDeploymentSkipped({
+          deploymentId: dep.id,
+          serviceId: svc.id,
+          serviceName: svc.name,
+          reason: "One-shot task was not selected for this deployment.",
+        });
+        results.push({
+          serviceId: svc.id,
+          serviceName: svc.name,
+          status: "completed",
+          carried: true,
+        });
+        satisfiedCompletionServiceNames.add(svc.name);
+        successful += 1;
+        logger.log(
+          `Service "${svc.name}" is a one-shot task and was not selected — leaving it completed.\n`,
+          "info",
+          {
+            serviceName: svc.name,
+          },
+        );
+        continue;
+      }
+
       // Leave a service running exactly as-is (carry its previous runtime row
       // forward under THIS deployment id) instead of recreating it, in three cases:
       //   1. Smart (partial) redeploy — it's not in the target subset.
@@ -2474,11 +2575,46 @@ async function deployComposeServicesUnlocked(
 
       // Includes the namespace provider: a service whose netns/pidns host failed is
       // not "degraded", it cannot be created at all.
-      const blockedDependencies = effectiveDependencies(svc).filter((dependency) =>
-        unavailableServiceNames.has(dependency),
+      const dependencies = effectiveDependencies(svc);
+      const blockedDependencies = dependencies.filter(
+        (dependency) =>
+          dependencyCondition(svc, dependency).required && unavailableServiceNames.has(dependency),
       );
-      if (blockedDependencies.length > 0) {
-        const message = `Skipped because required service${blockedDependencies.length === 1 ? "" : "s"} ${blockedDependencies.join(", ")} did not deploy.`;
+      let dependencyFailure =
+        blockedDependencies.length > 0
+          ? `Skipped because required service${blockedDependencies.length === 1 ? "" : "s"} ${blockedDependencies.join(", ")} did not deploy.`
+          : undefined;
+      if (!dependencyFailure && !runtime.unsupportedComposeKeys.has("dependsOnConditions")) {
+        for (const dependency of dependencies) {
+          const rule = dependencyCondition(svc, dependency);
+          if (rule.condition === "service_started") continue;
+          if (
+            rule.condition === "service_completed_successfully" &&
+            satisfiedCompletionServiceNames.has(dependency)
+          ) {
+            continue;
+          }
+          const containerId = containerIdByServiceName.get(dependency);
+          if (!containerId) {
+            if (!rule.required) continue;
+            dependencyFailure = `Required service ${dependency} has no workload to satisfy ${rule.condition}.`;
+            break;
+          }
+          if (!runtime.waitForServiceCondition) {
+            dependencyFailure = `Runtime cannot verify ${rule.condition} for required service ${dependency}.`;
+            break;
+          }
+          try {
+            await runtime.waitForServiceCondition(containerId, rule.condition);
+          } catch (error) {
+            if (!rule.required) continue;
+            dependencyFailure = `Required service ${dependency} did not satisfy ${rule.condition}: ${safeErrorMessage(error)}`;
+            break;
+          }
+        }
+      }
+      if (dependencyFailure) {
+        const message = dependencyFailure;
         logger.log(`Service "${svc.name}" skipped: ${message}\n`, "warn", {
           serviceName: svc.name,
         });
@@ -3100,8 +3236,21 @@ async function deployComposeServicesUnlocked(
                   serviceName: entry.serviceName ?? svc.name,
                 }),
             );
+            // Runtime ownership starts as soon as Docker returns the container.
+            // Record it before waiting on a one-shot task so a failed migration
+            // can still be destroyed by the ordinary activation rollback path.
             deployedContainerId = result.containerId;
             serviceResult = result;
+            if (runToCompletion) {
+              if (!runtime.waitForServiceCondition) {
+                throw new Error("Runtime cannot verify a one-shot service result");
+              }
+              await runtime.waitForServiceCondition(
+                result.containerId,
+                "service_completed_successfully",
+              );
+              result.status = "completed";
+            }
             return { containerId: result.containerId };
           },
           deactivate: (containerId) => runtime.destroy(containerId),
@@ -3265,8 +3414,9 @@ async function deployComposeServicesUnlocked(
         // Now resolvable as a namespace provider for the services after it. Set only
         // on success: a dependent must never be pointed at a container that failed.
         if (result.containerId) containerIdByServiceName.set(svc.name, result.containerId);
+        if (runToCompletion) satisfiedCompletionServiceNames.add(svc.name);
         successful += 1;
-        if (result.containerId) {
+        if (result.containerId && !runToCompletion) {
           stabilityTargets.push({
             serviceId: svc.id,
             serviceName: svc.name,
