@@ -174,7 +174,7 @@ export const ProjectSidebar = () => {
         <div className="mt-4 space-y-3">
           <div className="flex items-center justify-between gap-4">
             <span className="text-sm text-muted-foreground">
-              {isLocal ? t.projects.sidebar.local : t.projects.sidebar.production}
+              {isLocal ? t.projects.sidebar.local : (projectData.environmentName || t.projects.sidebar.production)}
             </span>
             {canOpen ? (
               <div className="flex min-w-0 items-center gap-1.5">

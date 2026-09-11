@@ -1547,7 +1547,7 @@ export async function ensureProject(data: EnsureProjectBody, organizationId: str
  */
 export async function listProjects(
   organizationId: string,
-  opts?: { page?: number; perPage?: number },
+  opts?: { page?: number; perPage?: number; includeEnvironments?: boolean; visibleProjectIds?: ReadonlySet<string> | null },
 ) {
   const page = opts?.page ?? 1;
   const perPage = opts?.perPage ?? 20;
@@ -1561,6 +1561,7 @@ export async function listProjects(
 
   const byGroup = new Map<string, Project[]>();
   for (const p of projects) {
+    if (opts?.visibleProjectIds && !opts.visibleProjectIds.has(p.id)) continue;
     const list = byGroup.get(p.groupId) ?? [];
     list.push(p);
     byGroup.set(p.groupId, list);
@@ -1574,7 +1575,15 @@ export async function listProjects(
   const start = (page - 1) * perPage;
   const rows = displays.slice(start, start + perPage);
 
-  return { rows, total: displays.length, page, perPage };
+  // Internal rows for the home controller's existing batch enrichment. Never
+  // serialize these raw siblings; its response uses an explicit status allowlist.
+  const environmentRows = opts?.includeEnvironments
+    ? rows.flatMap(p => [...(byGroup.get(p.groupId) ?? [])].sort((a, b) =>
+        Number(b.environmentSlug === "production") - Number(a.environmentSlug === "production") ||
+        a.environmentName.localeCompare(b.environmentName),
+      ))
+    : undefined;
+  return { rows, total: displays.length, page, perPage, environmentRows };
 }
 
 // ─── Get single project ──────────────────────────────────────────────────────

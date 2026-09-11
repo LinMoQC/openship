@@ -975,9 +975,12 @@ const ProjectSettingsContent = () => {
           </div>
           {/* Logo intentionally omitted here — it lives in the DraftProjectView
               hero card below; showing it in both duplicates it. */}
-          <h1 className="text-2xl font-semibold text-foreground truncate">
-            {projectData.name || t.projects.detail.projectFallback}
-          </h1>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <h1 className="min-w-0 text-2xl font-semibold text-foreground truncate">
+              {projectData.name || t.projects.detail.projectFallback}
+            </h1>
+            <EnvironmentSwitcher />
+          </div>
         </div>
         <DraftProjectView onDeleteProject={() => handleDeleteProject()} />
       </PageContainer>

@@ -7,6 +7,7 @@ import { type Project } from "@/constants/mock";
 import { AppLogo } from "@/components/AppLogo";
 import { getFrameworkConfig } from "@/components/import-project/Frameworks";
 import { getProjectStatus, projectDisplayDomain } from "@/utils/project-status";
+import { ProjectEnvironmentLinks } from "./ProjectEnvironmentLinks";
 import { ProjectStatusBadge } from "@/components/shared/ProjectStatusBadge";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 import { timeAgo } from "@/lib/time";
@@ -85,10 +86,12 @@ const ProjectGridCard: React.FC<{
           {domain && <p className="mt-0.5 truncate text-xs text-muted-foreground">{domain}</p>}
         </div>
 
-        <ProjectStatusBadge
-          project={project}
-          className="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium"
-        />
+        {!project.environments?.length && (
+          <ProjectStatusBadge
+            project={project}
+            className="shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium"
+          />
+        )}
       </div>
 
       {/* Meta — nothing is hidden here, the tile has the room the row didn't */}
@@ -144,6 +147,8 @@ const ProjectGridCard: React.FC<{
           </span>
         ) : null}
       </div>
+
+      <ProjectEnvironmentLinks environments={project.environments} />
 
       {/* Footer */}
       <div className="mt-auto flex items-center justify-between gap-2 pt-0.5">

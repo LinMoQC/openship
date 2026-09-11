@@ -1,4 +1,12 @@
 import type { ReleaseSource } from "@repo/core";
+import type { ProjectStatusSource } from "@/utils/project-status";
+
+export interface ProjectEnvironmentSummary extends ProjectStatusSource {
+  id: string;
+  name: string;
+  slug: string;
+  type: "production" | "preview" | "development";
+}
 
 /**
  * Shared domain types used across the dashboard.
@@ -11,6 +19,7 @@ export interface Project {
   id: string;
   name: string;
   slug: string;
+  environments?: ProjectEnvironmentSummary[];
 
   /* ── Source ──────────────────────────────────────────────── */
   localPath?: string | null;
