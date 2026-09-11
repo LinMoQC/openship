@@ -77,14 +77,46 @@ jobs:
           OPENSHIP_RELEASE_TAG: ${{ steps.runtime.outputs.tag }}
         run: bun run --cwd apps/cli build:payload
 
+      - name: Build matching dashboard bundle
+        env:
+          NODE_ENV: production
+          CLOUD_MODE: "false"
+          OPENSHIP_TARGET: local
+          NEXT_PUBLIC_API_PROXY: "true"
+        run: bun run --cwd apps/dashboard build
+
+      - name: Package matching dashboard bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.runtime.outputs.tag }}"
+          staging="dashboard-dist"
+          artifact="openship-dashboard-${tag}.tar.gz"
+          rm -rf "$staging"
+          mkdir -p "$staging"
+          cp -a apps/dashboard/.next/standalone/. "$staging"/
+          mkdir -p "$staging/apps/dashboard/.next"
+          cp -a apps/dashboard/.next/static "$staging/apps/dashboard/.next/static"
+          if [ -d apps/dashboard/public ]; then
+            cp -a apps/dashboard/public "$staging/apps/dashboard/public"
+          fi
+          cp apps/dashboard/standalone-server.mjs "$staging/apps/dashboard/standalone-server.mjs"
+          tar -czf "$artifact" -C "$staging" .
+          sha256sum "$artifact" > "$artifact.sha256"
+
       - name: Verify artifact identity
         shell: bash
         run: |
           set -euo pipefail
           asset="apps/cli/.cli-payload/openship-cli-${{ steps.runtime.outputs.tag }}.tar.gz"
+          dashboard_asset="openship-dashboard-${{ steps.runtime.outputs.tag }}.tar.gz"
           test -f "$asset"
           test -f "$asset.sha256"
+          test -f "$dashboard_asset"
+          test -f "$dashboard_asset.sha256"
           (cd "$(dirname "$asset")" && sha256sum --check "$(basename "$asset").sha256")
+          sha256sum --check "$dashboard_asset.sha256"
+          tar -tzf "$dashboard_asset" | grep -q '^./apps/dashboard/server.js$'
           mkdir -p /tmp/openship-runtime-check
           tar -xzf "$asset" -C /tmp/openship-runtime-check
           actual="$(node /tmp/openship-runtime-check/dist/index.js --version)"
@@ -98,10 +130,16 @@ jobs:
         run: |
           set -euo pipefail
           asset="apps/cli/.cli-payload/openship-cli-${RUNTIME_TAG}.tar.gz"
+          dashboard_asset="openship-dashboard-${RUNTIME_TAG}.tar.gz"
           if gh release view "$RUNTIME_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$RUNTIME_TAG" "$asset" "$asset.sha256" --clobber --repo "$GITHUB_REPOSITORY"
+            gh release upload "$RUNTIME_TAG" \
+              "$asset" "$asset.sha256" \
+              "$dashboard_asset" "$dashboard_asset.sha256" \
+              --clobber --repo "$GITHUB_REPOSITORY"
           else
-            gh release create "$RUNTIME_TAG" "$asset" "$asset.sha256" \
+            gh release create "$RUNTIME_TAG" \
+              "$asset" "$asset.sha256" \
+              "$dashboard_asset" "$dashboard_asset.sha256" \
               --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
               --prerelease \
