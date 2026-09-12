@@ -42,7 +42,7 @@
 import { repos, type Deployment, type Project } from "@repo/db";
 import { DockerRuntime, type DeploymentRef, type ResourceConfig } from "@repo/adapters";
 import { AppError, safeErrorMessage } from "@repo/core";
-import { isArtifactRef } from "../../../lib/container-ref";
+import { isArtifactRef, isRealContainerRef } from "../../../lib/container-ref";
 import { resolveDeploymentRuntime } from "../../../lib/deployment-runtime";
 import { resolveRollbackWindow } from "../release-retention";
 import {
@@ -572,6 +572,38 @@ export async function prune(projectId: string): Promise<{ purged: number }> {
   // retained release (possibly the ACTIVE one) still needs — so consult the
   // same keep set the image GC uses and never remove a tag that's still in it.
   const keep = await computeKeepSet(project).catch(() => new Set<string>());
+
+  // Compose smart/scoped deployments carry unchanged service containers into
+  // the new active deployment instead of recreating them. That means an old
+  // deployment row and the active deployment can legitimately point at the
+  // SAME live container. Purging the old row must only reclaim its historical
+  // artifact; passing that shared container id to DockerRuntime.purge would
+  // remove the service that is still part of the active release (including
+  // stateful services such as Postgres).
+  const activeContainerIds = new Set<string>();
+  let protectAllContainers = false;
+  if (project.activeDeploymentId) {
+    const activeDeployment =
+      ready.find((deployment) => deployment.id === project.activeDeploymentId) ??
+      (await repos.deployment.findById(project.activeDeploymentId).catch(() => null));
+    if (activeDeployment && isRealContainerRef(activeDeployment.containerId)) {
+      activeContainerIds.add(activeDeployment.containerId);
+    } else if (!activeDeployment) {
+      // A stale active pointer or a transient read failure is not permission to
+      // delete a workload. Image cleanup can still proceed, but container
+      // reclamation waits for a later prune with an authoritative active row.
+      protectAllContainers = true;
+    }
+    let activeServiceRows: Awaited<ReturnType<typeof repos.service.listByDeployment>> = [];
+    try {
+      activeServiceRows = await repos.service.listByDeployment(project.activeDeploymentId);
+    } catch {
+      protectAllContainers = true;
+    }
+    for (const row of activeServiceRows) {
+      if (isRealContainerRef(row.containerId)) activeContainerIds.add(row.containerId);
+    }
+  }
   let purged = 0;
 
   for (const dep of overflow) {
@@ -582,6 +614,11 @@ export async function prune(projectId: string): Promise<{ purged: number }> {
           const ref = toRef(dep);
           await runtime.purge({
             ...ref,
+            containerId:
+              protectAllContainers ||
+              (ref.containerId && activeContainerIds.has(ref.containerId))
+                ? null
+                : ref.containerId,
             imageRef: ref.imageRef && keep.has(ref.imageRef) ? null : ref.imageRef,
           });
         }

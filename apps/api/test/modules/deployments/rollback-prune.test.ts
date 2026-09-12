@@ -23,14 +23,22 @@ const h = vi.hoisted(() => ({
   project: null as Record<string, unknown> | null,
   ready: [] as Array<Record<string, unknown>>,
   /** deploymentId → service_deployment rows (per-service images). */
-  serviceRows: {} as Record<string, Array<{ imageRef: string | null; serviceName?: string | null }>>,
-  purged: [] as Array<{ id: string; imageRef: string | null }>,
+  serviceRows: {} as Record<
+    string,
+    Array<{
+      imageRef: string | null;
+      serviceName?: string | null;
+      containerId?: string | null;
+    }>
+  >,
+  purged: [] as Array<{ id: string; imageRef: string | null; containerId: string | null }>,
   /** Per-service artifact refs the prune asked the runtime to destroy. */
   destroyed: [] as string[],
   /** Deployment ids whose `runtime.purge` rejects. */
   purgeFails: new Set<string>(),
   /** Artifact refs whose `runtime.destroy` rejects. */
   destroyFails: new Set<string>(),
+  activeServiceReadFails: false,
   retainedCleared: [] as string[],
   instanceWindow: 5,
 }));
@@ -52,7 +60,12 @@ vi.mock("@repo/db", () => ({
       countPinned: async () => 0,
     },
     service: {
-      listByDeployment: async (id: string) => h.serviceRows[id] ?? [],
+      listByDeployment: async (id: string) => {
+        if (id === h.project?.activeDeploymentId && h.activeServiceReadFails) {
+          throw new Error("database unavailable");
+        }
+        return h.serviceRows[id] ?? [];
+      },
     },
     instanceSettings: {
       get: async () => ({ defaultRollbackWindow: h.instanceWindow }),
@@ -66,8 +79,8 @@ vi.mock("../../../src/lib/deployment-runtime", () => ({
     runtime: {
       name: "docker",
       supports: (cap: string) => cap === "rollback",
-      purge: async (ref: { imageRef: string | null }) => {
-        h.purged.push({ id: dep.id, imageRef: ref.imageRef });
+      purge: async (ref: { imageRef: string | null; containerId: string | null }) => {
+        h.purged.push({ id: dep.id, imageRef: ref.imageRef, containerId: ref.containerId });
         if (h.purgeFails.has(dep.id)) throw new Error(`purge refused for ${dep.id}`);
       },
       destroy: async (ref: string) => {
@@ -89,22 +102,26 @@ vi.mock("../../../src/modules/deployments/build.service", () => ({
 
 const { prune } = await import("../../../src/modules/deployments/rollback");
 
-const dep = (over: Record<string, unknown>) => ({
-  id: "d",
-  projectId: "p1",
-  imageRef: null,
-  containerId: "c",
-  pinned: false,
-  artifactRetainedAt: new Date(),
-  status: "ready",
-  ...over,
-});
+const dep = (over: Record<string, unknown>) => {
+  const id = typeof over.id === "string" ? over.id : "d";
+  return {
+    id,
+    projectId: "p1",
+    imageRef: null,
+    containerId: `c-${id}`,
+    pinned: false,
+    artifactRetainedAt: new Date(),
+    status: "ready",
+    ...over,
+  };
+};
 
 beforeEach(() => {
   h.purged = [];
   h.destroyed = [];
   h.purgeFails = new Set();
   h.destroyFails = new Set();
+  h.activeServiceReadFails = false;
   h.retainedCleared = [];
   h.serviceRows = {};
   h.instanceWindow = 5;
@@ -197,7 +214,7 @@ describe("prune — never deletes an image another retained release needs", () =
     expect(result.purged).toBe(1);
     expect(h.retainedCleared).toEqual(["d1"]);
     // … but the shared IMAGE is withheld, so the live release keeps running.
-    expect(h.purged).toEqual([{ id: "d1", imageRef: null }]);
+    expect(h.purged).toEqual([{ id: "d1", imageRef: null, containerId: "c-d1" }]);
   });
 
   it("withholds an image a PINNED release still points at", async () => {
@@ -209,7 +226,7 @@ describe("prune — never deletes an image another retained release needs", () =
       dep({ id: "d1", imageRef: "img-keep" }),
     ];
     await prune("p1");
-    expect(h.purged).toEqual([{ id: "d1", imageRef: null }]);
+    expect(h.purged).toEqual([{ id: "d1", imageRef: null, containerId: "c-d1" }]);
   });
 
   it("still removes an image nothing else references", async () => {
@@ -220,7 +237,7 @@ describe("prune — never deletes an image another retained release needs", () =
       dep({ id: "d1", imageRef: "img-orphan" }),
     ];
     await prune("p1");
-    expect(h.purged).toEqual([{ id: "d1", imageRef: "img-orphan" }]);
+    expect(h.purged).toEqual([{ id: "d1", imageRef: "img-orphan", containerId: "c-d1" }]);
   });
 
   it("counts per-SERVICE images when deciding what's still needed", async () => {
@@ -233,7 +250,41 @@ describe("prune — never deletes an image another retained release needs", () =
     // The active release's `web` service runs the very tag d1 recorded.
     h.serviceRows = { d5: [{ serviceName: "web", imageRef: "openship/app-web:bld_1" }] };
     await prune("p1");
-    expect(h.purged).toEqual([{ id: "d1", imageRef: null }]);
+    expect(h.purged).toEqual([{ id: "d1", imageRef: null, containerId: "c-d1" }]);
+  });
+
+  it("withholds a carried container that the active compose release still uses", async () => {
+    h.ready = [
+      dep({ id: "d5", imageRef: "compose", containerId: "c-primary" }),
+      dep({ id: "d4", imageRef: "compose", containerId: "c-primary" }),
+      dep({ id: "d3", imageRef: "compose", containerId: "c-primary" }),
+      dep({ id: "d1", imageRef: "compose", containerId: "c-postgres" }),
+    ];
+    h.serviceRows = {
+      d5: [
+        { serviceName: "postgres", imageRef: "postgres:17", containerId: "c-postgres" },
+        { serviceName: "api", imageRef: "app:current", containerId: "c-api" },
+      ],
+    };
+
+    await prune("p1");
+
+    expect(h.purged).toEqual([{ id: "d1", imageRef: null, containerId: null }]);
+    expect(h.retainedCleared).toEqual(["d1"]);
+  });
+
+  it("fails closed when the active service container set cannot be read", async () => {
+    h.ready = [
+      dep({ id: "d5", imageRef: "img5" }),
+      dep({ id: "d4", imageRef: "img4" }),
+      dep({ id: "d3", imageRef: "img3" }),
+      dep({ id: "d1", imageRef: "img-old", containerId: "c-unknown" }),
+    ];
+    h.activeServiceReadFails = true;
+
+    await prune("p1");
+
+    expect(h.purged).toEqual([{ id: "d1", imageRef: "img-old", containerId: null }]);
   });
 });
 
@@ -299,7 +350,9 @@ describe("prune — the retention column never claims a reclaim that did not hap
 
     const result = await prune("p1");
 
-    expect(h.purged).toEqual([{ id: "d1", imageRef: "openship/app:bld_1" }]);
+    expect(h.purged).toEqual([
+      { id: "d1", imageRef: "openship/app:bld_1", containerId: "c-d1" },
+    ]);
     expect(h.retainedCleared).toEqual([]);
     expect(result.purged).toBe(0);
   });
