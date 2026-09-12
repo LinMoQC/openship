@@ -40,10 +40,29 @@ describe("strictScope reaches the compose deploy from the snapshot", () => {
     expect(buildService).toContain("meta = { ...meta, strictServiceScope: true }");
   });
 
-  it("is INTERNAL-only — never a field of the wire body", () => {
-    // A client that could set it could scope any project's deploy exclusively.
-    expect(buildService).toMatch(/internal\?:\s*\{[\s\S]{0,200}strictServiceScope\?: boolean/);
-    expect(buildService).toContain("strictServiceScope: internal?.strictServiceScope");
+  it("is available to an authenticated exact-service deployment", () => {
+    const controller = src("../deployment.controller.ts");
+    const schema = src("../deployment.schema.ts");
+    const cli = src("../../../../../cli/src/commands/deploy.ts");
+    expect(schema).toContain("strictServiceScope: Type.Optional");
+    expect(controller).toContain("strictServiceScope?: boolean");
+    expect(controller).toContain("strictServiceScope: body.strictServiceScope");
+    expect(cli).toContain('option("--strict-service-scope"');
+    expect(cli).toContain("strictServiceScope: opts.strictServiceScope || undefined");
+  });
+
+  it("remains available to compose folder redeploys", () => {
+    const schema = src("../deployment.schema.ts");
+    const cli = src("../../../../../cli/src/commands/deploy.ts");
+    const folderDeploy = src("../../../../../cli/src/lib/folder-deploy.ts");
+    expect(cli).not.toMatch(/const gitOnlyFlags =[^;]*strictServiceScope/);
+    expect(cli).toContain("strictServiceScope: opts.strictServiceScope");
+    expect(folderDeploy).toContain("strictServiceScope?: boolean");
+    expect(folderDeploy).toContain("strictServiceScope: true");
+    expect(schema.match(/strictServiceScope: Type\.Optional/g)).toHaveLength(2);
+    expect(buildService).toContain(
+      "strictServiceScope: strictServiceScope || internal?.strictServiceScope",
+    );
   });
 
   it("is read off the snapshot and passed into the deploy", () => {

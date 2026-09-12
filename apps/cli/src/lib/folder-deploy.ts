@@ -104,6 +104,8 @@ export async function deployFolder(opts: {
   /** Scope a folder REDEPLOY to a subset of services; others carry forward
    *  untouched (no needless stateful recreate). Ignored on a first deploy. */
   serviceIds?: string[];
+  /** Treat serviceIds as an exclusive target set; stopped siblings stay stopped. */
+  strictServiceScope?: boolean;
   onStep?: (message: string) => void;
 }): Promise<FolderDeployResult> {
   const { cwd } = opts;
@@ -226,6 +228,7 @@ export async function deployFolder(opts: {
       ...(scan.services && scan.services.length > 0 ? { services: scan.services } : {}),
       // Scope a redeploy to a subset of services (others carry forward untouched).
       ...(opts.serviceIds && opts.serviceIds.length > 0 ? { serviceIds: opts.serviceIds } : {}),
+      ...(opts.strictServiceScope ? { strictServiceScope: true } : {}),
     }),
   });
   if (!dep.deployment_id) throw new Error(dep.error || "Failed to start deployment");

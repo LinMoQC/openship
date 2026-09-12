@@ -82,6 +82,8 @@ describe("openship deploy — registered server target (#763)", () => {
           uploadSessionId: "folder-session",
           deployTarget: "server",
           serverId: "srv_remote",
+          serviceIds: ["svc-api"],
+          strictServiceScope: true,
         });
         return { json: { success: true, deployment_id: "dep-folder", project_id: "p-folder" } };
       }
@@ -89,9 +91,14 @@ describe("openship deploy — registered server target (#763)", () => {
     });
 
     try {
-      await expect(deployFolder({ cwd: sourceDir, serverId: "srv_remote" })).resolves.toMatchObject(
-        { deploymentId: "dep-folder", projectId: "p-folder" },
-      );
+      await expect(
+        deployFolder({
+          cwd: sourceDir,
+          serverId: "srv_remote",
+          serviceIds: ["svc-api"],
+          strictServiceScope: true,
+        }),
+      ).resolves.toMatchObject({ deploymentId: "dep-folder", projectId: "p-folder" });
     } finally {
       rmSync(sourceDir, { recursive: true, force: true });
     }

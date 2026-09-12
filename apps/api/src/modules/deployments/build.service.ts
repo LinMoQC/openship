@@ -1403,12 +1403,7 @@ function defaultFreeEndpoint(project: { slug: string; hasServer: boolean; port: 
 export async function requestBuildAccess(
   ctx: RequestContext,
   input: BuildAccessInput,
-  /**
-   * INTERNAL-only options — deliberately a second argument rather than fields on
-   * `BuildAccessInput`, which is the wire body. These values can change which services
-   * are touched or bypass normal artifact acquisition, so only server-side callers get
-   * to set them.
-   */
+  /** Internal-only artifact handover options used by server-side migration callers. */
   internal?: {
     strictServiceScope?: boolean;
     /** One-time migration image pins, keyed by canonical service name. */
@@ -1431,11 +1426,16 @@ export async function requestBuildAccess(
     serviceDeploymentMode,
     services,
     serviceIds,
+    strictServiceScope,
     refreshServiceIds,
     cloudResourceTier,
     cloudResourceCustom,
     cloneStrategy,
   } = input;
+
+  if (strictServiceScope && !serviceIds?.length) {
+    throw new AppError("An exact deployment scope requires at least one service ID", 400);
+  }
 
   const project = await repos.project.findById(projectId);
   if (!project) {
@@ -1949,7 +1949,7 @@ export async function requestBuildAccess(
     // stateful services (DBs/caches) on an unrelated change.
     serviceIds,
     refreshServiceIds,
-    strictServiceScope: internal?.strictServiceScope,
+    strictServiceScope: strictServiceScope || internal?.strictServiceScope,
   });
 
   // Store env vars on project as "latest defaults"
@@ -2409,7 +2409,7 @@ export async function triggerDeployment(
      * on this deployment's worker snapshot; deliberately not exposed by the
      * HTTP deployment controller. */
     forcePullImages?: boolean;
-    /** Internal exclusive target scope. When true, services outside an
+    /** Exclusive target scope. When true, services outside an
      * explicit serviceIds set are never started as a fallback when there is no
      * prior deployment to carry forward. */
     strictServiceScope?: boolean;

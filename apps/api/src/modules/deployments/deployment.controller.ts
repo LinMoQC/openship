@@ -54,6 +54,8 @@ export async function create(c: Context) {
     forceAll?: boolean;
     /** Smart per-service target list. Mutually exclusive with forceAll. */
     serviceIds?: string[];
+    /** Exclusive service target list; stopped or missing siblings are not revived. */
+    strictServiceScope?: boolean;
     /** Manual smart redeploy: rebuild only services changed since the active deploy. */
     smartRoute?: boolean;
     /** Refresh: re-apply current env to the active deploy — no git pull, no rebuild. */
@@ -95,6 +97,7 @@ export async function create(c: Context) {
     environment: body.environment,
     forceAll: body.forceAll,
     serviceIds: body.serviceIds,
+    strictServiceScope: body.strictServiceScope,
     smartRoute: body.smartRoute,
     refresh: body.refresh,
     trigger: body.trigger === "webhook" ? "webhook" : undefined,

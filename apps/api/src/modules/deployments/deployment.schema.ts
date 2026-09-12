@@ -46,6 +46,12 @@ export const TriggerDeployBody = Type.Object({
         "Only redeploy these service ids; services outside the list keep their current containers.",
     }),
   ),
+  strictServiceScope: Type.Optional(
+    Type.Boolean({
+      description:
+        "Require an explicit serviceIds cohort and leave every service outside it untouched, including stopped services.",
+    }),
+  ),
   smartRoute: Type.Optional(
     Type.Boolean({
       description: "Resolve the changed service set from the active deployment and source diff.",
@@ -195,6 +201,12 @@ export const BuildAccessBody = Type.Object({
     Type.Array(Type.String(), {
       description:
         "Subset of service ids to (re)build; every other service carries forward on its existing container, untouched. Omit to build the whole stack (first deploy). Use this on a scoped redeploy so stateful services (MySQL/Redis/Qdrant) are NOT recreated for an unrelated code change.",
+    }),
+  ),
+  strictServiceScope: Type.Optional(
+    Type.Boolean({
+      description:
+        "Require an explicit serviceIds cohort and leave every service outside it untouched, including stopped services.",
     }),
   ),
   refreshServiceIds: Type.Optional(
