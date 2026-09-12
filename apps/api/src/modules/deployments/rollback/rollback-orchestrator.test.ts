@@ -7,6 +7,8 @@ interface TriggerRequest {
   branch?: string | null;
   trigger: string;
   forceAll: boolean;
+  serviceIds?: string[];
+  strictServiceScope?: boolean;
   commitSha?: string;
   commitShaBefore?: string;
   reuseSnapshot: {
@@ -151,5 +153,22 @@ describe("rollback — reacquire a frozen release image", () => {
     expect(request.reuseSnapshot.meta.releaseTag).toBe("v1.2.3");
     expect(request.reuseSnapshot.meta.handoverAppImage).toBeUndefined();
     expect(JSON.stringify(request.reuseSnapshot.meta)).not.toContain("changed-{tag}");
+  });
+
+  it("replays an exclusive reject through the same exact service boundary", async () => {
+    await rollback("dep-target", {
+      serviceIds: ["svc-relay"],
+      strictServiceScope: true,
+    });
+
+    expect(h.triggerDeployment).toHaveBeenCalledTimes(1);
+    const [, request] = h.triggerDeployment.mock.calls[0] as [unknown, TriggerRequest];
+    expect(request).toMatchObject({
+      projectId: "project-1",
+      trigger: "rollback",
+      forceAll: false,
+      serviceIds: ["svc-relay"],
+      strictServiceScope: true,
+    });
   });
 });
