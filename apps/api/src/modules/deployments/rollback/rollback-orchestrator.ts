@@ -272,7 +272,13 @@ async function hostPathExists(target: Deployment, path: string): Promise<boolean
 /**
  * User-triggered rollback. Resolves the plan, then executes it.
  */
-export async function rollback(targetDeploymentId: string): Promise<void> {
+export interface RollbackScope {
+  /** Exact service rows to restore. Omitted for the normal whole-release rollback. */
+  serviceIds: string[];
+  strictServiceScope: true;
+}
+
+export async function rollback(targetDeploymentId: string, scope?: RollbackScope): Promise<void> {
   const { target, project, plan } = await resolveRestorePlan(targetDeploymentId);
 
   if (plan.mode === "ineligible") {
@@ -282,7 +288,7 @@ export async function rollback(targetDeploymentId: string): Promise<void> {
     await restoreViaUnitSwap(target, project);
     return;
   }
-  await restoreViaRedeploy(target, project, plan);
+  await restoreViaRedeploy(target, project, plan, scope);
 }
 
 /**
@@ -299,6 +305,7 @@ async function restoreViaRedeploy(
   target: Deployment,
   project: NonNullable<Awaited<ReturnType<typeof repos.project.findById>>>,
   plan: Extract<RestorePlan, { mode: "redeploy-pinned" | "reacquire-image" | "rebuild" }>,
+  scope?: RollbackScope,
 ): Promise<void> {
   // Where are we rolling back FROM? The currently-active release's commit —
   // recorded so this restore is itself reversible.
@@ -362,10 +369,12 @@ async function restoreViaRedeploy(
       (target.commitSha ? `Rollback to ${target.commitSha.slice(0, 7)}` : "Rollback"),
     environment: target.environment,
     trigger: "rollback",
-    // A restore brings the WHOLE release back — smart per-service targeting
-    // would leave half the stack on the newer version.
-    serviceIds: undefined,
-    forceAll: true,
+    // A user rollback restores the whole release. Rejecting an exclusive scoped
+    // candidate passes the candidate's exact target IDs, so stateful and other
+    // unrelated services are never restarted merely to restore one service.
+    serviceIds: scope?.serviceIds,
+    strictServiceScope: scope?.strictServiceScope,
+    forceAll: scope ? false : true,
     commitShaBefore: prevSha,
     reuseSnapshot: { meta, envVars: (target.envVars as Record<string, string> | null) ?? null },
   });

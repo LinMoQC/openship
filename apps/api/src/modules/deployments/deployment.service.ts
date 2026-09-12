@@ -38,6 +38,7 @@ import { livePrimaryContainerId } from "../services/service-container";
 import { decryptEnvMap } from "../../lib/encryption";
 import { inlineEmptyDefers } from "./compose/service-env-layers";
 import * as sessionManager from "./session-manager";
+import { planRejectRestore } from "./reject-restore";
 
 /**
  * #336: present a deployment to a CLIENT — masks `meta.composeServices[].environment`.
@@ -354,7 +355,12 @@ export async function rejectDeployment(deploymentId: string, organizationId: str
   const project = await repos.project.findById(dep.projectId);
   if (!project) throw new NotFoundError("Project", dep.projectId);
 
-  const meta = (dep.meta as { previousActiveDeploymentId?: string } | null) ?? null;
+  const meta =
+    (dep.meta as {
+      previousActiveDeploymentId?: string;
+      targetServiceIds?: string[];
+      strictServiceScope?: boolean;
+    } | null) ?? null;
   const previousDeploymentId = meta?.previousActiveDeploymentId;
 
   // Reject both restores a release AND destroys one, so it must not start while
@@ -366,8 +372,20 @@ export async function rejectDeployment(deploymentId: string, organizationId: str
 
   // Restore the deployment this one replaced (if any) as the active/finalized
   // one — same as before.
-  if (previousDeploymentId && previousDeploymentId !== deploymentId) {
-    await rollbackDeployment(previousDeploymentId, organizationId);
+  const restore = planRejectRestore({
+    deploymentId,
+    previousDeploymentId,
+    activeDeploymentId: project.activeDeploymentId,
+    targetServiceIds: meta?.targetServiceIds,
+    strictServiceScope: meta?.strictServiceScope,
+  });
+  if (restore) {
+    // Exclusive service candidates must be restored through the same boundary.
+    // Replaying the predecessor as a whole release restarts databases, queues,
+    // and every unrelated service. A failed candidate whose predecessor is
+    // already active (the partial-failure path) needs no restore at all.
+    await getDeployment(restore.deploymentId, organizationId);
+    await rollback(restore.deploymentId, restore.scope);
   }
 
   // Tear down THIS deployment's runtime resources (containers/routes). We
