@@ -45,6 +45,7 @@ export const deployCommand = new Command("deploy")
   .option("--env <environment>", "Target environment: production | preview", "production")
   .option("--force-all", "Rebuild every enabled service (skip smart per-service routing)")
   .option("--service-ids <ids>", "Comma-separated service IDs to deploy (smart routing)")
+  .option("--strict-service-scope", "Leave every service outside --service-ids untouched")
   .option("--smart-route", "Rebuild only services changed since the active deploy")
   .option("--refresh", "Re-apply current env to the active deploy (no git pull, no rebuild)")
   .option(
@@ -76,6 +77,10 @@ export const deployCommand = new Command("deploy")
           .map((s: string) => s.trim())
           .filter(Boolean)
       : undefined;
+    if (opts.strictServiceScope && !serviceIds?.length) {
+      err("--strict-service-scope requires --service-ids");
+      process.exit(1);
+    }
 
     let deploymentId: string | undefined;
     let payload: Record<string, unknown> | undefined;
@@ -90,6 +95,7 @@ export const deployCommand = new Command("deploy")
           environment: env,
           serverId: opts.server,
           serviceIds,
+          strictServiceScope: opts.strictServiceScope,
           onStep: (m) => {
             if (spinner) spinner.text = m;
           },
@@ -134,6 +140,7 @@ export const deployCommand = new Command("deploy")
         serverId: opts.server || undefined,
         forceAll: opts.forceAll || undefined,
         serviceIds,
+        strictServiceScope: opts.strictServiceScope || undefined,
         smartRoute: opts.smartRoute || undefined,
         refresh: opts.refresh || undefined,
       };

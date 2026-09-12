@@ -154,6 +154,7 @@ import {
   throwIfDeploymentCancelled,
 } from "../deployment-cancellation";
 import { liveMatchTiersForDeployment, resolveLiveServiceState } from "../../services/live-state";
+import { composeDeployResultStatus } from "./deploy-result-status";
 
 const CARRIED_STATE_PREFLIGHT_TIMEOUT_MS = 15_000;
 
@@ -207,6 +208,8 @@ export interface ComposeDeployResult {
     error?: string;
     /** Kept running exactly as-is: nothing built, created, or port-probed. */
     carried?: true;
+    /** A successful one-shot task mutates prerequisites but does not publish a live workload. */
+    runToCompletion?: true;
     /**
      * Host directory this service's built files live in — set INSTEAD of
      * containerId/ip/hostPort for a self-hosted static sub-app, which the edge
@@ -3452,6 +3455,7 @@ async function deployComposeServicesUnlocked(
           serviceName: svc.name,
           containerId: result.containerId,
           status: result.status,
+          ...(runToCompletion ? { runToCompletion: true as const } : {}),
           ip: result.ip,
           hostPort: persistedHostPort ?? undefined,
           // The per-port map the runtime reported, UNIONED with the pins this pass
@@ -4708,7 +4712,7 @@ async function deployComposeServicesUnlocked(
   }
 
   return {
-    status: successful > 0 ? "ready" : "failed",
+    status: composeDeployResultStatus({ successful, failed: failed.length, services: results }),
     summary: {
       total: ordered.length,
       successful,
