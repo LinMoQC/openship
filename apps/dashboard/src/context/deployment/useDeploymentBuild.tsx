@@ -1,8 +1,10 @@
 "use client";
 
+import type { IconName } from "@repo/ui/icons";
 import { useState, useRef, useCallback, useEffect } from "react";
 import type { Terminal } from "@xterm/xterm";
 import { useToast } from "@/context/ToastContext";
+import { useCloudDeployPricing } from "@/hooks/useCloudDeployPricing";
 import { useCloud } from "@/context/CloudContext";
 import { canUseCloudConnection, usePlatform } from "@/context/PlatformContext";
 import { useModal } from "@/context/ModalContext";
@@ -208,13 +210,13 @@ function mapBuildLogsFromStatus(data: any): BuildLog[] {
   return [];
 }
 
-const STEPS = [
-  { label: "Preparing", icon: "server-59-1658435258.png" },
-  { label: "Cloning", icon: "git%20branch-159-1658431404.png" },
-  { label: "Installing", icon: "npm-184-1693375161.png" },
-  { label: "Building", icon: "tools-118-1658432731.png" },
-  { label: "Deploying", icon: "space%20rocket-85-1687505546.png" },
-  { label: "Ready", icon: "check%20circle-68-1658234612.png" },
+const STEPS: { label: string; icon: IconName }[] = [
+  { label: "Preparing", icon: "server" },
+  { label: "Cloning", icon: "git-branch" },
+  { label: "Installing", icon: "download" },
+  { label: "Building", icon: "wrench" },
+  { label: "Deploying", icon: "rocket" },
+  { label: "Ready", icon: "check-circle" },
 ];
 
 /**
@@ -228,6 +230,7 @@ export function useDeploymentBuild(
   setConfig: React.Dispatch<React.SetStateAction<DeploymentConfig>>,
 ) {
   const { showToast } = useToast();
+  const showCloudPricing = useCloudDeployPricing();
   // `connected` is read, not just `requireCloud`: the catch below has to tell
   // "connecting is the missing step" from "we already think we're connected and the
   // server still said no" — the two cases requireCloud's return value conflates.
@@ -249,6 +252,12 @@ export function useDeploymentBuild(
   // Wall-clock of the last self-heal poll — rate-caps the leading poll so effect
   // re-creation (dep churn) can't burst getBuildStatus into a request storm.
   const lastBuildStatusPollRef = useRef(0);
+  const buildStatusPollInFlightRef = useRef(false);
+  // A terminal SSE event freezes the local clock immediately, then one status
+  // read reconciles it with the persisted measurement (also after a disconnect).
+  const settledBuildStatusRef = useRef<string | null>(null);
+  const redeployRequestRef = useRef(false);
+  const buildViewGenerationRef = useRef(0);
   /**
    * Deployment ids whose terminal state has already dropped the project cache.
    *
@@ -328,6 +337,7 @@ export function useDeploymentBuild(
       }
       return {
         ...prev,
+        buildDurationMs: resolveBuildElapsedMs(prev, now),
         deploymentSuccess: true,
         deploymentFailed: false,
         deploymentCanceled: false,
@@ -384,8 +394,11 @@ export function useDeploymentBuild(
 
       setState((prev) => ({
         ...prev,
+        buildDurationMs: resolveBuildElapsedMs(prev, now),
         deploymentFailed: true,
         deploymentSuccess: false,
+        deploymentCanceled: false,
+        cancellationPending: false,
         isDeploying: false,
         failureMessage: errorMessage,
         warningMessage: "",
@@ -435,33 +448,23 @@ export function useDeploymentBuild(
     });
   }, []);
 
-  const handleCanceled = useCallback(
-    (message?: string) => {
-      const cancelMessage = message || "Deployment cancelled by user";
-      const now = Date.now();
+  const handleCanceled = useCallback((message?: string, cancellationPending = true) => {
+    const cancelMessage = message || "Deployment cancelled by user";
+    const now = Date.now();
 
-      if (lastErrorRef.current) {
-        const elapsed = now - lastErrorRef.current.timestamp;
-        if (lastErrorRef.current.message === cancelMessage && elapsed < ERROR_DEBOUNCE_MS) {
-          return;
-        }
-      }
-      lastErrorRef.current = { message: cancelMessage, timestamp: now };
-
-      setState((prev) => ({
-        ...prev,
-        deploymentCanceled: true,
-        cancellationPending: true,
-        deploymentFailed: false,
-        deploymentSuccess: false,
-        isDeploying: false,
-        isStopping: false,
-        failureMessage: cancelMessage,
-        warningMessage: "",
-      }));
-    },
-    [],
-  );
+    setState((prev) => ({
+      ...prev,
+      buildDurationMs: resolveBuildElapsedMs(prev, now),
+      deploymentCanceled: true,
+      cancellationPending,
+      deploymentFailed: false,
+      deploymentSuccess: false,
+      isDeploying: false,
+      isStopping: false,
+      failureMessage: cancelMessage,
+      warningMessage: "",
+    }));
+  }, []);
 
   // ── Build stream (SSE) ────────────────────────────────────────────────────
 
@@ -686,9 +689,13 @@ export function useDeploymentBuild(
     // Save-only (Edit from the Runtime page) persists config and stops — it
     // never builds, so skip resetting the build/progress state.
     if (!saveConfigOnly) {
+      buildViewGenerationRef.current += 1;
+      buildStream.disconnect();
       phaseStartRef.current = {};
+      settledBuildStatusRef.current = null;
       setState((prev) => ({
         ...prev,
+        deploymentId: null,
         isDeploying: true,
         isStopping: false,
         buildLogs: [],
@@ -712,8 +719,6 @@ export function useDeploymentBuild(
         serviceStatuses: [],
         buildStartedAt: localBuildStartedAt,
         buildDurationMs: null,
-        buildRetryCarryMs:
-          prev.deploymentFailed || prev.deploymentCanceled ? resolveBuildElapsedMs(prev) : 0,
       }));
     }
 
@@ -738,12 +743,14 @@ export function useDeploymentBuild(
         }
         try {
           await projectsApi.setOptions(projectId, {
+            ...(!isSourceless ? { gitBranch: config.branch } : {}),
             framework: config.framework,
             packageManager: config.packageManager,
             buildImage: config.buildImage,
             installCommand: config.options.installCommand,
             buildCommand: config.options.buildCommand,
             startCommand: config.options.startCommand,
+            releaseCommands: config.releaseCommands,
             outputDirectory: config.options.outputDirectory,
             productionPaths: config.options.productionPaths,
             rootDirectory: config.options.rootDirectory,
@@ -852,6 +859,7 @@ export function useDeploymentBuild(
         // Deploy-time readiness gate. Omitted when the Health section was left
         // alone, which is the default — the backend then runs no post-start probe.
         readiness: config.readiness ?? undefined,
+        releaseCommands: config.releaseCommands,
       });
 
       if (!projectData.success || !projectData.project_id) {
@@ -930,13 +938,10 @@ export function useDeploymentBuild(
           config.projectType === "docker" || isServiceDeployment
             ? "docker"
             : (overrides?.runtimeMode ?? config.runtimeMode),
-        // Send the mode for BOTH multi-app shapes so the operator's per-app vs
-        // single choice reaches the backend. Monorepo was previously omitted,
-        // leaving the backend to guess via shouldUseProjectServicePipeline.
-        serviceDeploymentMode:
-          config.projectType === "services" || config.projectType === "monorepo"
-            ? config.serviceDeploymentMode
-            : undefined,
+        // A branch scan can replace Compose with a single app. Send that choice
+        // explicitly so retained service rows from the previous branch cannot
+        // route this deployment back through the service pipeline.
+        serviceDeploymentMode: config.serviceDeploymentMode,
         // Cloud resource tier sizes a long-lived container — a web app OR a
         // worker (#538). Only a static (Pages) deploy has no workspace to size,
         // so gate on the workload, not the legacy hasServer boolean (a worker
@@ -1016,7 +1021,7 @@ export function useDeploymentBuild(
       if (shouldPromptCloudConnect({ errorCode, canConnectCloud, cloudConnected }) && cloudCapability) {
         const connected = await requireCloud(cloudCapability, { domain: baseDomain });
         if (!connected) showToast(message, "error", "Error");
-      } else if (!maybeOpenCredentialModal(errorCode)) {
+      } else if ((saveConfigOnly || !showCloudPricing(err)) && !maybeOpenCredentialModal(errorCode)) {
         // Clone-token / credential preflight failures open the missing-credential
         // modal (concrete recovery) instead of a dead-end toast.
         showToast(message, "error", "Error");
@@ -1024,7 +1029,7 @@ export function useDeploymentBuild(
       setState((prev) => ({ ...prev, isDeploying: false }));
       return null;
     }
-  }, [baseDomain, cloudConnected, config, deployMode, hideModal, installUrl, maybeOpenCredentialModal, openGithubConnect, requireCloud, selfHosted, setConfig, showModal, showToast]);
+  }, [baseDomain, cloudConnected, config, deployMode, hideModal, installUrl, maybeOpenCredentialModal, openGithubConnect, requireCloud, selfHosted, setConfig, showCloudPricing, showModal, showToast]);
 
   // `startBuild` controls which SSE endpoint to hit:
   //   - true  → POST /:id/build, which ALSO kicks off the build. Now only
@@ -1046,12 +1051,9 @@ export function useDeploymentBuild(
     await buildStream.connect(id, startBuild);
   }, [state.deploymentId, buildStream]);
 
-  // Self-heal the services view when the live stream drops mid-deploy. The build
-  // SSE can go terminal (a transient reconnect miss, a premature terminal event)
-  // while the deploy is still running server-side — without this the UI freezes
-  // on "Prepare" until a manual refresh. While the deployment is active and the
-  // stream is NOT connected, poll getBuildStatus (the same source a refresh uses)
-  // and merge the live-relevant fields so per-service progress advances on its own.
+  // Recover a disconnected stream or a queued build's missing start timestamp,
+  // reconcile terminal timing, and wait for cancellation acknowledgement. Never
+  // overlap reads or keep polling a settled result.
   useEffect(() => {
     const deploymentId = state.deploymentId;
     const active =
@@ -1060,16 +1062,27 @@ export function useDeploymentBuild(
       !state.deploymentFailed &&
       !state.deploymentCanceled;
     const waitingCancellation = state.deploymentCanceled && state.cancellationPending;
-    if (!deploymentId || (!active && !waitingCancellation) || buildStream.isConnected) return;
+    const terminal = state.deploymentSuccess || state.deploymentFailed || state.deploymentCanceled;
+    const needsTerminalStatus = terminal && settledBuildStatusRef.current !== deploymentId;
+    const needsStatus =
+      waitingCancellation ||
+      needsTerminalStatus ||
+      (active && (!buildStream.isConnected || !state.buildStartedAt));
+    if (!deploymentId || !needsStatus) return;
 
     let cancelled = false;
+    const generation = buildViewGenerationRef.current;
+    let interval: ReturnType<typeof setInterval>;
     const tick = async () => {
+      if (cancelled || buildStatusPollInFlightRef.current) return;
+      buildStatusPollInFlightRef.current = true;
       lastBuildStatusPollRef.current = Date.now();
       try {
         const data = await deployApi.getBuildStatus(deploymentId);
-        if (cancelled || !data?.success) return;
-        const isActive = data.is_active;
+        if (cancelled || generation !== buildViewGenerationRef.current || !data?.success) return;
         const status = data.status;
+        // A queued deployment can be waiting for its in-memory stream to exist.
+        const isLive = data.is_active || !["ready", "failed", "cancelled"].includes(status);
         const mapped = mapServiceStatusesFromBuildStatus(data);
         // The stream is detached, so live logs stopped flowing — refresh the
         // terminal buffer from the snapshot too (structured entries keep their
@@ -1080,36 +1093,55 @@ export function useDeploymentBuild(
           lastEventIdRef.current = data.lastEventId;
         }
         // The poll — not just the live stream — can be what observes the finish.
-        if (!isActive && status === "ready") {
+        if (!isLive && status === "ready") {
           invalidateOnTerminal(data.project_id, deploymentId);
         }
-        setState((prev) => ({
-          ...prev,
-          currentProgress: data.progress ?? prev.currentProgress,
-          currentStepIndex: data.currentStep ?? prev.currentStepIndex,
-          isDeploying: isActive,
-          deploymentSuccess: !isActive && status === "ready",
-          deploymentFailed: !isActive && status === "failed",
-          deploymentCanceled: !isActive && status === "cancelled",
-          cancellationPending: !!data.cancellationPending,
-          ...(mapped.length ? { serviceStatuses: mapped } : {}),
-          ...(polledLogs.length > prev.buildLogs.length ? { buildLogs: polledLogs } : {}),
-          ...(!isActive
-            ? {
-                failureMessage: data.failureMessage || prev.failureMessage,
-                warningMessage: data.warningMessage || prev.warningMessage,
-                decisionPending: !!data.decisionPending,
-                decisionFailedServiceIds: data.partial?.failed ?? prev.decisionFailedServiceIds,
-                portCheck: data.portCheck ?? prev.portCheck,
-                portCheckSkipped: data.portCheckSkipped ?? prev.portCheckSkipped,
-                errorCode: data.errorCode || prev.errorCode,
-              }
-            : {}),
-        }));
+        if (!isLive) settledBuildStatusRef.current = deploymentId;
+        setState((prev) => {
+          if (prev.deploymentId !== deploymentId) return prev;
+          // A read begun before the terminal SSE event cannot restart its clock.
+          if (
+            isLive &&
+            (prev.deploymentSuccess || prev.deploymentFailed || prev.deploymentCanceled)
+          ) {
+            return prev;
+          }
+          return {
+            ...prev,
+            currentProgress: data.progress ?? prev.currentProgress,
+            currentStepIndex: data.currentStep ?? prev.currentStepIndex,
+            isDeploying: isLive,
+            deploymentSuccess: !isLive && status === "ready",
+            deploymentFailed: !isLive && status === "failed",
+            deploymentCanceled: !isLive && status === "cancelled",
+            cancellationPending: !!data.cancellationPending,
+            buildStartedAt: data.buildStartedAt ?? null,
+            buildDurationMs: data.buildDurationMs ?? null,
+            phaseDurations: data.phaseDurations ?? prev.phaseDurations,
+            ...(mapped.length ? { serviceStatuses: mapped } : {}),
+            ...(polledLogs.length > prev.buildLogs.length ? { buildLogs: polledLogs } : {}),
+            ...(!isLive
+              ? {
+                  failureMessage: data.failureMessage || prev.failureMessage,
+                  warningMessage: data.warningMessage || prev.warningMessage,
+                  decisionPending: !!data.decisionPending,
+                  decisionFailedServiceIds: data.partial?.failed ?? prev.decisionFailedServiceIds,
+                  portCheck: data.portCheck ?? prev.portCheck,
+                  portCheckSkipped: data.portCheckSkipped ?? prev.portCheckSkipped,
+                  errorCode: data.errorCode || prev.errorCode,
+                }
+              : {}),
+          };
+        });
         // Deploy settled while the stream was detached — stop reconnect churn.
-        if (!isActive && !cancelled) buildStream.disconnect();
+        if (!isLive) {
+          buildStream.disconnect();
+          if (!data.cancellationPending) clearInterval(interval);
+        }
       } catch {
         // Transient poll error — keep trying on the next tick.
+      } finally {
+        buildStatusPollInFlightRef.current = false;
       }
     };
 
@@ -1120,7 +1152,7 @@ export function useDeploymentBuild(
     if (Date.now() - lastBuildStatusPollRef.current >= BUILD_STATUS_POLL_MS) {
       void tick();
     }
-    const interval = setInterval(tick, BUILD_STATUS_POLL_MS);
+    interval = setInterval(tick, BUILD_STATUS_POLL_MS);
     return () => {
       cancelled = true;
       clearInterval(interval);
@@ -1132,23 +1164,30 @@ export function useDeploymentBuild(
     state.deploymentFailed,
     state.deploymentCanceled,
     state.cancellationPending,
+    state.buildStartedAt,
     buildStream.isConnected,
     buildStream.disconnect,
+    invalidateOnTerminal,
   ]);
 
   const loadBuildSession = useCallback(
     async (deploymentId: string): Promise<BuildSessionLoadResult> => {
+      const generation = ++buildViewGenerationRef.current;
       try {
         lastErrorRef.current = null;
+        buildStream.disconnect();
 
         // Reset state immediately to avoid flashing stale data from previous deployment
-        setState((prev) => ({
+        setState({
           ...INITIAL_STATE,
           deploymentId,
-          buildRetryCarryMs: prev.deploymentId === deploymentId ? prev.buildRetryCarryMs : 0,
-        }));
+        });
+        phaseStartRef.current = {};
 
         const data = await deployApi.getBuildStatus(deploymentId);
+        if (generation !== buildViewGenerationRef.current) {
+          return { success: false, superseded: true };
+        }
 
         if (!data.success) {
           const errorMessage = data.error || BUILD_SESSION_ERROR_FALLBACK;
@@ -1281,6 +1320,7 @@ export function useDeploymentBuild(
         // the self-heal poll, instead of freezing until a manual refresh.
         const isTerminal = status === "ready" || status === "failed" || status === "cancelled";
         const isLive = isActive || !isTerminal;
+        settledBuildStatusRef.current = isLive ? null : deploymentId;
 
         // Landing on an ALREADY-finished deployment (the refresh case) must drop
         // the cache too — this page instance never saw the SSE completion.
@@ -1300,7 +1340,14 @@ export function useDeploymentBuild(
           cancellationPending: !!data.cancellationPending,
           isDeploying: isLive,
           screenshots: !isActive ? (data.screenshots || []) : [],
-          failureMessage: !isActive ? (data.failureMessage || "") : "",
+          failureMessage: !isActive
+            ? data.failureMessage ||
+              (status === "failed"
+                ? "Build failed"
+                : status === "cancelled"
+                  ? "Build was cancelled"
+                  : "")
+            : "",
           warningMessage: !isActive ? (data.warningMessage || "") : "",
           decisionPending: !isActive ? !!data.decisionPending : false,
           decisionFailedServiceIds: !isActive ? (data.partial?.failed ?? []) : [],
@@ -1314,7 +1361,6 @@ export function useDeploymentBuild(
           phaseDurations: data.phaseDurations || {},
           buildDurationMs: data.buildDurationMs ?? null,
           buildStartedAt: data.buildStartedAt ?? null,
-          buildRetryCarryMs: prev.buildRetryCarryMs,
           // Restore per-service statuses for compose AND monorepo projects.
           // Monorepo sub-apps fan out through the same multi-service pipeline,
           // so the same SSE statuses apply.
@@ -1362,25 +1408,20 @@ export function useDeploymentBuild(
             typeof data.lastEventId === "number" ? data.lastEventId : undefined,
           );
         } else if (status === "ready") {
-          handleSuccessMessage({
-            screenshots: data.screenshots,
-            project_id: data.project_id,
-            warningMessage: data.warningMessage,
-            decisionPending: data.decisionPending,
-          });
           if (data.warningMessage) {
             showToast(data.warningMessage, "success", "Deployment Ready With Warnings");
           } else {
             showToast("Build completed successfully", "success", "Success");
           }
         } else if (status === "failed") {
-          handleFailureMessage(data.failureMessage || "Build failed", data.errorCode);
-        } else if (status === "cancelled") {
-          handleCanceled(data.failureMessage || "Build was cancelled");
+          showToast(data.failureMessage || "Build failed", "error", "Deployment Failed");
         }
 
         return { success: true };
       } catch (err) {
+        if (generation !== buildViewGenerationRef.current) {
+          return { success: false, superseded: true };
+        }
         console.error("Error loading build session:", err);
         // Only a server-confirmed 404 is "this deployment does not exist". A
         // throw while hydrating a successful response — or a 5xx/network
@@ -1392,56 +1433,74 @@ export function useDeploymentBuild(
         return { success: false, notFound, error: errorMessage };
       }
     },
-    [buildStream, setConfig, showToast, writeToTerminal, handleSuccessMessage, handleFailureMessage, handleCanceled],
+    [buildStream, setConfig, showToast, writeToTerminal, invalidateOnTerminal],
   );
 
   const stopDeployment = useCallback(async () => {
     if (state.isStopping || !state.deploymentId) return;
+    const generation = buildViewGenerationRef.current;
 
     setState((prev) => ({ ...prev, isStopping: true }));
 
     try {
       const response = await deployApi.cancel(state.deploymentId);
+      if (generation !== buildViewGenerationRef.current) return;
       if (response.success || response.pending) {
         buildStream.disconnect();
         canStreamContainer.current = false;
-        handleCanceled(response.message);
+        handleCanceled(response.message, !!response.pending);
         if (response.pending) {
           showToast(response.message, "info", "Cancellation pending");
         } else {
           // The API only returns this branch after build_session.finishedAt is
           // durable, so no follow-up poll is required to prove quiescence.
-          setState((prev) => ({ ...prev, cancellationPending: false }));
           showToast(response.message || "Deployment cancelled", "success", "Cancelled");
         }
       } else {
         showToast(response.error || "Failed to stop deployment", "error", "Error");
       }
     } catch (error) {
+      if (generation !== buildViewGenerationRef.current) return;
       console.error("[DeploymentContext] Error stopping deployment:", error);
       showToast(getApiErrorMessage(error, "Failed to stop deployment"), "error", "Error");
     } finally {
-      setState((prev) => ({ ...prev, isStopping: false }));
+      if (generation === buildViewGenerationRef.current) {
+        setState((prev) => ({ ...prev, isStopping: false }));
+      }
     }
-  }, [buildStream, canStreamContainer, state.deploymentId, state.isStopping, showToast, handleCanceled]);
+  }, [
+    buildStream,
+    canStreamContainer,
+    state.deploymentId,
+    state.isStopping,
+    showToast,
+    handleCanceled,
+  ]);
 
   const redeploy = useCallback(
     async (deploymentId: string): Promise<string | null> => {
       if (!deploymentId) {
         showToast("Deployment ID not provided", "error", "Error");
-        setState((prev) => ({
-          ...prev,
-          isDeploying: false,
-          deploymentFailed: true,
-          failureMessage: "Failed to start redeployment",
-          warningMessage: "",
-        }));
         return null;
       }
+      if (redeployRequestRef.current) return null;
+      redeployRequestRef.current = true;
+      let generation = buildViewGenerationRef.current;
 
       try {
-        lastErrorRef.current = null;
         const localBuildStartedAt = new Date().toISOString();
+        const response = await deployApi.buildRedeploy(deploymentId);
+        if (generation !== buildViewGenerationRef.current) return null;
+        if (!response.success || !response.deployment_id) {
+          showToast(response.error || "Failed to redeploy", "error", "Error");
+          return null;
+        }
+        const newDeploymentId = response.deployment_id;
+        // Only an accepted NEW deployment gets a new clock/state. A rejected
+        // retry leaves the old attempt's outcome, logs and duration intact.
+        lastErrorRef.current = null;
+        settledBuildStatusRef.current = null;
+        generation = ++buildViewGenerationRef.current;
 
         terminalRef.current?.clear();
         buildStream.disconnect();
@@ -1458,77 +1517,36 @@ export function useDeploymentBuild(
 
         phaseStartRef.current = {};
         setState((prev) => ({
-          ...prev,
-          isDeploying: true,
-          deploymentSuccess: false,
-          deploymentFailed: false,
-          deploymentCanceled: false,
-          cancellationPending: false,
-          failureMessage: "",
-          warningMessage: "",
-          decisionPending: false,
-          decisionFailedServiceIds: [],
-          portCheck: [],
-          portCheckSkipped: [],
-          errorCode: "",
-          errorDetails: null,
-          pendingPrompt: null,
-          currentStepIndex: 0,
-          phaseDurations: {},
-          buildLogs: [],
-          screenshots: [],
-          serviceStatuses: [],
-          buildStartedAt: localBuildStartedAt,
-          buildDurationMs: null,
-          buildRetryCarryMs:
-            prev.deploymentFailed || prev.deploymentCanceled ? resolveBuildElapsedMs(prev) : 0,
-        }));
-
-        const response = await deployApi.buildRedeploy(deploymentId);
-
-        if (!response.success) {
-          showToast(response.error || "Failed to redeploy", "error", "Error");
-          setState((prev) => ({
-            ...prev,
-            isDeploying: false,
-            deploymentFailed: true,
-            failureMessage: response.error || "Failed to redeploy",
-            warningMessage: "",
-          }));
-          return null;
-        }
-
-        const newDeploymentId = response.deployment_id || deploymentId;
-
-        setState((prev) => ({
-          ...prev,
+          ...INITIAL_STATE,
           deploymentId: newDeploymentId,
+          projectId: response.project_id || prev.projectId,
+          isDeploying: true,
+          buildStartedAt: localBuildStartedAt,
         }));
 
         showToast("Redeployment started", "success", "Deploying");
         return newDeploymentId;
       } catch (error) {
+        if (generation !== buildViewGenerationRef.current) return null;
         console.error("[DeploymentContext] Failed to redeploy:", error);
         const msg = getApiErrorMessage(error, "Failed to start redeployment");
         // A missing GitHub credential surfaces the SAME modal as the deploy
         // wizard (never a bare toast) — one shared handler, one source of truth.
-        const openedModal = maybeOpenCredentialModal(extractErrorCode(error) ?? undefined);
+        const openedModal =
+          showCloudPricing(error) || maybeOpenCredentialModal(extractErrorCode(error) ?? undefined);
         if (!openedModal) showToast(msg, "error", "Error");
-        setState((prev) => ({
-          ...prev,
-          isDeploying: false,
-          deploymentFailed: true,
-          failureMessage: msg,
-          warningMessage: "",
-        }));
         return null;
+      } finally {
+        redeployRequestRef.current = false;
       }
     },
-    [buildStream, showToast, maybeOpenCredentialModal],
+    [buildStream, showToast, showCloudPricing, maybeOpenCredentialModal],
   );
 
   const reset = useCallback(() => {
+    buildViewGenerationRef.current += 1;
     lastErrorRef.current = null;
+    settledBuildStatusRef.current = null;
     phaseStartRef.current = {};
     setConfig(DEFAULT_CONFIG);
     setState(INITIAL_STATE);

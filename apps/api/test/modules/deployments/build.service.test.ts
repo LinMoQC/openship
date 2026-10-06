@@ -1,3 +1,5 @@
+import { createConfigurationSecrets } from "@repo/db/configuration-secrets";
+import { createEncryption } from "@repo/db/encryption";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -8,6 +10,7 @@ const {
   getCommitByRef,
   getForwardGitToServer,
   getLatestCommit,
+  requireClusterDeploymentTarget,
   kickoffBuild,
   repos,
   resolveProjectInfo,
@@ -25,8 +28,11 @@ const {
   getCommitByRef: vi.fn(),
   getForwardGitToServer: vi.fn(),
   getLatestCommit: vi.fn(),
+  requireClusterDeploymentTarget: vi.fn(),
   kickoffBuild: vi.fn(),
   repos: {
+    releases: { binding: vi.fn(async () => null), pendingJournals: vi.fn(async () => []), journals: vi.fn(async () => []) },
+    projectConnection: { listByTarget: vi.fn(async () => []) },
     project: {
       findById: vi.fn(),
       getEnvMap: vi.fn(),
@@ -81,47 +87,49 @@ vi.mock("@repo/db", async (importOriginal) => ({
   repos,
 }));
 
-vi.mock("../../../src/modules/deployments/preflight", () => ({
+vi.mock("@repo/platform/engine/modules/deployments/preflight", () => ({
   runPreflightChecks,
 }));
 
-vi.mock("../../../src/modules/deployments/prepare.service", () => ({
+vi.mock("@repo/platform/engine/lib/cluster-deployment-target", () => ({ requireClusterDeploymentTarget }));
+
+vi.mock("@repo/platform/engine/modules/deployments/prepare.service", () => ({
   resolveProjectInfo,
   resolveProjectSourceEnv,
 }));
 
-vi.mock("../../../src/modules/projects/folder/folder.service", () => ({
+vi.mock("@repo/platform/engine/modules/projects/folder/folder.service", () => ({
   scanFolderSession,
   resolveFolderSessionSourceEnv,
 }));
 
-vi.mock("../../../src/modules/deployments/build-pipeline", () => ({
+vi.mock("@repo/platform/engine/modules/deployments/build-pipeline", () => ({
   kickoffBuild,
   resolveServicePipelineMode,
 }));
 
-vi.mock("../../../src/modules/domains/project-route.service", () => ({
+vi.mock("@repo/platform/engine/modules/domains/project-route.service", () => ({
   listProjectRouteRows: vi.fn(),
   resolveProjectRouteState,
   syncProjectRouteState,
 }));
 
-vi.mock("../../../src/modules/github/github-access", () => ({
+vi.mock("@repo/platform/engine/modules/github/github-access", () => ({
   assertGitHubRepoAccess,
 }));
 
-vi.mock("../../../src/modules/github/github.service", () => ({
+vi.mock("@repo/platform/engine/modules/github/github.service", () => ({
   getCommitByRef,
   getLatestCommit,
   getRepository: vi.fn(),
 }));
 
-vi.mock("../../../src/modules/settings/settings.service", () => ({
+vi.mock("@repo/platform/engine/modules/settings/settings.service", () => ({
   resolveStrategy,
   getForwardGitToServer,
 }));
 
-vi.mock("../../../src/modules/deployments/smart-route", () => ({
+vi.mock("@repo/platform/engine/modules/deployments/smart-route", () => ({
   resolveSmartRoute,
 }));
 
@@ -133,15 +141,16 @@ import {
   resolveSnapshotTarget,
   triggerDeployment,
   type DeploymentConfigSnapshot,
-} from "../../../src/modules/deployments/build.service";
+} from "@repo/platform/engine/modules/deployments/build.service";
 import { createServiceRepo, toComposeSpec, type Database } from "@repo/db";
 import { ENV_MASK, type ReleaseSource } from "@repo/core";
 import {
   newFolderSessionId,
   putFolderSession,
-} from "../../../src/modules/projects/folder/session-store";
-import { ComposeConfigurationError } from "../../../src/modules/deployments/compose-configuration-error";
-import { decrypt, encrypt } from "../../../src/lib/encryption";
+} from "@repo/platform/engine/modules/projects/folder/session-store";
+import { ComposeConfigurationError } from "@repo/platform/engine/modules/deployments/compose-configuration-error";
+import { decrypt, encrypt } from "@repo/platform/engine/lib/encryption";
+import * as projectConnections from "@repo/platform/engine/modules/projects/project-connection.service";
 
 const ctx = { userId: "user-1", organizationId: "org-1" } as any;
 
@@ -149,6 +158,7 @@ function baseProject(overrides: Record<string, unknown> = {}) {
   return {
     id: "project-1",
     organizationId: "org-1",
+    environmentType: "production",
     appTemplateId: null,
     activeDeploymentId: null,
     gitUrl: null,
@@ -206,6 +216,9 @@ const composeServices = [
  * seam. The rest of a deployment stays mocked (no clone/build/Docker), while
  * service writes are stateful and observable across the full trigger boundary.
  */
+const testEncryption = createEncryption("repository-test-secret");
+const configuration = createConfigurationSecrets(testEncryption);
+
 function installStatefulComposeRepo<T extends Record<string, unknown>>(initial: T) {
   let stored = structuredClone(initial);
   const writes: Array<Record<string, unknown>> = [];
@@ -214,16 +227,16 @@ function installStatefulComposeRepo<T extends Record<string, unknown>>(initial: 
     update: () => ({
       set: (data: Record<string, unknown>) => ({
         where: async () => {
-          writes.push(data);
+          writes.push(configuration.openService(data));
           stored = { ...stored, ...data } as T;
         },
       }),
     }),
   } as unknown as Database;
-  const real = createServiceRepo(db);
+  const real = createServiceRepo(db, testEncryption);
   repos.service.listByProject.mockImplementation(real.listByProject.bind(real));
   repos.service.reconcileFromCompose.mockImplementation(real.reconcileFromCompose.bind(real));
-  return { stored: () => stored, writes };
+  return { stored: () => configuration.openService(stored), writes };
 }
 
 const criticalApiEnvironment = {
@@ -314,6 +327,23 @@ function releaseSnapshot(
 }
 
 describe("buildConfigSnapshot", () => {
+  it.each(["web", "worker"])("keeps the full Ruby builder image for a %s runtime", (workloadType) => {
+    const snapshot = buildConfigSnapshot(baseProject({
+      framework: "rails", packageManager: "bundler", buildImage: "ruby:3.4.1-alpine",
+      workloadType, hasServer: workloadType === "web",
+    }) as never);
+    expect(snapshot.buildImage).toBe("ruby:3.4.1-alpine");
+    expect(snapshot.runtimeImage).toBe(snapshot.buildImage);
+  });
+  it("uses the static runtime for explicitly static Ruby builds", () => {
+    const snapshot = buildConfigSnapshot(baseProject({
+      framework: "rails", packageManager: "bundler", buildImage: "ruby:3.4.1-slim",
+      workloadType: "static", hasServer: false,
+    }) as never);
+    expect(snapshot.buildImage).toBe("ruby:3.4.1-slim");
+    expect(snapshot.runtimeImage).toBe("ubuntu:22.04");
+  });
+
   it("clones git snapshots instead of packaging their saved checkout path (#748)", () => {
     const snapshot = buildConfigSnapshot(
       baseProject({ gitProvider: "github", gitUrl: "https://github.com/acme/app.git" }) as never,
@@ -454,6 +484,7 @@ describe("resolveSnapshotTarget", () => {
   function project(overrides: Record<string, unknown> = {}) {
     return {
       id: "project-1",
+      organizationId: "org-1",
       activeDeploymentId: null,
       cloudWorkspaceId: null,
       serverId: null,
@@ -473,6 +504,7 @@ describe("resolveSnapshotTarget", () => {
   // rather than inherit the bad "local" from active meta.
   it("keeps a server-bound project on the server even when active meta says local", async () => {
     repos.deployment.findById.mockResolvedValue({
+      id: "dep_old", projectId: "project-1", organizationId: "org-1",
       meta: { deployTarget: "local" } as DeploymentConfigSnapshot,
     });
     const t = await resolveSnapshotTarget(
@@ -499,6 +531,7 @@ describe("resolveSnapshotTarget", () => {
   // active deployment's stamped meta — step 5 in the precedence.
   it("infers server from legacy active-meta serverId when the column is empty", async () => {
     repos.deployment.findById.mockResolvedValue({
+      id: "dep_old", projectId: "project-1", organizationId: "org-1",
       meta: { serverId: "srv_legacy" } as DeploymentConfigSnapshot,
     });
     const t = await resolveSnapshotTarget(
@@ -512,6 +545,49 @@ describe("resolveSnapshotTarget", () => {
     expect(t.deployTarget).toBeUndefined();
     expect(t.serverId).toBeUndefined();
   });
+  it("freezes the ready Kubernetes installation and replica intent, clearing a former Docker host", async () => {
+    requireClusterDeploymentTarget.mockResolvedValue({ runtime: { id: "runtime-1" } });
+    const value = await resolveSnapshotTarget(project({ clusterId: "cluster-1", clusterConfig: { replicas: 3, imageRepository: "ghcr.io/team/api" }, serverId: "old-host" }));
+    expect(value).toMatchObject({ deployTarget: "cluster", clusterId: "cluster-1", clusterRuntimeId: "runtime-1", clusterProjectId: "project-1", clusterConfig: { replicas: 3 }, runtimeMode: "docker" });
+    expect(value.serverId).toBeUndefined();
+    expect(requireClusterDeploymentTarget).toHaveBeenCalledWith("org-1", "cluster-1");
+  });
+  it("does not override a saved cluster target through an old deployment wizard", async () => {
+    await expect(resolveSnapshotTarget(project({ clusterId: "cluster-1" }), { deployTarget: "server", serverId: "a" })).rejects.toMatchObject({ code: "CLUSTER_TARGET_CONFLICT" });
+  });
+  it("does not restore a removed cluster binding from the active release", async () => {
+    repos.deployment.findById.mockResolvedValue({ id: "old", projectId: "project-1", organizationId: "org-1", meta: { deployTarget: "cluster", clusterId: "old-cluster" } });
+    const value = await resolveSnapshotTarget(project({ activeDeploymentId: "old" }));
+    expect(value.deployTarget).toBe("local");
+    expect(value.clusterId).toBeUndefined();
+  });
+});
+
+/**
+ * Release commands are FROZEN onto the deployment, for the same reason `volumes`
+ * is: a redeploy of an old deployment must replay the commands that release
+ * declared, not whatever the project says today. The absent case matters just as
+ * much — the key must not appear at all, so a snapshot from a project with no
+ * release phase is byte-identical to one written before the field existed (and a
+ * redeploy of a pre-existing deployment stays a no-op).
+ */
+describe("buildConfigSnapshot — release commands", () => {
+  it("freezes the project's declared commands onto the snapshot", () => {
+    const snapshot = buildConfigSnapshot(
+      baseProject({ releaseCommands: ["php artisan migrate --force", "php artisan db:seed --force"] }) as any,
+    );
+    expect(snapshot.releaseCommands).toEqual([
+      "php artisan migrate --force",
+      "php artisan db:seed --force",
+    ]);
+  });
+
+  it("omits the key entirely for null, [] and a project that never declared any", () => {
+    for (const releaseCommands of [null, [], undefined]) {
+      const snapshot = buildConfigSnapshot(baseProject({ releaseCommands }) as any);
+      expect("releaseCommands" in snapshot).toBe(false);
+    }
+  });
 });
 
 describe("triggerDeployment", () => {
@@ -522,7 +598,7 @@ describe("triggerDeployment", () => {
     repos.project.findById.mockResolvedValue(baseProject());
     repos.project.getEnvMap.mockResolvedValue({});
     repos.project.listEnvVarChangeMeta.mockResolvedValue([]);
-    // Only read by the best-effort compose-drift reconcile (git projects).
+    // Read by the required Compose source reconcile (git projects).
     repos.service.listByProject.mockResolvedValue([]);
     repos.service.reconcileFromCompose.mockResolvedValue({ driftedNames: [] });
     repos.serviceDeployment.latestByProject.mockResolvedValue(new Map());
@@ -559,35 +635,43 @@ describe("triggerDeployment", () => {
     kickoffBuild.mockResolvedValue("session-1");
   });
 
-  it.each(["preview", "development", "production"])(
-    "uses the project's %s variable scope when a manual trigger omits environment",
-    async (environment) => {
-      repos.project.findById.mockResolvedValue(baseProject({ environmentType: environment }));
-      repos.project.getEnvMap.mockImplementation(async (_id, scope) => {
-        if (scope !== environment)
-          throw new Error("Wrong environment: required Compose variables absent");
-        return { VITE_API_BASE_URL: "https://test.invalid" };
+  it.each(["trigger", "refresh", "build-access"])(
+    "rejects a preview variable set on the production runtime before %s side effects (#195)",
+    async (entry) => {
+      const input = { projectId: "project-1", environment: "preview" };
+      const operation = entry === "build-access"
+        ? requestBuildAccess(ctx, { ...input, envVars: { DATABASE_URL: "preview-only" } })
+        : triggerDeployment(ctx, { ...input, refresh: entry === "refresh" });
+
+      await expect(operation).rejects.toMatchObject({
+        code: "DEPLOYMENT_ENVIRONMENT_TARGET_MISMATCH",
       });
-      await triggerDeployment(ctx, { projectId: "project-1", smartRoute: true });
-      expect(repos.project.getEnvMap).toHaveBeenCalledWith("project-1", environment, null);
-      expect(repos.deployment.create).toHaveBeenCalledWith(
-        expect.objectContaining({ environment }),
-      );
+      expect(repos.project.getEnvMap).not.toHaveBeenCalled();
+      expect(repos.project.update).not.toHaveBeenCalled();
+      expect(repos.project.bulkSetEnvVars).not.toHaveBeenCalled();
+      expect(repos.project.mergeEnvVars).not.toHaveBeenCalled();
+      expect(repos.service.reconcileFromCompose).not.toHaveBeenCalled();
+      expect(syncProjectRouteState).not.toHaveBeenCalled();
+      expect(repos.deployment.create).not.toHaveBeenCalled();
+      expect(kickoffBuild).not.toHaveBeenCalled();
     },
   );
 
-  it.each(["production", "development", "prt", ""])(
-    "rejects a PRT trigger with mismatched environment %j before any deployment work",
+  it.each([undefined, "production", "preview"])(
+    "keeps an isolated preview target on its own project with variable set %s (#195)",
     async (environment) => {
-      repos.project.findById.mockResolvedValue(baseProject({ environmentType: "preview" }));
-      await expect(
-        triggerDeployment(ctx, { projectId: "project-1", environment }),
-      ).rejects.toMatchObject({ statusCode: 400, code: "PROJECT_ENVIRONMENT_MISMATCH" });
-      expect(repos.project.getEnvMap).not.toHaveBeenCalled();
-      expect(resolveProjectInfo).not.toHaveBeenCalled();
-      expect(repos.service.reconcileFromCompose).not.toHaveBeenCalled();
-      expect(repos.deployment.create).not.toHaveBeenCalled();
-      expect(kickoffBuild).not.toHaveBeenCalled();
+      const preview = baseProject({ id: "project-preview", environmentType: "preview" });
+      repos.project.findById.mockResolvedValue(preview);
+      repos.deployment.create.mockResolvedValue({ id: "dep-preview", projectId: preview.id });
+
+      await triggerDeployment(ctx, { projectId: preview.id, environment });
+
+      expect(repos.project.getEnvMap).toHaveBeenCalledWith(preview.id, environment ?? "production", null);
+      expect(repos.deployment.create).toHaveBeenCalledWith(expect.objectContaining({
+        projectId: preview.id,
+        environment: environment ?? "production",
+      }));
+      expect(kickoffBuild).toHaveBeenCalledWith(preview, expect.objectContaining({ projectId: preview.id }));
     },
   );
 
@@ -609,6 +693,15 @@ describe("triggerDeployment", () => {
         composeServices,
       }),
     );
+  });
+
+  it("rejects a project that moved out of the authorized tenant before the engine read it", async () => {
+    repos.project.findById.mockResolvedValue(baseProject({ organizationId: "another-org" }));
+    await expect(triggerDeployment(ctx, { projectId: "project-1" })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(assertGitHubRepoAccess).not.toHaveBeenCalled();
+    expect(repos.project.getEnvMap).not.toHaveBeenCalled();
+    expect(repos.deployment.create).not.toHaveBeenCalled();
+    expect(kickoffBuild).not.toHaveBeenCalled();
   });
 
   it("uses the same frozen project env for Compose reconciliation and the deployment", async () => {
@@ -735,6 +828,23 @@ describe("triggerDeployment", () => {
     expect(resolveProjectInfo).toHaveBeenCalledOnce();
   });
 
+  it("refuses forceAll overriding an exclusive service scope before any deployment is queued", async () => {
+    await expect(triggerDeployment(ctx, { projectId: "project-1", serviceIds: ["svc-api"],
+      strictServiceScope: true, forceAll: true })).rejects.toThrow("cannot be combined");
+    expect(repos.deployment.create).not.toHaveBeenCalled();
+    expect(kickoffBuild).not.toHaveBeenCalled();
+  });
+  it("refuses a router broadening the exclusive target before any deployment is queued", async () => {
+    repos.service.listByProject.mockResolvedValue([
+      { id: "svc-api", name: "api", enabled: true, advanced: null },
+      { id: "svc-db", name: "db", enabled: true, advanced: null },
+    ]);
+    resolveSmartRoute.mockResolvedValue({ forceAll: true, serviceIds: undefined });
+    await expect(triggerDeployment(ctx, { projectId: "project-1", serviceIds: ["svc-api"], strictServiceScope: true }))
+      .rejects.toMatchObject({ code: "DEPLOYMENT_SCOPE_CHANGED" });
+    expect(repos.deployment.create).not.toHaveBeenCalled();
+    expect(kickoffBuild).not.toHaveBeenCalled();
+  });
   it("persists exact scope and force-pull intent for an incoming multi-service hook", async () => {
     const targets = ["svc-api", "svc-worker"];
     repos.service.listByProject.mockResolvedValue([
@@ -883,8 +993,8 @@ describe("triggerDeployment", () => {
       return { services: storedRows, driftedNames: [] };
     });
     const actualPipeline = await vi.importActual<
-      typeof import("../../../src/modules/deployments/build-pipeline")
-    >("../../../src/modules/deployments/build-pipeline");
+      typeof import("@repo/platform/engine/modules/deployments/build-pipeline")
+    >("@repo/platform/engine/modules/deployments/build-pipeline");
     resolveServicePipelineMode.mockImplementationOnce(actualPipeline.resolveServicePipelineMode);
     repos.project.findById.mockResolvedValue(
       baseProject({
@@ -956,8 +1066,8 @@ describe("triggerDeployment", () => {
       return { services: storedRows, driftedNames: [] };
     });
     const actualPipeline = await vi.importActual<
-      typeof import("../../../src/modules/deployments/build-pipeline")
-    >("../../../src/modules/deployments/build-pipeline");
+      typeof import("@repo/platform/engine/modules/deployments/build-pipeline")
+    >("@repo/platform/engine/modules/deployments/build-pipeline");
     resolveServicePipelineMode.mockImplementationOnce(actualPipeline.resolveServicePipelineMode);
     repos.project.findById.mockResolvedValue(
       baseProject({
@@ -1134,6 +1244,63 @@ describe("triggerDeployment", () => {
     expect(kickoffBuild).not.toHaveBeenCalled();
   });
 
+  it.each(["ECONNRESET", "GitHub API unavailable"])(
+    "stops before queuing when a required Compose source refresh fails: %s (#893)", async (message) => {
+      repos.project.findById.mockResolvedValue(baseProject({
+        composePath: "compose.yml", localPath: null,
+        gitOwner: "acme", gitRepo: "app", gitProvider: "github", gitUrl: "https://github.com/acme/app.git",
+      }));
+      repos.service.listByProject.mockResolvedValue(composeServices);
+      resolveProjectInfo.mockRejectedValueOnce(new Error(message));
+      await expect(triggerDeployment(ctx, { projectId: "project-1", branch: "main" }))
+        .rejects.toMatchObject({ statusCode: 502, message: expect.stringContaining(message) });
+      expect(repos.deployment.create).not.toHaveBeenCalled();
+      expect(kickoffBuild).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([null, "poisoned"])(
+    "preserves a %s legacy Compose value without blocking code-only webhooks (#893)",
+    async (baseline) => {
+      const parsed = {
+        ...composeServices[0],
+        environment: { MY_VAR: "B" },
+        environmentTemplates: { MY_VAR: "${MY_VAR}" },
+        advanced: { ...composeServices[0].advanced, environmentTemplateKeys: ["MY_VAR"] },
+      };
+      const state = installStatefulComposeRepo({
+        ...parsed,
+        environmentTemplates: undefined,
+        projectId: "project-1",
+        environment: { MY_VAR: "cached-private-value" },
+        importedSpec: baseline ? toComposeSpec(parsed) : null,
+        driftSpec: null,
+      });
+      repos.project.findById.mockResolvedValue(
+        baseProject({
+          composePath: "compose.yml",
+          localPath: null,
+          gitOwner: "acme",
+          gitRepo: "app",
+          gitProvider: "github",
+          gitUrl: "https://github.com/acme/app.git",
+        }),
+      );
+      resolveProjectInfo.mockResolvedValueOnce({ services: [parsed] });
+      await triggerDeployment(ctx, {
+        projectId: "project-1",
+        branch: "main",
+        trigger: "webhook",
+        changedPaths: ["src/index.ts"],
+      });
+      expect(state.stored().environment).toEqual({ MY_VAR: "cached-private-value" });
+      expect(state.stored().advanced?.environmentOverrideKeys).toContain("MY_VAR");
+      expect(state.stored().driftSpec).toBeNull();
+      expect(repos.deployment.create).toHaveBeenCalled();
+      expect(kickoffBuild).toHaveBeenCalled();
+    },
+  );
+
   it("keeps critical env through trigger reconciliation when a later preflight blocks deploy", async () => {
     const state = installStatefulComposeRepo(criticalApiService());
     repos.project.findById.mockResolvedValue(
@@ -1157,8 +1324,8 @@ describe("triggerDeployment", () => {
     };
     resolveProjectInfo.mockResolvedValue({ services: [proposed] });
     const actualPipeline = await vi.importActual<
-      typeof import("../../../src/modules/deployments/build-pipeline")
-    >("../../../src/modules/deployments/build-pipeline");
+      typeof import("@repo/platform/engine/modules/deployments/build-pipeline")
+    >("@repo/platform/engine/modules/deployments/build-pipeline");
     resolveServicePipelineMode.mockImplementationOnce(actualPipeline.resolveServicePipelineMode);
     runPreflightChecks.mockRejectedValueOnce(new Error("blocked after compose reconciliation"));
 
@@ -1171,12 +1338,12 @@ describe("triggerDeployment", () => {
       }),
     ).rejects.toThrow("blocked after compose reconciliation");
 
-    // The actual stored row remains deployable even though reconciliation ran
-    // and the deployment failed AFTER it. Only the proposed spec is staged as
-    // drift for an explicit operator decision.
+    // Source changes apply before preflight, but a failed deployment cannot
+    // erase the configuration needed by the next attempt.
     expect(state.stored().environment).toEqual(criticalApiEnvironment);
-    expect(state.stored().importedSpec).toEqual(criticalApiService().importedSpec);
-    expect(state.stored().driftSpec).toEqual(toComposeSpec(proposed));
+    expect(state.stored().image).toBe("example/api:2");
+    expect(state.stored().importedSpec).toEqual(toComposeSpec(proposed));
+    expect(state.stored().driftSpec).toBeNull();
     expect(runPreflightChecks).toHaveBeenCalledWith(
       expect.any(Object),
       expect.objectContaining({
@@ -1379,7 +1546,7 @@ describe("triggerDeployment", () => {
       }),
     );
     repos.deployment.findById.mockResolvedValue({
-      id: "dep-live",
+      id: "dep-live", projectId: "project-1", organizationId: "org-1",
       imageRef: "openship/app:bld_live",
       commitSha: "abc123",
       commitMessage: "live commit",
@@ -1413,10 +1580,36 @@ describe("triggerDeployment", () => {
     expect(meta.refreshServiceIds).toBeUndefined();
   });
 
+  it.each([
+    { serviceIds: undefined, expected: ["svc-api", "svc-worker", "svc-db"] },
+    { serviceIds: ["svc-api"], expected: ["svc-api"] },
+  ])("keeps a forced topology refresh at its requested scope ($expected)", async ({ serviceIds, expected }) => {
+    repos.project.findById.mockResolvedValue(baseProject({ activeDeploymentId: "dep-live" }));
+    repos.deployment.findById.mockResolvedValue({
+      id: "dep-live", projectId: "project-1", organizationId: "org-1", commitSha: "running-commit", createdAt: new Date("2026-08-20T00:00:00Z"),
+    });
+    repos.service.listByProject.mockResolvedValue([
+      { id: "svc-api", name: "api", enabled: true, image: "acme/api:1" },
+      { id: "svc-worker", name: "worker", enabled: true, image: "acme/worker:1" },
+      { id: "svc-db", name: "db", enabled: true, image: "postgres:16" },
+      { id: "svc-off", name: "disabled", enabled: false, image: "redis:7" },
+    ]);
+    // Without the explicit-all override this unrelated edit narrows an
+    // environment resource resize to just the worker.
+    repos.project.listEnvVarChangeMeta.mockResolvedValue([
+      { key: "LOG_LEVEL", serviceId: "svc-worker", updatedAt: new Date("2026-08-21T00:00:00Z") },
+    ]);
+    await triggerDeployment(ctx, { projectId: "project-1", refresh: true, forceAll: true, serviceIds });
+    expect(repos.deployment.create).toHaveBeenCalledWith(expect.objectContaining({
+      commitSha: "running-commit", forceAll: false,
+      meta: expect.objectContaining({ targetServiceIds: expected, refreshServiceIds: expected }),
+    }));
+  });
+
   it("returns an actionable 409 for a services project with nothing enabled", async () => {
     repos.project.findById.mockResolvedValue(baseProject({ activeDeploymentId: "dep-live" }));
     repos.deployment.findById.mockResolvedValue({
-      id: "dep-live",
+      id: "dep-live", projectId: "project-1", organizationId: "org-1",
       createdAt: new Date("2026-08-23T00:00:00Z"),
     });
     repos.service.listByProject.mockResolvedValue([]);
@@ -1427,7 +1620,7 @@ describe("triggerDeployment", () => {
     expect(repos.deployment.create).not.toHaveBeenCalled();
   });
 
-  it("returns an actionable 409 when there is no active deployment to refresh", async () => {
+  it.each([false, true])("requires an active deployment to refresh (service pipeline: %s)", async (useServicePipeline) => {
     repos.project.findById.mockResolvedValue(
       baseProject({
         framework: "nextjs",
@@ -1435,14 +1628,14 @@ describe("triggerDeployment", () => {
       }),
     );
     resolveServicePipelineMode.mockResolvedValue({
-      useServicePipeline: false,
+      useServicePipeline,
       servicePreflightServices: [],
-      useSingleAppPipeline: true,
+      useSingleAppPipeline: !useServicePipeline,
     });
 
     await expect(
       triggerDeployment(ctx, { projectId: "project-1", refresh: true }),
-    ).rejects.toMatchObject({ statusCode: 409 });
+    ).rejects.toMatchObject({ statusCode: 409, message: "Nothing to refresh yet — deploy the project first." });
     expect(repos.deployment.create).not.toHaveBeenCalled();
   });
 
@@ -1456,7 +1649,7 @@ describe("triggerDeployment", () => {
       }),
     );
     repos.deployment.findById.mockResolvedValue({
-      id: "dep-live",
+      id: "dep-live", projectId: "project-1", organizationId: "org-1",
       createdAt: new Date("2026-08-23T00:00:00Z"),
     });
     resolveServicePipelineMode.mockResolvedValue({
@@ -1480,7 +1673,7 @@ describe("triggerDeployment", () => {
       }),
     );
     repos.deployment.findById.mockResolvedValue({
-      id: "dep-live",
+      id: "dep-live", projectId: "project-1", organizationId: "org-1",
       imageRef: "ws-live",
       createdAt: new Date("2026-08-23T00:00:00Z"),
     });
@@ -1529,17 +1722,16 @@ describe("redeployBuildSession environment snapshot", () => {
     kickoffBuild.mockResolvedValue("session-new");
   });
 
-  it("retries an old mislabelled PRT deployment with the project's actual scope", async () => {
-    repos.service.reconcileFromCompose.mockResolvedValue({ driftedNames: [] });
-    resolveProjectInfo.mockResolvedValue({ services: composeServices });
-    repos.project.findById.mockResolvedValue(
-      baseProject({ environmentType: "preview", activeDeploymentId: "dep-old" }),
-    );
-    await redeployBuildSession(ctx, "dep-old");
-    expect(repos.project.getEnvMap).toHaveBeenCalledWith("project-1", "preview", null);
-    expect(repos.deployment.create).toHaveBeenCalledWith(
-      expect.objectContaining({ environment: "preview" }),
-    );
+  it("refuses to replay a legacy preview deployment on the production runtime (#195)", async () => {
+    const old = await repos.deployment.findById();
+    repos.deployment.findById.mockResolvedValue({ ...old, environment: "preview" });
+
+    await expect(redeployBuildSession(ctx, "dep-old")).rejects.toMatchObject({
+      code: "DEPLOYMENT_ENVIRONMENT_TARGET_MISMATCH",
+    });
+    expect(repos.project.getEnvMap).not.toHaveBeenCalled();
+    expect(repos.deployment.create).not.toHaveBeenCalled();
+    expect(kickoffBuild).not.toHaveBeenCalled();
   });
 
   it("uses current project env and keeps service scopes out of the flat snapshot", async () => {
@@ -1577,6 +1769,7 @@ describe("redeployBuildSession environment snapshot", () => {
   it("updates update_status cache when resolving a new commit on redeploy", async () => {
     const project = baseProject({
       id: "project-1",
+      organizationId: "org-1",
       activeDeploymentId: "dep-old",
       gitOwner: "oblien",
       gitRepo: "openship",
@@ -1696,7 +1889,8 @@ describe("redeployBuildSession environment snapshot", () => {
     await redeployBuildSession(ctx, "dep-old");
 
     expect(state.stored().environment).toEqual(criticalApiEnvironment);
-    expect(state.stored().driftSpec).toEqual(toComposeSpec(proposed));
+    expect(state.stored().driftSpec).toBeNull();
+    expect(state.stored().image).toBe("example/api:2");
     expect(repos.deployment.create).toHaveBeenCalledWith(
       expect.objectContaining({
         commitSha: "new-sha",
@@ -1800,26 +1994,31 @@ describe("requestBuildAccess — folder-upload compose services", () => {
     resolveProjectSourceEnv.mockResolvedValue(undefined);
   });
 
-  it("uses preview variables for the PRT wizard without an explicit environment", async () => {
-    repos.project.findById.mockResolvedValue(baseProject({ environmentType: "preview" }));
-    await requestBuildAccess(ctx, { projectId: "project-1" });
-    expect(repos.project.getEnvMap).toHaveBeenCalledWith("project-1", "preview", null);
-    expect(repos.deployment.create).toHaveBeenCalledWith(
-      expect.objectContaining({ environment: "preview" }),
-    );
+  it("persists the public exclusive folder scope without broadening the service set", async () => {
+    const uploadSessionId = seedSession();
+    repos.service.listByProject.mockResolvedValue([
+      { id: "api-id", name: "api", enabled: true, advanced: null },
+      { id: "db-id", name: "database", enabled: true, advanced: null },
+    ]);
+    await requestBuildAccess(ctx, { projectId: "project-1", uploadSessionId,
+      serviceIds: ["api-id"], strictServiceScope: true });
+    expect(repos.deployment.create.mock.calls.at(-1)?.[0]?.meta).toMatchObject({
+      targetServiceIds: ["api-id"], strictServiceScope: true,
+    });
   });
-
-  it("rejects a wizard environment mismatch before synchronizing or writing anything", async () => {
-    repos.project.findById.mockResolvedValue(baseProject({ environmentType: "preview" }));
-    await expect(
-      requestBuildAccess(ctx, { projectId: "project-1", environment: "production" }),
-    ).rejects.toMatchObject({ statusCode: 400, code: "PROJECT_ENVIRONMENT_MISMATCH" });
-    expect(repos.project.getEnvMap).not.toHaveBeenCalled();
-    expect(repos.project.mergeEnvVars).not.toHaveBeenCalled();
+  it("refuses a stale public folder scope without queuing or starting deployment", async () => {
+    const uploadSessionId = seedSession();
+    await expect(requestBuildAccess(ctx, { projectId: "project-1", uploadSessionId,
+      serviceIds: ["missing"], strictServiceScope: true })).rejects.toThrow("missing, disabled, or cross-project");
+    expect(repos.deployment.create).not.toHaveBeenCalled();
+    expect(kickoffBuild).not.toHaveBeenCalled();
+  });
+  it("refuses an empty exclusive folder scope before source reconciliation", async () => {
+    await expect(requestBuildAccess(ctx, { projectId: "project-1", serviceIds: [], strictServiceScope: true }))
+      .rejects.toThrow("at least one service ID");
     expect(repos.service.syncFromCompose).not.toHaveBeenCalled();
     expect(repos.deployment.create).not.toHaveBeenCalled();
   });
-
   it("rejects a foreign folder target before service or deployment writes", async () => {
     const uploadSessionId = seedSession();
     repos.server.getInOrganization.mockResolvedValue(null);
@@ -2013,7 +2212,15 @@ describe("requestBuildAccess — folder-upload compose services", () => {
 
     const captured = repos.deployment.create.mock.calls.at(-1)?.[0]?.envVars;
     expect(decrypt(captured.SERVER_URL)).toBe("https://override.example.com");
-    expect(repos.project.mergeEnvVars).not.toHaveBeenCalled();
+    expect(repos.project.mergeEnvVars).toHaveBeenCalledExactlyOnceWith(
+      "project-1",
+      "production",
+      [expect.objectContaining({ key: "SERVER_URL" })],
+      [],
+    );
+    expect(decrypt(repos.project.mergeEnvVars.mock.calls[0][2][0].value)).toBe(
+      "https://override.example.com",
+    );
   });
 
   it("recovers only explicitly imported root .env keys from the trusted source scan", async () => {
@@ -2193,6 +2400,22 @@ describe("requestBuildAccess — folder-upload compose services", () => {
     );
   });
 
+  it.each([{}, { DATABASE_URL: "stale-value" }])("refreshes connection-owned values in a submitted environment %j", async submitted => {
+    const uploadSessionId = seedSession();
+    const value = "postgresql://user:current@shared-db:5432/app";
+    const refresh = vi.spyOn(projectConnections, "refreshConnectionEnv").mockResolvedValueOnce({ DATABASE_URL: value });
+    repos.project.listEnvVars.mockResolvedValue([{ key: "DATABASE_URL", value: encrypt(value), isSecret: true, environment: "production", serviceId: null }]);
+    try {
+      await requestBuildAccess(ctx, {
+        projectId: "project-1", uploadSessionId, environment: "production",
+        envVars: { PUBLIC_SETTING: "keep", ...submitted },
+      });
+      const captured = repos.deployment.create.mock.calls.at(-1)?.[0]?.envVars;
+      expect(decrypt(captured.DATABASE_URL)).toBe(value);
+      expect(decrypt(captured.PUBLIC_SETTING)).toBe("keep");
+    } finally { refresh.mockRestore(); }
+  });
+
   it("#801: preserves a stored secret submitted as the mask sentinel", async () => {
     const uploadSessionId = seedSession();
     const storedSecret = encrypt("runtime-secret");
@@ -2223,12 +2446,50 @@ describe("requestBuildAccess — folder-upload compose services", () => {
     const captured = repos.deployment.create.mock.calls.at(-1)?.[0]?.envVars;
     expect(decrypt(captured.AUTH_SECRET)).toBe("runtime-secret");
     expect(decrypt(captured.PUBLIC_SETTING)).toBe("new-value");
-    expect(repos.project.bulkSetEnvVars).toHaveBeenCalledWith(
+    expect(repos.project.mergeEnvVars).toHaveBeenCalledWith(
       "project-1",
       "production",
       expect.arrayContaining([
         expect.objectContaining({ key: "AUTH_SECRET", value: storedSecret, isSecret: true }),
       ]),
+      [],
+    );
+  });
+
+  it("keeps saved project values in the deployment and storage when the caller submits only one changed key", async () => {
+    const uploadSessionId = seedSession();
+    const saved = encrypt("saved-credential");
+    repos.project.listEnvVars.mockResolvedValue([
+      {
+        key: "DATABASE_CREDENTIAL",
+        value: saved,
+        isSecret: true,
+        environment: "production",
+        serviceId: null,
+      },
+      {
+        key: "LOG_LEVEL",
+        value: encrypt("info"),
+        isSecret: false,
+        environment: "production",
+        serviceId: null,
+      },
+    ]);
+    await requestBuildAccess(ctx, {
+      projectId: "project-1",
+      uploadSessionId,
+      environment: "production",
+      envVars: { LOG_LEVEL: "debug" },
+    });
+    const captured = repos.deployment.create.mock.calls.at(-1)?.[0]?.envVars;
+    expect(decrypt(captured.DATABASE_CREDENTIAL)).toBe("saved-credential");
+    expect(decrypt(captured.LOG_LEVEL)).toBe("debug");
+    expect(repos.project.bulkSetEnvVars).not.toHaveBeenCalled();
+    expect(repos.project.mergeEnvVars).toHaveBeenCalledWith(
+      "project-1",
+      "production",
+      [expect.objectContaining({ key: "LOG_LEVEL" })],
+      [],
     );
   });
 
@@ -2321,6 +2582,43 @@ describe("requestBuildAccess — folder-upload compose services", () => {
     expect(repos.deployment.create).not.toHaveBeenCalled();
   });
 
+  it("preserves saved service variables omitted by a partial deployment form", async () => {
+    const uploadSessionId = seedSession();
+    repos.service.listByProject.mockResolvedValue([
+      {
+        ...scannedServices[0],
+        id: "svc-api",
+        projectId: "project-1",
+        kind: "compose",
+        enabled: true,
+        environment: {
+          TOKEN: "saved-service-secret",
+          NODE_ENV: "production",
+          URL: "${ORIGIN}/api",
+        },
+        advanced: { environmentTemplateKeys: ["URL"], environmentOverrideKeys: ["TOKEN"] },
+      },
+    ]);
+    await requestBuildAccess(ctx, {
+      projectId: "project-1",
+      uploadSessionId,
+      services: [{ ...scannedServices[0], environment: { NODE_ENV: "staging" } }] as any,
+    });
+    const persisted = repos.service.syncFromCompose.mock.calls.at(-1)?.[1]?.[0];
+    expect(persisted.environment).toEqual({
+      TOKEN: "saved-service-secret",
+      NODE_ENV: "staging",
+      URL: "${ORIGIN}/api",
+    });
+    expect(persisted.advanced).toMatchObject({
+      environmentTemplateKeys: ["URL"],
+      environmentOverrideKeys: ["TOKEN"],
+    });
+    expect(
+      repos.deployment.create.mock.calls.at(-1)?.[0]?.meta.composeServices[0].environment,
+    ).toEqual(persisted.environment);
+  });
+
   // #336: the wizard sees env masked, so a deploy request can echo "••••••••".
   // The real value must be recovered (from the pre-mask session scan / stored
   // rows) before persistence — else the container launches with KEY=••••••••.
@@ -2387,6 +2685,41 @@ describe("requestBuildAccess — folder-upload compose services", () => {
       { removeMissing: false },
     );
   });
+
+  it.each(["upload", "stored"])(
+    "#854: restores build-arg-only masks from the %s before saving the deploy snapshot",
+    async (source) => {
+      const service = {
+        name: "api",
+        image: "ghcr.io/acme/api:1",
+        build: ".",
+        ports: [],
+        dependsOn: [],
+        environment: {},
+        volumes: [],
+        buildArgs: { TOKEN: "original-token", INHERITED: null },
+      };
+      const uploadSessionId = seedSession({ services: source === "upload" ? [service] : [] });
+      if (source === "stored") {
+        repos.service.listByProject.mockResolvedValue([
+          { ...service, id: "svc-1", kind: "compose", enabled: true },
+        ]);
+      }
+      await requestBuildAccess(ctx, {
+        projectId: "project-1",
+        uploadSessionId,
+        services: [
+          { ...service, buildArgs: { TOKEN: ENV_MASK, INHERITED: null, GHOST: ENV_MASK } },
+        ],
+      } as any);
+      const meta = repos.deployment.create.mock.calls.at(-1)?.[0].meta as any;
+      expect(meta.composeServices[0].buildArgs).toEqual({
+        TOKEN: "original-token",
+        INHERITED: null,
+      });
+      expect(JSON.stringify(meta)).not.toContain(ENV_MASK);
+    },
+  );
 
   it("leaves an existing services project's own rows alone", async () => {
     const uploadSessionId = seedSession();
@@ -2470,8 +2803,8 @@ describe("requestBuildAccess — folder-upload compose services", () => {
 
   it("does not parse or materialize compose for an explicit single-app deploy (#689)", async () => {
     const actualPipeline = await vi.importActual<
-      typeof import("../../../src/modules/deployments/build-pipeline")
-    >("../../../src/modules/deployments/build-pipeline");
+      typeof import("@repo/platform/engine/modules/deployments/build-pipeline")
+    >("@repo/platform/engine/modules/deployments/build-pipeline");
     resolveServicePipelineMode.mockImplementationOnce(actualPipeline.resolveServicePipelineMode);
     repos.project.findById.mockResolvedValue(
       baseProject({

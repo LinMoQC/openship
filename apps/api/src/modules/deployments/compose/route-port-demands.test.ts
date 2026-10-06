@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { collectComposeRoutePortDemands } from "./route-port-demands";
+import { collectComposeRoutePortDemands } from "@repo/platform/engine/modules/deployments/compose/route-port-demands";
 
 const project = {
   id: "proj-a",

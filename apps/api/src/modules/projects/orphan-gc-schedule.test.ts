@@ -65,27 +65,27 @@ vi.mock("@repo/adapters", () => ({
   ownsBuiltImage: (ref: string) => ref.startsWith("openship/"),
 }));
 
-vi.mock("../../lib/server-reachability", () => ({
+vi.mock("@repo/platform/engine/lib/server-reachability", () => ({
   createReachabilityProbe: () => ({ isReachable: h.isReachable }),
 }));
 
-vi.mock("../../lib/remote-state", () => ({ isConnectionLoss: () => false }));
+vi.mock("@repo/platform/engine/lib/remote-state", () => ({ isConnectionLoss: () => false }));
 
-vi.mock("../../lib/deployment-runtime", () => ({
+vi.mock("@repo/platform/engine/lib/deployment-runtime", () => ({
   resolveDeploymentPlatform: h.resolveDeploymentPlatform,
   disposePlatform: h.disposePlatform,
 }));
 
-vi.mock("../deployments/pinned-host-ports", () => ({
+vi.mock("@repo/platform/engine/modules/deployments/pinned-host-ports", () => ({
   convergeTargetHostPortClaims: h.convergeClaims,
 }));
 
-vi.mock("../../lib/managed-edge-proxy", () => ({
+vi.mock("@repo/platform/engine/lib/managed-edge-proxy", () => ({
   releaseManagedHostnames: h.releaseManagedHostnames,
 }));
 
 import { DockerRuntime } from "@repo/adapters";
-import { runOrphanSweep } from "./orphan-gc-schedule";
+import { runOrphanSweep } from "@repo/platform/engine/modules/projects/orphan-gc-schedule";
 
 const routeOrphan = (over: Record<string, unknown> = {}) => ({
   id: "orphan-route-1",

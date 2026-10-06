@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { repos } from "@repo/db";
 
 /**
  * Record-only ("Remove from Openship only") delete contract.
@@ -36,6 +37,7 @@ const h = vi.hoisted(() => ({
   /** Links from the app being deleted into the projects using it. */
   consumers: [] as Array<{
     id: string;
+    sourceServiceId?: string | null;
     targetProjectId: string;
     envKey: string;
     mode: string;
@@ -83,6 +85,7 @@ const h = vi.hoisted(() => ({
 
 vi.mock("@repo/db", () => ({
   repos: {
+    clusterDatabase: { list: vi.fn(async () => []) },
     project: {
       findById: vi.fn(async () => h.project),
       claimDeletion: h.claimDeletion,
@@ -113,35 +116,35 @@ vi.mock("@repo/db", () => ({
   },
 }));
 
-vi.mock("./project-connection.service", () => ({
+vi.mock("@repo/platform/engine/modules/projects/project-connection.service", () => ({
   unlinkConsumersOfSource: h.unlinkConsumersOfSource,
 }));
 
-vi.mock("./project-cleanup.service", () => ({
+vi.mock("@repo/platform/engine/modules/projects/project-cleanup.service", () => ({
   collectProjectManifest: h.collectProjectManifest,
   executeCleanup: h.executeCleanup,
   disposeManifestRuntimes: h.disposeManifestRuntimes,
   hasPendingTimedOutCleanup: vi.fn(() => false),
 }));
-vi.mock("../../lib/project-runtime-lock", () => ({
+vi.mock("@repo/platform/engine/lib/project-runtime-lock", () => ({
   withProjectRuntimeLock: async (_projectId: string, run: () => Promise<unknown>) => run(),
 }));
-vi.mock("../../lib/openship-manifest-sync", () => ({
+vi.mock("@repo/platform/engine/lib/openship-manifest-sync", () => ({
   removeProjectFromServerManifests: h.removeProjectFromServerManifests,
 }));
-vi.mock("../deployments/build.service", () => ({
+vi.mock("@repo/platform/engine/modules/deployments/build.service", () => ({
   cancelBuildSession: h.cancelBuildSession,
 }));
-vi.mock("../migration/migration.orchestrator", () => ({
+vi.mock("@repo/platform/engine/modules/migration/migration.orchestrator", () => ({
   migrationOrchestrator: { cancel: h.cancelMigration },
 }));
-vi.mock("../github/github.service", () => ({ deleteWebhook: h.deleteGitHubWebhook }));
-vi.mock("../mail/webmail/webmail-install.service", () => ({
+vi.mock("@repo/platform/engine/modules/github/github.service", () => ({ deleteWebhook: h.deleteGitHubWebhook }));
+vi.mock("@repo/platform/engine/modules/mail/webmail/webmail-install.service", () => ({
   cleanupWebmailInstall: h.cleanupWebmailInstall,
 }));
-vi.mock("../../config", () => ({ env: { CLOUD_MODE: false } }));
+vi.mock("@repo/platform/engine/config/index", () => ({ env: { CLOUD_MODE: false } }));
 
-import { teardownProject, type TeardownStep } from "./project-teardown";
+import { teardownProject, type TeardownStep } from "@repo/platform/engine/modules/projects/project-teardown";
 
 const ctx = { organizationId: "org1", userId: "u1" } as never;
 
@@ -173,6 +176,16 @@ beforeEach(() => {
   h.activeMigration = null;
   h.listByProjectCalls = 0;
   h.consumers = [];
+});
+
+describe("teardownProject — dependency inspection", () => {
+  it.each([false, true])("keeps the project when its stored-data guard cannot be checked (recordOnly=%s)", async recordOnly => {
+    vi.mocked(repos.project.findById).mockRejectedValueOnce(new Error("Database unavailable"));
+    await expect(teardownProject(ctx, "p1", { force: true, recordOnly })).rejects.toThrow("Database unavailable");
+    expect(h.claimDeletion).not.toHaveBeenCalled();
+    expect(h.executeCleanup).not.toHaveBeenCalled();
+    expect(h.deleteHard).not.toHaveBeenCalled();
+  });
 });
 
 describe("teardownProject — the GitHub webhook step vs. repo write access", () => {
@@ -210,6 +223,17 @@ describe("teardownProject — the GitHub webhook step vs. repo write access", ()
 });
 
 describe("teardownProject — deleting a linked app unlinks it from the projects using it", () => {
+  it.each([false, true])("preserves a shared service and its consumers before cleanup (recordOnly=%s)", async recordOnly => {
+    h.consumers = [{ id: "shared-link", sourceServiceId: "db", targetProjectId: "consumer", envKey: "DATABASE_URL", mode: "internal" }];
+    const result = await teardownProject(ctx, "p1", { force: true, recordOnly });
+    expect(result.rowDeleted).toBe(false);
+    expect(stepOf(result.steps, "load_project")?.error).toMatch(/Disconnect/);
+    expect(h.collectProjectManifest).not.toHaveBeenCalled();
+    expect(h.executeCleanup).not.toHaveBeenCalled();
+    expect(h.deleteHard).not.toHaveBeenCalled();
+    expect(h.unlinkConsumersOfSource).not.toHaveBeenCalled();
+  });
+
   it("unlinks every consuming project instead of refusing the delete", async () => {
     // `project_connection.sourceProjectId` is ON DELETE RESTRICT, so the links
     // have to go before the row can drop. The consuming projects are NOT touched
@@ -517,6 +541,55 @@ describe("teardownProject — record-only delete touches nothing on the server",
     expect(h.executeCleanup).toHaveBeenCalled();
     expect(h.removeProjectFromServerManifests).toHaveBeenCalled();
     expect(stepOf(res.steps, "runtime_cleanup")?.status).toBe("ok");
+  });
+});
+
+describe("teardownProject — cluster namespace cleanup", () => {
+  it.each([true, false])(
+    "preserves project cleanup with remaining workloads: %s",
+    async (hasWorkloads) => {
+      const manifest = {
+        projectId: "p1",
+        organizationId: "org1",
+        projectCleanup: true,
+        resources: hasWorkloads
+          ? [{ type: "container", ref: "k8s:release", label: "application" }]
+          : [],
+        runtimes: [{ name: "kubernetes", cleanupProject: vi.fn() }],
+      };
+      h.collectProjectManifest.mockResolvedValueOnce(manifest as never);
+
+      const result = await teardownProject(ctx, "p1", { force: false });
+
+      // Namespace cleanup remains necessary after a previous attempt removed
+      // every workload and route. It must not be filtered out or skipped.
+      expect(h.executeCleanup).toHaveBeenCalledWith(manifest);
+      expect(stepOf(result.steps, "runtime_cleanup")?.status).toBe("ok");
+      expect(result.rowDeleted).toBe(true);
+    },
+  );
+
+  it("retains the project for retry when its remaining namespace cannot be cleaned", async () => {
+    h.collectProjectManifest.mockResolvedValueOnce({
+      projectId: "p1",
+      organizationId: "org1",
+      projectCleanup: true,
+      resources: [],
+      runtimes: [{ name: "kubernetes", cleanupProject: vi.fn() }],
+    } as never);
+    h.executeCleanup.mockResolvedValueOnce({
+      total: 1,
+      succeeded: 0,
+      failed: [{ label: "Cluster project namespace", error: "Persistent storage remains" }],
+    } as never);
+
+    const result = await teardownProject(ctx, "p1", { force: false });
+
+    expect(result.rowDeleted).toBe(false);
+    expect(result.canForceOrphan).toBe(false);
+    expect(stepOf(result.steps, "runtime_cleanup")?.error).toContain("Persistent storage remains");
+    expect(h.deleteHard).not.toHaveBeenCalled();
+    expect(h.clearDeletionInProgress).toHaveBeenCalled();
   });
 });
 

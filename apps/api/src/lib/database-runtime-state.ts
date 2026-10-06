@@ -14,18 +14,18 @@
 
 import { withTimeout } from "@repo/core";
 
-import { clearAuthModeCache } from "./auth-mode";
-import { clearBoxOwningOrgCache } from "./box-org";
-import { clearAllCacheStores } from "./cache-store";
-import { clearHostControlCache, syncHostControlOverride } from "./host-control";
+import { clearAuthModeCache } from "@repo/platform/engine/lib/auth-mode";
+import { clearBoxOwningOrgCache } from "@repo/platform/engine/lib/box-org";
+import { clearAllCacheStores } from "@repo/platform/engine/lib/cache-store/index";
+import { clearHostControlCache, syncHostControlOverride } from "@repo/platform/engine/lib/host-control";
 import { invalidateLocalUserCache } from "./local-user";
-import { invalidateInstanceTransportCache, invalidatePlatformTransport } from "./mail";
+import { invalidateInstanceTransportCache, invalidatePlatformTransport } from "@repo/platform/engine/lib/mail";
 import { invalidateMcpSigningKeyCache } from "./mcp-oidc-keys";
-import { clearProductModeCache } from "./product-mode";
-import { invalidateSelfAppPublicUrl } from "./public-url";
-import { sshManager } from "./ssh-manager";
-import { clearMailPortReachabilityCache } from "../modules/mail/mail-port-reachability.service";
-import { clearServiceVolumeSizeCache } from "../modules/services/service.service";
+import { clearProductModeCache } from "@repo/platform/engine/lib/product-mode";
+import { invalidateSelfAppPublicUrl } from "@repo/platform/engine/lib/public-url";
+import { sshManager } from "@repo/platform/engine/lib/ssh-manager";
+import { clearMailPortReachabilityCache } from "@repo/platform/engine/modules/mail/mail-port-reachability.service";
+import { clearServiceVolumeSizeCache } from "@repo/platform/engine/modules/services/service.service";
 
 type RefreshFailure = { name: string; error: unknown };
 const ASYNC_RECONCILE_TIMEOUT_MS = 10_000;

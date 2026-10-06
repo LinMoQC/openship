@@ -110,8 +110,8 @@ vi.mock("@repo/db", async (importOriginal) => ({
   },
 }));
 
-import { cloneProjectToServer, CLONE_EXCLUSIONS } from "./project-clone.service";
-import type { DiscoveredService } from "../migration/docker-reconcile";
+import { cloneProjectToServer, CLONE_EXCLUSIONS } from "@repo/platform/engine/modules/projects/project-clone.service";
+import type { DiscoveredService } from "@repo/platform/engine/modules/migration/docker-reconcile";
 
 /** A running container as discovery reports it — note the RESOLVED, namespaced volume source. */
 const discovered = (name: string, volumeSource: string, target: string): DiscoveredService =>

@@ -14,7 +14,7 @@ import { readFileSync } from "node:fs";
  * transfer, and the properties that matter here are all structural — WHEN the record is written,
  * WHO removes it, and that the source is never in scope.
  */
-const src = readFileSync(new URL("./migration.orchestrator.ts", import.meta.url), "utf8");
+const src = readFileSync(new URL("../../../../../packages/platform/src/engine/modules/migration/migration.orchestrator.ts", import.meta.url), "utf8");
 
 /** The rollback method body, bounded so a match cannot drift in from a neighbour. */
 const rollbackBody = (() => {

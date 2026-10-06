@@ -21,9 +21,11 @@ import {
   rm as fsRm,
   mkdir as fsMkdir,
   readFile as fsReadFile,
+  readlink as fsReadlink,
   readdir as fsReaddir,
   rename as fsRename,
   stat as fsStat,
+  symlink as fsSymlink,
 } from "node:fs/promises";
 import { execFile as cpExecFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
@@ -59,6 +61,7 @@ import {
 import { reloadBareOpenResty } from "./openresty-reload";
 import {
   safeErrorMessage,
+  isLoopbackHost,
   sanitizeProxySettings,
   resolveRedirectStatus,
   PROXY_DIRECTIVES,
@@ -68,10 +71,17 @@ import {
   type ProxySettings,
 } from "@repo/core";
 import { cloudEdgeRealIpConf, isCloudFrontedHost } from "./edge-real-ip";
+import { EDGE_UPSTREAM_DOWN_HANDLER } from "./edge-upstream-down";
 import { sq } from "../system/local-shell";
 import type { RootChecked } from "../system/privilege";
 import { edgeDownExplanation } from "../system/edge-exec-error";
 import { BOOTSTRAP_CERT_SEGMENT, validateCertFor } from "../system/proxy/cert-material";
+import { firstDirective, locationBlocks, stripComments } from "../system/proxy/import/parse-utils";
+import {
+  certbotLineageDirs,
+  isCertbotLineageName,
+  parseCertbotRenewalConfig,
+} from "../system/proxy/certbot-lineages";
 import {
   probeStaticOutput,
   type OutputProbeResult,
@@ -196,8 +206,11 @@ const FORWARD_VARS = `    set $openship_fwd_proto $scheme;
  * 2 — `proxy_pass_header X-Accel-Buffering`, so an upstream's no-buffering instruction
  *     survives the second proxy hop. Vhosts written before it stall SSE behind Cloud's
  *     edge (GH-570).
+ * 3 — the upstream-down `error_page` handler ({@link EDGE_UPSTREAM_DOWN_HANDLER}). Vhosts
+ *     written before it serve OpenResty's stock 502 — which, behind Openship Cloud's
+ *     edge, is a page branded for a third party on the operator's own domain (#556).
  */
-export const VHOST_GENERATION = 2;
+export const VHOST_GENERATION = 3;
 
 /** Marker line carrying {@link VHOST_GENERATION}, matched by {@link readVhostGeneration}. */
 const GENERATION_MARKER = `# openship-vhost-gen: ${VHOST_GENERATION}`;
@@ -1225,6 +1238,18 @@ interface FileSnapshot {
 // ─── Implementation ──────────────────────────────────────────────────────────
 
 export class NginxProvider implements RoutingProvider, SslProvider {
+  async dnsChallengeProvider() {
+    const { createAcmeDnsProvider } = await import("./acme-dns");
+    return createAcmeDnsProvider({
+      directoryUrl: this.acmeDirectoryUrl,
+      email: this.acmeEmail,
+      termsOfServiceAgreed: this.acmeTosAgreed,
+      eabKid: this.acmeEabKid,
+      eabHmacKey: this.acmeEabHmacKey,
+      keyType: this.acmeKeyType,
+      caPem: this.acmeCaBundle ? await this._readFile(this.acmeCaBundle) : undefined,
+    });
+  }
   private sitesDir: string;
   private readonly acmeEmail: string | undefined;
   private readonly acmeDirectoryUrl: string | undefined;
@@ -1407,28 +1432,49 @@ export class NginxProvider implements RoutingProvider, SslProvider {
     await this.executor.exec(`chmod ${sq(mode.toString(8))} ${sq(path)}`);
   }
 
+  private async _readlink(path: string): Promise<string | null> {
+    const link = await (
+      this.executor ? this.executor.exec(`readlink ${sq(path)} 2>/dev/null`) : fsReadlink(path)
+    ).catch(() => "");
+    return link.trim() || null;
+  }
+
   /**
-   * Put `fullchain.pem` + `privkey.pem` in `dir` as ONE atomic step.
-   *
-   * Both files are written into a temp sibling dir, then the pair is moved into
-   * place together. A cert and its key are only valid as a set — writing them
-   * individually means a crash, a full disk, or a dropped SSH connection between
-   * the two leaves the new cert next to the previous key, and `openresty -t` then
-   * fails for the WHOLE edge (every domain, not just this one) until someone
-   * notices. `mv -T`/rename of the staged dir also means a concurrent reload sees
-   * either the old pair or the new one, never a half-written PEM.
+   * Stage a validated pair before publishing it to the served directory. Remote
+   * publication uses one command; callers reload only after both moves complete.
+   * Lineage links follow future Certbot renewals, while manual uploads replace
+   * those links without overwriting the managed archive.
    */
-  private async stageCertDir(dir: string, cert: ManualCert): Promise<void> {
+  private async stageCertDir(
+    dir: string,
+    cert: ManualCert | { lineageDir: string },
+  ): Promise<void> {
     const staging = `${dir}.staging-${process.pid}-${randomBytes(4).toString("hex")}`;
+    const names = ["fullchain.pem", "privkey.pem"];
+    if ("lineageDir" in cert) {
+      for (let i = names.length - 1; i >= 0; i--) {
+        const link = await this._readlink(join(dir, names[i]));
+        if (link && edgePath.resolve(dir, link) === join(cert.lineageDir, names[i])) {
+          names.splice(i, 1);
+        }
+      }
+      if (!names.length) return;
+    }
     try {
       await this._mkdir(staging);
-      await this._writeFile(join(staging, "fullchain.pem"), cert.certPem);
-      // 0600 on the KEY, and it has to be stated here rather than inherited: certbot
-      // chmods its own `live/`+`archive/` to 0700, but an operator-uploaded or
-      // migration-carried cert is the path where certbot never ran, so `_mkdir` creates
-      // `live/<domain>` at 0755 and the default-mode key inside it was world-readable at
-      // rest. `mv` preserves the mode, so setting it on the staged copy is what carries.
-      await this._writeFile(join(staging, "privkey.pem"), cert.keyPem, 0o600);
+      if ("lineageDir" in cert) {
+        this._assertOneNamespace(dir, `link certificates in ${dir}`);
+        for (const name of names) {
+          const target = join(cert.lineageDir, name);
+          const link = join(staging, name);
+          if (this.executor) await this.executor.exec(`ln -s ${sq(target)} ${sq(link)}`);
+          else await fsSymlink(target, link);
+        }
+      } else {
+        await this._writeFile(join(staging, "fullchain.pem"), cert.certPem);
+        // Imported keys need their own restrictive mode; mv preserves it.
+        await this._writeFile(join(staging, "privkey.pem"), cert.keyPem, 0o600);
+      }
       if (this.executor) {
         // `mv staging/* dir/` (not `mv staging dir`) so an EXISTING cert dir is
         // updated rather than nested inside itself, and certbot's own sibling
@@ -1440,12 +1486,11 @@ export class NginxProvider implements RoutingProvider, SslProvider {
         // message) — don't drop that mode without adding the check here.
         await this._mkdir(dir);
         await this.executor.exec(
-          `mv -f ${sq(join(staging, "fullchain.pem"))} ${sq(join(staging, "privkey.pem"))} ${sq(dir)}/`,
+          `mv -f ${names.map((name) => sq(join(staging, name))).join(" ")} ${sq(dir)}/`,
         );
       } else {
         await fsMkdir(dir, { recursive: true });
-        await fsRename(join(staging, "fullchain.pem"), join(dir, "fullchain.pem"));
-        await fsRename(join(staging, "privkey.pem"), join(dir, "privkey.pem"));
+        for (const name of names) await fsRename(join(staging, name), join(dir, name));
       }
     } finally {
       await this._rm(staging).catch(() => undefined);
@@ -1885,10 +1930,22 @@ export class NginxProvider implements RoutingProvider, SslProvider {
         ? `\n\n${renderSlashFallback(route.staticRoot)}`
         : "";
 
+    // The upstream-down page (#556), appended to every block that serves — same reason as
+    // `slashFallback` above: it is a named location, so it has to exist in whichever server
+    // block the `error_page` fired in.
+    //
+    // Only where something can actually 502. A host redirect has no upstream at all, and a
+    // static route serves from disk — EXCEPT when a compiled `vercel.json` gave it proxy
+    // locations, which is why this tests for an upstream rather than for `!staticRoot`.
+    const proxiesUpstream =
+      !hostRedirect &&
+      (!("staticRoot" in route && route.staticRoot) || (route.proxyLocations?.length ?? 0) > 0);
+    const upstreamDown = proxiesUpstream ? `\n\n${EDGE_UPSTREAM_DOWN_HANDLER}` : "";
+
     // `location /` for a block that serves the app.
     const serveLocation = `    location / {
         ${redirectRules}${urlShape}${locationBody}
-    }${slashFallback}`;
+    }${slashFallback}${upstreamDown}`;
 
     // `location /` for the :80 block of a route that has a real cert: send the
     // visitor to https — unless a CDN already terminated TLS and reached us on
@@ -1904,7 +1961,7 @@ export class NginxProvider implements RoutingProvider, SslProvider {
       ? serveLocation
       : `    location / {
         ${HTTPS_UPGRADE}${redirectRules}${urlShape}${locationBody}
-    }${slashFallback}`;
+    }${slashFallback}${upstreamDown}`;
 
     // Everything both server blocks share, after the per-block preamble.
     const sharedBody = `${serverHeaders}${proxyOpts}
@@ -2392,8 +2449,8 @@ ${serveLocation}
   /**
    * Provision a TLS certificate using certbot.
    *
-   * HTTP-01 ONLY — there is no DNS-01 path anywhere in this file, and the DNS credentials the
-   * product stores are for record MANAGEMENT, not for challenges.
+   * Uses HTTP-01 by default. DNS-01 requires hooks from the engine's connected
+   * DNS provider; wildcard hostnames always select DNS-01.
    *
    * The authenticator is `--standalone` on {@link ACME_HTTP01_PORT} (a loopback alt-port), with
    * the edge proxying `/.well-known/acme-challenge/` to it — see `ACME_CHALLENGE_LOCATION`. So
@@ -2419,8 +2476,13 @@ ${serveLocation}
     // near-expiry / a deliberate renew — without it this short-circuit would
     // return a stale cert and a renewal would silently no-op.
     if (!opts?.force && (await this.certsExist(domain))) {
-      return this.readCertInfo(domain);
+      const existing = await this.readCertInfo(domain);
+      if (existing.verified) await this.activateCert(domain);
+      return existing;
     }
+
+    const lineage =
+      (await this.findCertbotLineage(domain)) ?? (await this.unusedCertbotLineageName(domain));
 
     // Defense-in-depth: only pass acmeEmail when it's a plausible address.
     // (_exec now shell-quotes every arg, but a garbage/injection-shaped value
@@ -2459,7 +2521,7 @@ ${serveLocation}
           ...(eabConfig ? ["--config", eabConfig] : []),
           ...challengeArgs,
           "--cert-name",
-          domain,
+          lineage,
           "-d",
           domain,
           ...(this.acmeDirectoryUrl ? ["--server", this.acmeDirectoryUrl] : []),
@@ -2510,54 +2572,93 @@ ${serveLocation}
       if (generatedDnsHooks) await this._rm(generatedDnsHooks.dir).catch(() => undefined);
     }
 
+    // An imported pair keeps its served path while Certbot issues into a free
+    // lineage. Follow the reported result and link the validated PEM pair so
+    // subsequent renewals of that lineage also reach OpenResty.
+    const reportedPath = certonlyOut
+      .match(/^Certificate is saved at:\s*(.+\/fullchain\.pem)\s*$/m)?.[1]
+      ?.trim();
+    const issuedDir = reportedPath ? dirname(reportedPath) : join(this.certDir, lineage);
+    if (issuedDir !== join(this.certDir, domain)) {
+      await this.useCertbotLineage(domain, issuedDir);
+    }
+
+    await this.activateCert(domain);
+    return this.ensureIssued(domain, certonlyOut);
+  }
+
+  /** One route activation path for Certbot, manual DNS, and uploaded certs. */
+  async activateCert(domain: string): Promise<void> {
+    assertValidDomain(domain);
     // Rewrite the config with SSL now that certs exist
     const slug = await this.resolveSlug(domain);
     const configPath = join(this.sitesDir, `${slug}.conf`);
 
     // Prefer the persisted RouteConfig sidecar so the re-register keeps every
     // location (composite proxyLocations + webhookProxy), not just the primary.
-    try {
+    let saved: RouteConfig | undefined;
+    if (await this._exists(this.routeStatePath(slug))) {
       const state = await this._readFile(this.routeStatePath(slug));
-      const saved = JSON.parse(state) as RouteConfig;
+      try {
+        saved = JSON.parse(state) as RouteConfig;
+      } catch (error) {
+        // A corrupt legacy sidecar can still be recovered from its vhost.
+        // Transport and reload errors must never enter this fallback.
+        if (!(error instanceof SyntaxError)) throw error;
+      }
+    }
+    // A write/reload failure must propagate, not trigger a lossy fallback or be
+    // reported as success just because certbot issued a readable certificate.
+    if (saved) {
       await this.registerRoute({ ...saved, domain, tls: true });
-      return this.ensureIssued(domain, certonlyOut);
-    } catch {
-      // No sidecar (legacy route or unreadable) - fall back to scraping the conf.
+      return;
     }
 
-    try {
-      const existing = await this._readFile(configPath);
-      const scraped = this.scrapeProxySettings(existing);
-      const targetMatch = existing.match(/proxy_pass\s+([^;]+);/);
-      if (targetMatch) {
+    // Certificate-only issuance is valid before a route exists. Once it does
+    // exist, a read or recovery failure must leave it intact and reach the caller.
+    if (!(await this._exists(configPath))) return;
+    const existing = await this._readFile(configPath);
+    const scraped = this.scrapeProxySettings(existing);
+    // The first proxy_pass in a vhost belongs to the ACME challenge. Use the
+    // shared balanced-block parser: even our own HTTPS upgrade nests an if in
+    // location /. Never fall back to scanning challenge or sibling locations.
+    for (const location of locationBlocks(stripComments(existing))) {
+      if (location.path !== "/") continue;
+      const targetUrl = firstDirective(location.body, "proxy_pass");
+      if (targetUrl) {
+        const upstream = new URL(targetUrl);
+        if (isLoopbackHost(upstream.hostname) && Number(upstream.port) === ACME_HTTP01_PORT) {
+          continue;
+        }
         await this.registerRoute({
           domain,
-          targetUrl: targetMatch[1],
+          targetUrl,
           tls: true,
           ...(scraped ? { proxy: scraped } : {}),
         });
-        return this.ensureIssued(domain, certonlyOut);
+        return;
       }
 
-      const rootMatch = existing.match(/root\s+([^;]+);/);
-      if (rootMatch) {
+      const staticRoot = firstDirective(location.body, "root");
+      if (staticRoot) {
         // Re-registering the root from OUR OWN existing vhost to add TLS. It passed
         // the floor when first written (possibly as adopted), so re-checking it here
         // would reject a legitimately imported site at cert time.
         await this.registerRoute({
           domain,
-          staticRoot: rootMatch[1],
+          staticRoot,
           staticRootAdopted: true,
           tls: true,
           ...(scraped ? { proxy: scraped } : {}),
         });
-        return this.ensureIssued(domain, certonlyOut);
+        return;
       }
-    } catch {
-      // Config doesn't exist - cert provisioned but no route yet
     }
 
-    return this.ensureIssued(domain, certonlyOut);
+    throw new Error(
+      `Cannot recover the existing route for ${domain} while enabling HTTPS. ` +
+        "Re-save the domain's application route and retry certificate provisioning.",
+    );
   }
 
   /**
@@ -2621,7 +2722,8 @@ ${serveLocation}
     // --cert-name` fails outright with "no certificate found with name". Such a cert
     // IS ours to reissue (public ACME CA, this box owns the domain), so renewing it
     // means obtaining a first lineage — `certonly` with force, not `renew`.
-    if (!(await this.hasCertbotLineage(domain))) {
+    const lineage = await this.findCertbotLineage(domain);
+    if (!lineage) {
       return this.provisionCert(domain, { ...opts, force: true });
     }
 
@@ -2629,26 +2731,25 @@ ${serveLocation}
     // be renewed against the new CA — `renew` won't register the account the new
     // server requires (or carry EAB). Reissue instead: certonly registers under
     // the configured CA and rewrites the lineage, so this heals itself once.
-    if (!(await this.lineageServerMatches(domain))) {
+    if (!(await this.lineageServerMatches(lineage))) {
       return this.provisionCert(domain, { ...opts, force: true });
     }
 
     // No `--server` here: the matched lineage's conf already records it, and the
     // mismatch case above never reaches this call.
     await this._execCertbot(
-      ["renew", "--cert-name", domain, ...acmeKeyArgs(this.acmeKeyType), "--non-interactive"],
+      ["renew", "--cert-name", lineage, "--standalone", "--http-01-port", String(ACME_HTTP01_PORT), ...acmeKeyArgs(this.acmeKeyType), "--non-interactive", "--no-random-sleep-on-renew"],
       opts?.onLog,
     );
+    if (lineage !== domain) await this.useCertbotLineage(domain, join(this.certDir, lineage));
     await this.reload();
 
     return this.readCertInfo(domain);
   }
 
   /**
-   * Does certbot track a renewal lineage for this domain? `/etc/letsencrypt/renewal/
-   * <domain>.conf` is the per-lineage record certbot writes on first issuance and
-   * reads on every `renew`, so its presence is the authoritative answer — the cert
-   * FILES existing is not (they can be adopted, or copied in by hand).
+   * Certbot stores each lineage's renewal settings beside live/. The record and
+   * live symlinks must both survive certificate adoption for renew to accept it.
    */
   private renewalConfPath(domain: string): string {
     // Derived from certDir so a custom cert root (tests, container edge) stays
@@ -2657,7 +2758,108 @@ ${serveLocation}
   }
 
   private async hasCertbotLineage(domain: string): Promise<boolean> {
-    return this._exists(this.renewalConfPath(domain));
+    const record = parseCertbotRenewalConfig(
+      await this._readFile(this.renewalConfPath(domain)).catch(() => ""),
+    );
+    if (!record) return false;
+    const archive = record.archiveDir ?? join(dirname(this.certDir), "archive", domain);
+    if (!edgePath.isAbsolute(archive)) return false;
+    // Certbot requires all four file references and live archive links. A usable
+    // served PEM pair alone cannot prove its renewal record survived an import.
+    for (const [kind, file] of Object.entries(record.files)) {
+      const expected = join(this.certDir, domain, `${kind}.pem`);
+      if (!edgePath.isAbsolute(file) || edgePath.normalize(file) !== expected) return false;
+      const link = await this._readlink(expected);
+      if (!link || !(await this._exists(expected))) return false;
+      const target = edgePath.resolve(dirname(expected), link);
+      if (
+        dirname(target) !== edgePath.normalize(archive) ||
+        !new RegExp(`^${kind}[0-9]+\\.pem$`).test(edgePath.basename(target))
+      )
+        return false;
+    }
+    return true;
+  }
+
+  private async unusedCertbotLineageName(domain: string): Promise<string> {
+    // Certbot picks unique names from renewal/*.conf, then fails if live/ or
+    // archive/ is already occupied. Check all three before spending an ACME order.
+    for (let suffix = 0; ; suffix++) {
+      const name = suffix ? `${domain}-${String(suffix).padStart(4, "0")}` : domain;
+      const occupied = await Promise.all(
+        [
+          join(this.certDir, name),
+          join(dirname(this.certDir), "archive", name),
+          this.renewalConfPath(name),
+        ].map(async (path) => (await this._exists(path)) || !!(await this._readlink(path))),
+      );
+      if (!occupied.some(Boolean)) return name;
+    }
+  }
+
+  private async findCertbotLineage(domain: string): Promise<string | null> {
+    const servedPath = join(this.certDir, domain, "fullchain.pem");
+    const link = await this._readlink(servedPath);
+    if (link) {
+      const linkedDir = dirname(edgePath.resolve(dirname(servedPath), link));
+      const name = edgePath.basename(linkedDir);
+      if (
+        dirname(linkedDir) === edgePath.normalize(this.certDir) &&
+        isCertbotLineageName(name, domain) &&
+        (await this.hasCertbotLineage(name))
+      ) {
+        // Keep tracking this lineage even after expiry; renewing it is exactly
+        // what this operation must do in that case.
+        return name;
+      }
+    }
+    if (await this.hasCertbotLineage(domain)) return domain;
+    // Heal a previous successful issuance whose suffixed lineage never became the
+    // served certificate. Only a tracked, valid pair for this hostname qualifies.
+    let best: { name: string; expiresAt: string } | null = null;
+    for (const dir of await certbotLineageDirs(this.executor, domain, this.certDir)) {
+      const name = edgePath.basename(dir);
+      if (name === domain || !(await this.hasCertbotLineage(name))) continue;
+      try {
+        const candidate = validateCertFor(
+          domain,
+          {
+            certPem: await this._readFile(join(dir, "fullchain.pem")),
+            keyPem: await this._readFile(join(dir, "privkey.pem")),
+          },
+          dir,
+        );
+        if (candidate.cert && (!best || candidate.cert.expiresAt > best.expiresAt)) {
+          best = { name, expiresAt: candidate.cert.expiresAt };
+        }
+      } catch {
+        /* An unreadable sibling is not an adoptable certificate. */
+      }
+    }
+    return best?.name ?? null;
+  }
+
+  private async useCertbotLineage(domain: string, dir: string): Promise<void> {
+    if (
+      dirname(dir) !== edgePath.normalize(this.certDir) ||
+      !isCertbotLineageName(edgePath.basename(dir), domain)
+    ) {
+      throw new Error(`Certbot reported an unexpected certificate directory for ${domain}: ${dir}`);
+    }
+    let pair: ManualCert;
+    try {
+      pair = {
+        certPem: await this._readFile(join(dir, "fullchain.pem")),
+        keyPem: await this._readFile(join(dir, "privkey.pem")),
+      };
+    } catch (error) {
+      throw new Error(
+        `Cannot read the issued certificate for ${domain} at ${dir}: ${safeErrorMessage(error)}`,
+      );
+    }
+    const candidate = validateCertFor(domain, pair, dir);
+    if (!candidate.cert) throw new Error(`Invalid issued certificate: ${candidate.reason}`);
+    await this.stageCertDir(join(this.certDir, domain), { lineageDir: dir });
   }
 
   /**
@@ -2675,7 +2877,7 @@ ${serveLocation}
     } catch {
       return true;
     }
-    const recorded = conf.match(/^\s*server\s*=\s*(\S+)\s*$/m)?.[1];
+    const recorded = parseCertbotRenewalConfig(conf)?.server;
     if (!recorded) return true;
     const effective = this.acmeDirectoryUrl ?? LETSENCRYPT_PRODUCTION_DIRECTORY;
     return recorded === effective;
@@ -2704,25 +2906,11 @@ ${serveLocation}
     if (!candidate.cert) throw new Error(`Invalid certificate: ${candidate.reason}`);
     const { expiresAt } = candidate.cert;
 
-    // Stage both PEMs in a sibling dir and swap it in with ONE rename. Writing the
-    // two files in place is not atomic: a failure between them leaves the new cert
-    // beside the old key, which is exactly the mismatched pair that breaks the
-    // reload for the whole edge.
+    // Stage both PEMs before replacing the served files and reloading the edge.
     const dir = join(this.certDir, domain);
     await this.stageCertDir(dir, cert);
 
-    // Re-register the vhost with TLS now that the cert is on disk. Prefer the
-    // persisted RouteConfig sidecar so every location survives (same as
-    // provisionCert); if there's no route yet, the next deploy's route plan
-    // picks up tls:true from the manualSsl gate.
-    const slug = await this.resolveSlug(domain);
-    try {
-      const state = await this._readFile(this.routeStatePath(slug));
-      const saved = JSON.parse(state) as RouteConfig;
-      await this.registerRoute({ ...saved, domain, tls: true });
-    } catch {
-      // No sidecar (domain not routed yet) — cert is staged on disk regardless.
-    }
+    await this.activateCert(domain);
 
     return {
       domain,

@@ -39,6 +39,7 @@ const h = vi.hoisted(() => ({
 
 vi.mock("@repo/db", () => ({
   repos: {
+    clusterDatabase: { list: vi.fn(async () => []) },
     project: {
       findById: vi.fn(async () => h.project),
       claimDeletion: vi.fn(async () => true),
@@ -66,34 +67,34 @@ vi.mock("@repo/db", () => ({
   },
 }));
 
-vi.mock("../backups/restore.orchestrator", () => ({
+vi.mock("@repo/platform/engine/modules/backups/restore.orchestrator", () => ({
   restoreOrchestrator: { cancel: h.cancel },
 }));
 
-vi.mock("./project-connection.service", () => ({
+vi.mock("@repo/platform/engine/modules/projects/project-connection.service", () => ({
   unlinkConsumersOfSource: vi.fn(async () => ({ unlinked: [], errors: [] })),
 }));
-vi.mock("./project-cleanup.service", () => ({
+vi.mock("@repo/platform/engine/modules/projects/project-cleanup.service", () => ({
   collectProjectManifest: vi.fn(async () => ({ projectId: "p1", resources: [] })),
   executeCleanup: vi.fn(async () => ({ total: 0, succeeded: 0, failed: [] })),
   hasPendingTimedOutCleanup: vi.fn(() => false),
 }));
-vi.mock("../../lib/project-runtime-lock", () => ({
+vi.mock("@repo/platform/engine/lib/project-runtime-lock", () => ({
   withProjectRuntimeLock: async (_projectId: string, run: () => Promise<unknown>) => run(),
 }));
-vi.mock("../../lib/openship-manifest-sync", () => ({
+vi.mock("@repo/platform/engine/lib/openship-manifest-sync", () => ({
   removeProjectFromServerManifests: vi.fn(async () => {}),
 }));
-vi.mock("../deployments/build.service", () => ({
+vi.mock("@repo/platform/engine/modules/deployments/build.service", () => ({
   cancelBuildSession: vi.fn(async () => ({ success: true })),
 }));
-vi.mock("../github/github.service", () => ({ deleteWebhook: vi.fn(async () => {}) }));
-vi.mock("../mail/webmail/webmail-install.service", () => ({
+vi.mock("@repo/platform/engine/modules/github/github.service", () => ({ deleteWebhook: vi.fn(async () => {}) }));
+vi.mock("@repo/platform/engine/modules/mail/webmail/webmail-install.service", () => ({
   cleanupWebmailInstall: vi.fn(async () => null),
 }));
-vi.mock("../../config", () => ({ env: { CLOUD_MODE: false } }));
+vi.mock("@repo/platform/engine/config/index", () => ({ env: { CLOUD_MODE: false } }));
 
-import { teardownProject, type TeardownStep } from "./project-teardown";
+import { teardownProject, type TeardownStep } from "@repo/platform/engine/modules/projects/project-teardown";
 
 const ctx = { organizationId: "org1", userId: "u1" } as never;
 

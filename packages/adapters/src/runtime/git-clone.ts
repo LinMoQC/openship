@@ -18,6 +18,19 @@ import { shellQuote } from "@repo/core";
 
 export type { AmbientGitVia };
 
+// Initialize only after selecting the parent commit. --checkout honors the
+// recorded gitlink instead of following a submodule branch or merge strategy.
+export const GIT_SUBMODULE_UPDATE_ARGS = [
+  "submodule",
+  "update",
+  "--init",
+  "--recursive",
+  "--checkout",
+  "--depth",
+  "1",
+  "--progress",
+] as const;
+
 /** Alias of `@repo/core`'s {@link shellQuote}. Kept as a name because ~300 call sites in
  *  this package read `sq(...)`; there is one implementation, in core. */
 export const sq = shellQuote;
@@ -219,6 +232,11 @@ export function assembleGitClone(auth: GitCloneAuth): GitCloneInvocation {
     }
     const protocol = url.protocol.slice(0, -1);
     const path = url.pathname.replace(/^\/+/, "");
+    const headerUrl = new URL(url);
+    headerUrl.username = "";
+    headerUrl.password = "";
+    headerUrl.search = "";
+    headerUrl.hash = "";
     const headerVar = "OPENSHIP_GIT_AUTH_HEADER";
     const headerCommand =
       `${sq(auth.gitCredentialHelperPath)} auth-header ` +
@@ -235,7 +253,9 @@ export function assembleGitClone(auth: GitCloneAuth): GitCloneInvocation {
       // gitShellCommand(), which adds the preemptive header as config slot 3.
       gitEnv:
         `${base.gitEnv.replace("GIT_CONFIG_COUNT=3", "GIT_CONFIG_COUNT=4")} ` +
-        `GIT_CONFIG_KEY_3=http.extraHeader GIT_CONFIG_VALUE_3="$${headerVar}"`,
+        // A submodule may name another host/repository. Its authentication must
+        // go through the scoped relay helper, never inherit the parent's header.
+        `GIT_CONFIG_KEY_3=${sq(`http.${headerUrl.href}.extraHeader`)} GIT_CONFIG_VALUE_3="$${headerVar}"`,
     };
   }
 

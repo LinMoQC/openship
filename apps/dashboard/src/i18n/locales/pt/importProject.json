@@ -105,7 +105,12 @@
     "modeWorker": "Worker",
     "modeStatic": "Estático",
     "workerModeDesc": "Executa continuamente sem porta nem URL pública — um consumidor de fila, cron ou bot.",
-    "buildSettingsTitle": "Configurações de Build"
+    "buildSettingsTitle": "Configurações de Build",
+    "releaseTitle": "Antes da ativação",
+    "releaseDescription": "Comandos opcionais após o build. Uma falha interrompe a implantação. Apenas apps Docker e Bare.",
+    "releaseCommand": "Comando {number}",
+    "addReleaseCommand": "Adicionar comando",
+    "removeReleaseCommand": "Remover comando {number}"
   },
   "projectSettings": {
     "framework": "Framework",
@@ -123,6 +128,7 @@
     "noneSet": "Nenhuma definida",
     "pasteEnv": "Colar .env",
     "uploadEnv": "Enviar .env",
+    "downloadEnv": "Baixar .env",
     "edit": "Editar",
     "cancel": "Cancelar",
     "saving": "Salvando...",
@@ -144,6 +150,7 @@
       "interpolated": "Interpolado"
     },
     "toast": {
+      "downloadFailed": "Não foi possível baixar as variáveis de ambiente.",
       "title": "Variáveis de Ambiente",
       "added": "{count} adicionada(s)",
       "updated": "{count} atualizada(s)",
@@ -205,9 +212,9 @@
       "volumes": "Volumes",
       "statefulWarnPart1": "Serviço com estado na cloud: os dados ficam no disco persistente do workspace (sobrevivem a reinicializações), mas ",
       "statefulWarnBold": "não são mantidos entre rebuilds",
-      "statefulWarnPart2": " a menos que os backups estejam ativados. As montagens de volume do Docker não se aplicam.",
+      "statefulWarnPart2": ". Faça o backup e a restauração dos dados explicitamente antes de substituir o workspace.",
       "volumeHint": "Volume nomeado ou caminho do host → caminho do container.",
-      "volumeCloudNote": "Na cloud essas montagens não se aplicam — os dados persistem no disco do workspace (não entre rebuilds sem backups).",
+      "volumeCloudNote": "O Openship Cloud não oferece suporte a montagens de volumes persistentes. Escolha um servidor para cargas que precisam de volumes.",
       "sourcePlaceholder": "Origem",
       "containerPathPlaceholder": "Caminho do container",
       "readOnlyMount": "Montagem somente leitura",
@@ -315,7 +322,7 @@
       "successful": "Implantação Bem-sucedida",
       "deploying": "Implantando..."
     },
-    "visitSite": "Visitar Site",
+    "openSite": "Abrir site",
     "warningTitle": "A implantação foi concluída, mas alguns serviços ainda precisam de atenção.",
     "productionLogs": "Logs de Produção",
     "buildTerminal": "Terminal de Build",
@@ -325,7 +332,7 @@
     "stopDeployment": "Parar Implantação",
     "redeploy": "Reimplantar",
     "goToProject": "Ir para o projeto",
-    "openDashboard": "Abrir Dashboard",
+    "openProject": "Abrir projeto",
     "edit": "Editar",
     "status": {
       "cancelled": "Cancelada",

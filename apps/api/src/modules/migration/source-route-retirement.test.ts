@@ -1,18 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { repos } from "@repo/db";
-import type { HostPortTargetIdentity } from "../../lib/host-port-target";
+import type { HostPortTargetIdentity } from "@repo/platform/engine/lib/host-port-target";
 
 const h = vi.hoisted(() => ({
   lock: vi.fn(),
   converge: vi.fn(),
 }));
 
-vi.mock("../deployments/pinned-host-ports", () => ({
+vi.mock("@repo/platform/engine/modules/deployments/pinned-host-ports", () => ({
   withHostPortTargetLock: (...args: unknown[]) => h.lock(...args),
   convergeTargetHostPortClaimsUnlocked: (...args: unknown[]) => h.converge(...args),
 }));
 
-import { migrationOrchestrator, retireSourceManagedRoutes } from "./migration.orchestrator";
+import { migrationOrchestrator, retireSourceManagedRoutes } from "@repo/platform/engine/modules/migration/migration.orchestrator";
 
 const target: HostPortTargetIdentity = {
   targetKey: "host:source-machine",

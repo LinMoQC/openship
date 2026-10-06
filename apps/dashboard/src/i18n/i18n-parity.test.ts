@@ -62,7 +62,8 @@ const MISSING_BASELINE: Record<string, number> = {
   // answered HTTP <status>" — the two static-404 shapes the Domains tab used to
   // compute and then render nothing for), and all three of its keys are now
   // translated in all 9 locales, where `body` had been English-first in 6.
-  projectSettings: 1353,
+  // −4: project environment scope/apply guidance now covers every locale.
+  projectSettings: 1349,
   jobs: 876,
   // +15: discover.envFromImage/Hint/Import — the collapsed "vars come from the
   // image" row and its one-click import. Translated in ar/fr/tr; the other 5

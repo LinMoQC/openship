@@ -244,24 +244,26 @@
   },
   "backup": {
     "live": {
-      "title": "Live-Backup",
+      "title": "Backup-Aktivität",
       "description": "Echtzeit-Fortschritt für den soeben gestarteten Lauf. Übersteht ein Neuladen der Seite.",
       "dismiss": "Ausblenden"
     },
     "destinations": {
       "title": "Backup-Ziele",
-      "description": "Speicherziele pro Benutzer. Fügen Sie S3-kompatible Buckets, SFTP-Server oder lokale Festplatten hinzu.",
+      "description": "Verfügbare Speicherziele für dieses Projekt.",
       "manage": "Verwalten",
       "loading": "Wird geladen…",
       "emptyPrefix": "Noch keine Ziele. ",
       "emptyLink": "Eines erstellen",
       "emptySuffix": ", um mit dem Sichern zu beginnen.",
       "verified": "Verifiziert",
-      "failed": "Fehlgeschlagen"
+      "failed": "Fehlgeschlagen",
+      "emptyHint": "Verbinde einen S3-Bucket, einen SFTP-Host oder einen vorhandenen Server.",
+      "inUse": "In Verwendung"
     },
     "services": {
-      "title": "Dienste + Richtlinien",
-      "description": "Jeder Dienst kann seine eigene Backup-Richtlinie haben (Zeitplan + Ziel). Projektweite Standardwerte kommen in Chunk 2.",
+      "title": "Backup-Richtlinien",
+      "description": "Wähle die Daten, den Zeitplan und das Speicherziel.",
       "refresh": "Aktualisieren",
       "empty": "Dieses Projekt hat noch keine Dienste. Backups auf Dienstebene erscheinen hier, sobald Sie welche hinzufügen.",
       "policyLabel": "Richtlinie:",
@@ -273,22 +275,54 @@
       "editPolicy": "Richtlinie bearbeiten",
       "addDestinationFirst": "Zuerst ein Ziel hinzufügen",
       "createPolicyHint": "Eine Backup-Richtlinie für diesen Dienst erstellen",
-      "createPolicy": "Richtlinie erstellen"
+      "createPolicy": "Richtlinie erstellen",
+      "projectHint": "Eine Richtlinie für alle Services dieses Projekts.",
+      "includedInProject": "In der Projektrichtlinie enthalten.",
+      "retainCount": "{count} Backups behalten",
+      "retainDays": "Bis zu {days} Tage"
     },
     "recent": {
+      "loadOlder": "Ältere Backups laden",
       "title": "Letzte Backups",
-      "description": "Die 25 letzten Läufe über alle Dienste in diesem Projekt.",
+      "description": "Letzte Sicherungen, Ergebnisse und Wiederherstellungsoptionen.",
       "loading": "Wird geladen…",
       "empty": "Noch keine Backups.",
       "protectedTitle": "Vor dem Aufräumen durch Aufbewahrung geschützt",
       "protected": "Geschützt",
       "restoreTitle": "Aus diesem Backup wiederherstellen",
       "allowPrune": "Aufräumen durch Aufbewahrung erlauben",
-      "protectFrom": "Vor Aufbewahrung schützen"
+      "protectFrom": "Vor Aufbewahrung schützen",
+      "emptyHint": "Erstelle eine Richtlinie und starte hier dein erstes Backup.",
+      "backup": "Sicherung",
+      "viewDetails": "Details anzeigen",
+      "restore": "Wiederherstellen",
+      "triggers": {
+        "manual": "Bei Bedarf",
+        "cron": "Geplant",
+        "webhook": "Webhook",
+        "pre_deploy": "Vor dem Deployment"
+      }
     },
     "toast": {
       "runFailed": "Backup-Lauf fehlgeschlagen",
       "toggleProtectionFailed": "Umschalten des Schutzes fehlgeschlagen"
+    },
+    "overview": {
+      "description": "Plane Backups und stelle deine Projektdaten wieder her.",
+      "lastBackup": "Letztes erfolgreiches Backup",
+      "noRecentBackup": "Kein aktuelles Backup",
+      "scheduledPolicies": "Geplante Richtlinien",
+      "projectScope": "Gesamtes Projekt",
+      "serviceBackup": "Service-Backup",
+      "paused": "Pausiert",
+      "loadFailed": "Backups konnten nicht geladen werden"
+    },
+    "schedule": {
+      "daily": "Täglich um {time}",
+      "weekly": "Jeden {day} um {time}",
+      "monthly": "Am {day}. jedes Monats, {time}",
+      "custom": "Eigener Zeitplan",
+      "timezone": "Verwendet die Zeitzone des Servers."
     }
   },
   "build": {
@@ -365,8 +399,8 @@
       "appliesOnDeploy": "Wird beim nächsten Deploy angewendet."
     },
     "env": {
-      "title": "Umgebungsvariablen",
-      "description": "Verschlüsselt gespeichert. Geheimnisse bleiben maskiert — nur die von Ihnen geänderten Werte werden geschrieben.",
+      "title": "Projektumgebung (Build und gemeinsame Laufzeit)",
+      "description": "Wird für Image-Builds und als gemeinsame Laufzeiteingabe verwendet. Compose-Werte und dienstspezifische Laufzeitwerte haben zur Laufzeit Vorrang. Geheimnisse bleiben verborgen.",
       "edit": "Bearbeiten"
     }
   },
@@ -375,10 +409,10 @@
     "saveChanges": "Änderungen speichern",
     "close": "Schließen",
     "applyTitle": "Ohne Neubau anwenden",
-    "applyText": "Gespeichert. Wenden Sie diese auf den laufenden Dienst an — er startet mit der neuen Umgebung neu, ohne Klon oder Neubau.",
+    "applyText": "Gespeichert. Neustarten, um Laufzeitänderungen anzuwenden. Erneut bauen und bereitstellen, um beim Image-Build verwendete Werte anzuwenden.",
     "applyButton": "Anwenden (Neustart, kein Neubau)",
-    "title": "Umgebungsvariablen",
-    "description": "Produktion. Verschlüsselt gespeichert. Geheimnisse werden als gesetzt angezeigt — tippen zum Ersetzen; leer lassen zum Beibehalten.",
+    "title": "Projektumgebung (Build und gemeinsame Laufzeit)",
+    "description": "Produktionsvariablen des Projekts. Geheimnisse bleiben verborgen; ein gespeichertes Geheimnis leer lassen, um es beizubehalten. Dienstwerte haben bei gleichem Schlüssel Vorrang.",
     "empty": "Noch keine Umgebungsvariablen.",
     "keyPlaceholder": "KEY",
     "secretPlaceholder": "•••••••• (gesetzt — tippen zum Ersetzen)",
@@ -436,6 +470,7 @@
       "install": "GitHub App installieren"
     },
     "webhookBanner": {
+      "summary": "Öffentlicher Endpunkt erforderlich",
       "title": "Auto-Deploy aktivieren",
       "description": "Auto-Deploy benötigt einen direkten Webhook-Endpunkt. Stellen Sie diese Openship API unter einer öffentlichen URL bereit oder konfigurieren Sie eine verifizierte Webhook-Domain für die direkte Zustellung."
     },
@@ -474,13 +509,13 @@
       "title": "Rollback-Strategie",
       "rebuild": "Neubau (Git)",
       "instant": "Sofort (Snapshot)",
-      "descRebuild": "Baut den alten Commit neu, sofern dessen Image nicht noch auf dem Host liegt.",
-      "descInstant": "Behält das Image jeder Version, sodass eine Wiederherstellung nie neu baut. Braucht mehr Speicher.",
+      "descRebuild": "Baut den früheren Commit neu, sofern sein Image nicht mehr auf dem Host liegt.",
+      "descInstant": "Bewahrt Artefakte bis zum Verlaufslimit auf. Ältere Versionen müssen eventuell neu gebaut werden.",
       "toggleAria": "Snapshot-Aufbewahrung umschalten",
-      "keepNone": "Keine Extra-Kopien",
-      "keepCopies": "Eine Kopie pro Version",
-      "descRebuildFiles": "Baut den alten Commit neu, sofern dessen Dateien nicht noch auf dem Host liegen.",
-      "descInstantFiles": "Behält die Dateien jeder Version, sodass eine Wiederherstellung nie neu baut. Braucht mehr Speicher."
+      "keepNone": "Images wiederverwenden oder neu bauen",
+      "keepCopies": "Rollback-Artefakte aufbewahren",
+      "descRebuildFiles": "Baut den früheren Commit neu, sofern seine Dateien nicht mehr auf dem Host liegen.",
+      "descInstantFiles": "Bewahrt Build-Dateien bis zum Verlaufslimit auf. Ältere Versionen müssen eventuell neu gebaut werden."
     },
     "rollbackHistory": {
       "title": "Rollback-Verlauf",
@@ -490,13 +525,17 @@
       "descGit": "Aktuelle Images bleiben ohnehin erhalten, sodass ein Rollback den Build überspringen kann.",
       "decreaseAria": "Rollback-Verlauf verringern",
       "increaseAria": "Rollback-Verlauf erhöhen",
-      "sizeEach": "~{size} pro Version",
+      "sizeEach": "~{size} pro Image, einschließlich gemeinsam genutzter Schichten",
       "diskFree": "{size} frei",
       "autoBadge": "automatisch bemessen",
       "manualBadge": "manuell gesetzt",
       "kindFiles": "gebaute Dateien auf der Platte",
       "kindImages": "Images auf dem Host",
-      "descGitFiles": "Die Dateien aktueller Versionen bleiben ohnehin erhalten, sodass ein Rollback den Build überspringen kann."
+      "descGitFiles": "Die Dateien aktueller Versionen bleiben ohnehin erhalten, sodass ein Rollback den Build überspringen kann.",
+      "retentionHint": "Artefakte neuerer Bereitstellungen für ein schnelles Rollback aufbewahren.",
+      "retentionDescription": "Maximale Anzahl aufzubewahrender früherer Versionen. Aktive und angeheftete Versionen zählen zusätzlich. Ältere Artefakte werden entfernt; der Bereitstellungsverlauf bleibt verfügbar. Bei 0 bleiben nur aktive und angeheftete Versionen erhalten.",
+      "defaultBadge": "Instanzstandard",
+      "loadFailed": "Rollback-Einstellungen konnten nicht geladen werden."
     },
     "commits": {
       "title": "Letzte Commits",
@@ -686,12 +725,13 @@
       "active": "Aktiv",
       "failed": "Fehlgeschlagen",
       "removing": "Wird entfernt",
-      "pending": "Ausstehend"
+      "pending": "Ausstehend",
+      "waiting": "Wartet"
     },
     "ssl": {
       "includedByHost": "Vom Host inbegriffen",
       "active": "Aktiv",
-      "provisioning": "Wird bereitgestellt",
+      "provisioning": "Wartet auf Zertifikat",
       "expired": "Abgelaufen",
       "error": "Fehler",
       "inactive": "Inaktiv"
@@ -738,8 +778,8 @@
       "mapsToPort": "Verweist auf Port",
       "includeWww": "www einbeziehen",
       "dnsChallenge": "DNS-01-Challenge verwenden",
-      "dnsChallengeDesc": "Zertifikat über den verbundenen DNS-Anbieter ausstellen und erneuern. Verwenden, wenn Port 80 nicht erreichbar ist.",
-      "dnsChallengeWildcardDesc": "Wildcard-Zertifikate erfordern DNS-01 und einen verbundenen DNS-Anbieter.",
+      "dnsChallengeDesc": "Über einen DNS-Anbieter oder einen temporären TXT-Eintrag verifizieren. Hilfreich, wenn Port 80 nicht erreichbar ist.",
+      "dnsChallengeWildcardDesc": "Für Wildcard-HTTPS erforderlich. Verwende einen verbundenen DNS-Anbieter oder füge beim Einrichten von HTTPS einen temporären TXT-Eintrag hinzu.",
       "includeWwwDesc": "Auch Einträge für www.{domain} erzeugen",
       "includeWwwFallback": "ihredomain.de",
       "adding": "Wird hinzugefügt...",
@@ -847,10 +887,28 @@
       "foreignProxyHint": "Ein anderer Proxy belegt 80/443"
     },
     "diagnosis": {
-      "title": "Warum das nicht funktioniert",
+      "title": "Domain-Details",
       "noneYet": "Es wurde noch keine Prüfung ausgeführt, daher gibt es kein Ergebnis. Fügen Sie die angezeigten DNS-Einträge hinzu und führen Sie dann „Verifizieren“ aus.",
       "attempts": "Bisher {count} fehlgeschlagene Versuche.",
-      "pillHint": "Grund anzeigen"
+      "pillHint": "Grund anzeigen",
+      "lastChecked": "Letzte Prüfung:",
+      "nextCheck": "Nächste geplante Prüfung:",
+      "scheduleHint": "Prüfungen laufen, solange diese Instanz online ist. Wartende Aufgaben können den Start verzögern.",
+      "automaticDisabled": "Automatische Domain-Prüfungen sind deaktiviert. Wiederhole die Prüfung manuell oder aktiviere sie unter Aufgaben.",
+      "scheduleUnavailable": "Der Zeitplan für automatische Prüfungen ist nicht verfügbar. Du kannst die Prüfung manuell wiederholen.",
+      "retryNow": "Jetzt erneut versuchen",
+      "checking": "Wird geprüft…",
+      "reasons": {
+        "verification": "Die Domain-Prüfung ist noch nicht abgeschlossen. Prüfe die DNS-Einträge vor einem erneuten Versuch.",
+        "certificate": "HTTPS muss auf dem zuständigen Server geprüft werden. Vor der Anforderung eines neuen Zertifikats wird nach einem vorhandenen gesucht.",
+        "deployment": "Diese Route wartet auf eine Bereitstellung. Stelle das Projekt bereit, um sie anzuwenden.",
+        "disabled": "Dieses Projekt oder dieser Dienst ist deaktiviert. Aktiviere es vor der Routenprüfung.",
+        "removing": "Diese Domain wird entfernt. Es ist keine Prüfung geplant.",
+        "manual_certificate": "Diese Domain verwendet ein hochgeladenes Zertifikat. Lade einen gültigen Ersatz hoch und prüfe ihn erneut. Openship erneuert es nicht automatisch.",
+        "managed_certificate": "TLS wird von deinem externen Proxy oder Openship Cloud verwaltet. Prüfe die Konfiguration dieses Anbieters.",
+        "route_missing": "Diese konfigurierte Route wurde noch nicht angewendet. Wiederhole die Routing-Aktion. Es ist kein automatischer Routing-Versuch geplant.",
+        "manual_dns": "Dieses Zertifikat verwendet die manuelle TXT-Verifizierung. Öffne die HTTPS-Einrichtung, um einen neuen TXT-Eintrag zu bestätigen, oder wähle einen verbundenen DNS-Anbieter für die automatische Erneuerung."
+      }
     },
     "records": {
       "failed": "Die DNS-Einträge für diese Domain konnten nicht geladen werden.",
@@ -860,6 +918,51 @@
       "body": "Keine Build-Ausgabe unter {path} gefunden — prüfen Sie Ihr Ausgabeverzeichnis und deployen Sie erneut.",
       "noIndex": "Unter {path} liegt eine Ausgabe, aber keine Index-Datei — Anfragen liefern 404. Prüfen Sie Ihr Ausgabeverzeichnis.",
       "notServed": "Der Edge-Proxy antwortete mit HTTP {status} für {path} — dieser Pfad wird nicht ausgeliefert. Prüfen Sie Ihr Ausgabeverzeichnis und die Route."
+    },
+    "wildcard": {
+      "title": "HTTPS mit DNS-Verifizierung",
+      "scope": "Eine Wildcard deckt eine Subdomain-Ebene ab. Füge die Basisdomain separat hinzu, wenn sie diese App ebenfalls bereitstellen soll.",
+      "notice": "Wildcard-HTTPS erfordert eine DNS-Verifizierung. Verbinde nach dem Speichern einen DNS-Anbieter oder füge den TXT-Eintrag aus der HTTPS-Einrichtung hinzu.",
+      "automatic": "Automatischer Anbieter",
+      "manual": "TXT manuell",
+      "automaticHint": "Verbinde Cloudflare unter Einstellungen → DNS, um Zertifikatsnachweise zu erstellen und HTTPS automatisch zu erneuern.",
+      "manualHint": "Füge bei deinem DNS-Anbieter einen temporären TXT-Eintrag hinzu. Jede Erneuerung benötigt einen neuen TXT-Eintrag; Openship zeigt an, wann sie fällig ist.",
+      "routing": "1. Die Domain auf diesen Server verweisen",
+      "certificate": "2. HTTPS aktivieren",
+      "startAutomatic": "HTTPS automatisch aktivieren",
+      "startManual": "TXT-Eintrag abrufen",
+      "renew": "Zertifikat erneuern",
+      "check": "TXT prüfen und HTTPS aktivieren",
+      "cancel": "Verifizierung abbrechen",
+      "refresh": "Status aktualisieren",
+      "close": "Einrichtung schließen",
+      "loading": "Zertifikatseinrichtung wird geladen",
+      "loadFailed": "Die Zertifikatseinrichtung konnte nicht geladen werden. Versuche es erneut, um den aktuellen Status zu sehen.",
+      "recordsFailed": "Die DNS-Routing-Einträge konnten nicht geladen werden. Dein gespeicherter Zertifikatsnachweis ist weiterhin verfügbar.",
+      "actionFailed": "Die Zertifikatseinrichtung konnte nicht aktualisiert werden.",
+      "expires": "Schließe diese Verifizierung bis {date} ab.",
+      "txtHint": "Füge genau diesen TXT-Wert hinzu. Behalte andere TXT-Werte unter demselben Namen bei. Wenn dein Anbieter den Zonennamen ergänzt, gib nur den relativen Teil ein.",
+      "cleanup": "Du kannst den TXT-Wert dieses Versuchs entfernen. Behalte alle anderen TXT-Einträge bei.",
+      "logs": "Zertifikatsprotokolle",
+      "states": {
+        "preparing": "Zertifikatsnachweis wird vorbereitet…",
+        "waiting": "Warten auf deinen TXT-Eintrag",
+        "checking": "DNS und Zertifikatsinhaberschaft werden geprüft…",
+        "installing": "HTTPS wird aktiviert…",
+        "cancelling": "Verifizierung wird abgebrochen…",
+        "completed": "HTTPS ist bereit",
+        "failed": "Die Zertifikatseinrichtung erfordert Aufmerksamkeit",
+        "cancelled": "Verifizierung abgebrochen",
+        "expired": "TXT-Verifizierung abgelaufen"
+      }
     }
+  },
+  "serviceEnvironment": {
+    "title": "Laufzeitumgebung des Dienstes",
+    "description": "Diese Variablen gelten nur für diesen Dienst und überschreiben gleichnamige Werte aus Compose oder dem Projekt. Aktiviere gespeicherte Werte mit Umgebungsänderungen anwenden.",
+    "overrides": "Diese Schlüssel haben für diesen Dienst Vorrang vor den Projektwerten: {keys}.",
+    "buildArguments": "Build-Argumente werden in der Compose-Datei oder der Quellkonfiguration festgelegt und erfordern einen erneuten Build.",
+    "projectLink": "Gemeinsame Projektumgebung bearbeiten",
+    "loadFailed": "Die Namen der Projektvariablen konnten nicht zum Prüfen von Überschreibungen geladen werden."
   }
 }

@@ -1,6 +1,7 @@
 import { eq, and, isNull, isNotNull, inArray, desc, sql, type SQL } from "drizzle-orm";
-import { generateId } from "@repo/core";
-import type { Database } from "../client";
+import { generateId, ForbiddenError, UnauthorizedError } from "@repo/core";
+import type { Database } from "../connection";
+import { createConfigurationSecrets, type ConfigurationEncryption } from "../configuration-secrets";
 import { project, projectGroup, envVar, deployment, service } from "../schema";
 import { member } from "../schema/organization";
 // Cloning a project writes its group and service rows in the same transaction, so this repo
@@ -8,6 +9,8 @@ import { member } from "../schema/organization";
 // rather than re-derived here, so there is one definition of each row shape.
 import type { NewProjectGroup } from "./project-group.repo";
 import type { NewService } from "./service.repo";
+import { personalAccessTokenGrant } from "../schema/personal-access-token-grant";
+import { personalAccessToken } from "../schema/personal-access-token";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -91,7 +94,8 @@ export async function rebindGitHubInstallationRows(
 
 // ─── Repository ──────────────────────────────────────────────────────────────
 
-export function createProjectRepo(db: Database) {
+export function createProjectRepo(db: Database, encryption: ConfigurationEncryption) {
+  const codec = createConfigurationSecrets(encryption);
   return {
     // ── Projects ───────────────────────────────────────────────────────
 
@@ -287,14 +291,14 @@ export function createProjectRepo(db: Database) {
      * Project counts for the dashboard home — total and with-an-active-
      * deployment, in one aggregate query instead of listing every row.
      */
-    async countByOrganization(organizationId: string): Promise<{ total: number; active: number }> {
+    async countByOrganization(organizationId: string, projectIds?: readonly string[]): Promise<{ total: number; active: number }> {
       const [row] = await db
         .select({
           total: sql<number>`count(*)::int`,
           active: sql<number>`count(*) filter (where ${project.activeDeploymentId} is not null)::int`,
         })
         .from(project)
-        .where(and(eq(project.organizationId, organizationId), isNull(project.deletedAt)));
+        .where(and(eq(project.organizationId, organizationId), isNull(project.deletedAt), projectIds ? inArray(project.id, [...projectIds]) : undefined));
 
       return { total: Number(row?.total ?? 0), active: Number(row?.active ?? 0) };
     },
@@ -357,14 +361,33 @@ export function createProjectRepo(db: Database) {
       };
     },
 
-    async create(data: Omit<NewProject, "id"> & { id?: string }) {
+    async create(data: Omit<NewProject, "id"> & { id?: string }, access?: { tokenId: string }) {
       // `id` is normally generated, but re-import (recovering an Openship project
       // from a server's `.openship/manifest.json`) passes the ORIGINAL id so the
       // still-running containers' `openship.project` labels re-attach immediately.
       const { id: providedId, ...rest } = data;
       const id = providedId ?? generateId("proj");
       const row = { id, ...rest };
-      await db.insert(project).values(row);
+      if (access) {
+        // A create-only credential must acquire access in the same commit as
+        // its new project. A revoked/missing token rolls back the project too.
+        await db.transaction(async tx => {
+          const [token] = await tx.select().from(personalAccessToken)
+            .where(eq(personalAccessToken.id, access.tokenId)).for("update");
+          if (!token || token.revokedAt || (token.expiresAt && token.expiresAt.getTime() <= Date.now()))
+            throw new UnauthorizedError("Project creation credential is no longer valid");
+          if (token.readOnly || (token.organizationId && token.organizationId !== row.organizationId))
+            throw new ForbiddenError("Project creation credential cannot write to this organization");
+          await tx.insert(project).values(row);
+          await tx.insert(personalAccessTokenGrant).values({
+            id: generateId("patgrant"), tokenId: access.tokenId,
+            resourceType: "project", resourceId: id,
+            permissionsJson: JSON.stringify(["read", "write", "admin"]),
+          });
+        });
+      } else {
+        await db.insert(project).values(row);
+      }
       return { ...row, createdAt: new Date(), updatedAt: new Date() } as Project;
     },
 
@@ -416,7 +439,7 @@ export function createProjectRepo(db: Database) {
             input.services.map((svc) => ({
               id: serviceIdBySourceId[svc.sourceId]!,
               projectId,
-              ...svc.row,
+              ...codec.sealService(svc.row),
             })),
           );
         }

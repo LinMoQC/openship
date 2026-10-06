@@ -7,6 +7,7 @@ import type { Advisory, AdvisoryManifest, AdvisoryMode, AdvisorySeverity, Latest
 import { ADVISORY_MODES } from "./types";
 import { changelogUrl } from "./changelog";
 import { compareSemver, satisfiesRange } from "./semver";
+import { customRuntimeUpdatePolicy } from "./custom-runtime";
 
 const SEVERITY_RANK: Record<AdvisorySeverity, number> = { critical: 0, recommended: 1, info: 2 };
 const VALID_SEVERITY = new Set<AdvisorySeverity>(["critical", "recommended", "info"]);
@@ -155,7 +156,8 @@ export function resolveUpdateState(input: ResolveUpdateInput): UpdateState {
   const { currentVersion, latestRelease, manifest, dismissed = [], muted = false, mode } = input;
 
   const latestVersion = latestRelease?.version ?? null;
-  const updateAvailable = !!latestVersion && compareSemver(latestVersion, currentVersion) > 0;
+  const custom = customRuntimeUpdatePolicy(currentVersion, latestVersion);
+  const updateAvailable = !custom && !!latestVersion && compareSemver(latestVersion, currentVersion) > 0;
 
   const advisories = (manifest ? matchAdvisories(currentVersion, manifest, mode) : []).filter((a) => {
     if (a.severity === "critical") return true;
@@ -167,6 +169,7 @@ export function resolveUpdateState(input: ResolveUpdateInput): UpdateState {
     currentVersion,
     latestVersion,
     updateAvailable,
+    ...(custom ?? {}),
     advisories,
     changelogUrl: changelogUrl(),
     latestChangelogUrl: changelogUrl(latestRelease?.tag),

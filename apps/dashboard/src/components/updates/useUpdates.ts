@@ -9,7 +9,7 @@
  * @repo/core; this hook only does I/O + persistence.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import {
   RELEASES_LATEST_API,
   advisoryManifestUrl,
@@ -22,6 +22,7 @@ import {
   compareSemver,
   type AdvisoryManifest,
   type LatestRelease,
+  type ReleaseFeedSnapshot,
   type UpdateState,
 } from "@repo/core";
 import { useDeploymentInfo } from "@/hooks/useDeploymentInfo";
@@ -30,6 +31,18 @@ import { getRestApiBaseUrl } from "@/lib/api/urls";
 const LS_MUTED = "openship_update_muted";
 const LS_DISMISSED = "openship_dismissed_advisories";
 const LS_LAST_SEEN = "openship_last_seen_version";
+
+// The header and Settings can both consume this hook. A dismissal belongs to
+// the app session, so a remount or an in-flight refresh must not undo it.
+const EMPTY_DISMISSALS: ReadonlySet<string> = new Set();
+let sessionDismissals = EMPTY_DISMISSALS;
+const dismissalListeners = new Set<() => void>();
+const getSessionDismissals = () => sessionDismissals;
+const getServerDismissals = () => EMPTY_DISMISSALS;
+function subscribeDismissals(listener: () => void) {
+  dismissalListeners.add(listener);
+  return () => { dismissalListeners.delete(listener); };
+}
 
 function isDesktop(): boolean {
   return typeof window !== "undefined" && !!window.desktop?.isDesktop;
@@ -93,7 +106,8 @@ async function persistLastSeen(version: string): Promise<void> {
 
 // Session-scoped cache: fetch GitHub once per app session (GitHub rate-limits
 // unauthenticated calls to 60/hr/IP; navigation shouldn't re-hit it).
-let remoteCache: Promise<{ latest: LatestRelease | null; manifest: AdvisoryManifest | null }> | null = null;
+let remoteCache: Promise<ReleaseFeedSnapshot> | null = null;
+let remoteInFlight: Promise<ReleaseFeedSnapshot> | null = null;
 
 /** One uncached update read. Exported so the three-source failure isolation is testable. */
 export async function fetchRemoteUncached(
@@ -139,9 +153,18 @@ export async function fetchRemoteUncached(
   return { latest, manifest };
 }
 
-async function fetchRemote(): Promise<{ latest: LatestRelease | null; manifest: AdvisoryManifest | null }> {
-  remoteCache ??= fetchRemoteUncached();
-  return remoteCache;
+function fetchRemote(force = false): Promise<ReleaseFeedSnapshot> {
+  if (remoteInFlight) return remoteInFlight;
+  if (!force && remoteCache) return remoteCache;
+  // The native process owns desktop release I/O, including the launch check.
+  // Preserve notes and advisories even when its platform has no installer.
+  const check = isDesktop() ? window.desktop?.updates?.check : undefined;
+  const request: Promise<ReleaseFeedSnapshot> = check
+    ? check(force).catch(() => ({ latest: null, manifest: null }))
+    : fetchRemoteUncached();
+  remoteInFlight = request.finally(() => { remoteInFlight = null; });
+  remoteCache = remoteInFlight;
+  return remoteInFlight;
 }
 
 // The SaaS advisory source: operator-pushed platform notices from our own API
@@ -201,6 +224,7 @@ export interface UseUpdates {
 
 export function useUpdates(): UseUpdates {
   const deployInfo = useDeploymentInfo();
+  const dismissed = useSyncExternalStore(subscribeDismissals, getSessionDismissals, getServerDismissals);
   const [state, setState] = useState<UpdateState | null>(null);
   const [latest, setLatest] = useState<LatestRelease | null>(null);
   const [muted, setMutedState] = useState(false);
@@ -297,10 +321,13 @@ export function useUpdates(): UseUpdates {
   const dismissAdvisory = useCallback(
     (id: string) => {
       const adv = state?.advisories.find((a) => a.id === id);
-      setState((s) => (s ? { ...s, advisories: s.advisories.filter((a) => a.id !== id) } : s));
+      if (!adv || sessionDismissals.has(id)) return;
+      sessionDismissals = new Set([...sessionDismissals, id]);
+      for (const listener of dismissalListeners) listener();
       // Critical advisories are session-dismiss only (they resurface next launch
       // by design); everything else is remembered so it never nags again.
-      if (adv && adv.severity !== "critical") void persistDismissed(id);
+      // Keep the session choice even if the persistent store is unavailable.
+      if (adv.severity !== "critical") void persistDismissed(id).catch(() => {});
     },
     [state],
   );
@@ -366,18 +393,15 @@ export function useUpdates(): UseUpdates {
       .catch(() => setUpdatePhase("idle"));
   }, []);
 
-  // Force a fresh GitHub check (the session cache is otherwise reused). Also
-  // prime the desktop main process so its pending-update state — which the
-  // native wizard + install act on — re-checks in lockstep with the renderer,
-  // instead of only being set by the boot check.
+  // Refresh the same snapshot that drives both the dashboard and native install.
+  // Concurrent consumers join the request instead of issuing duplicate checks.
   const refresh = useCallback(() => {
-    remoteCache = null;
-    void window.desktop?.updates?.check?.();
+    void fetchRemote(true);
     void load();
   }, [load]);
 
   return {
-    state,
+    state: state ? { ...state, advisories: state.advisories.filter((a) => !dismissed.has(a.id)) } : null,
     latest,
     muted,
     desktop: isDesktop(),

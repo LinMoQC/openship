@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
  * Managed-container drift (edge / mail images pinned to APP_VERSION). The sibling
@@ -52,26 +52,31 @@ vi.mock("@repo/adapters", () => ({
     .mockResolvedValue({ flavor: "none", running: false, exists: false, image: null }),
 }));
 
-vi.mock("../../../src/lib/edge-image", () => ({
+vi.mock("@repo/platform/engine/lib/edge-image", () => ({
   pinnedEdgeImage: vi.fn(() => "ghcr.io/oblien/openship-edge:0.5.0"),
 }));
 
-vi.mock("../../../src/lib/mail-image", () => ({
+vi.mock("@repo/platform/engine/lib/mail-image", () => ({
   pinnedMailImage: vi.fn(() => "ghcr.io/oblien/openship-mail:0.5.0"),
 }));
 
-vi.mock("../../../src/lib/edge-reconcile", () => ({
+vi.mock("@repo/platform/engine/lib/edge-reconcile", () => ({
   reconcileServerEdge: vi.fn().mockResolvedValue({ converted: false, updated: true, edgeDown: false }),
 }));
 
-vi.mock("../../../src/lib/mail-reconcile", () => ({
+vi.mock("@repo/platform/engine/lib/mail-reconcile", () => ({
   reconcileServerMail: vi.fn().mockResolvedValue({ updated: true, mailDown: false, ran: true }),
   repairServerMail: vi.fn().mockResolvedValue({ started: true, mailDown: false }),
 }));
 
+const certificateCheck = vi.hoisted(() => vi.fn().mockResolvedValue(null));
+vi.mock("@repo/platform/engine/modules/mail/mail-certificate.service", () => ({
+  refreshMailCertificate: certificateCheck,
+}));
+
 const executor = { exec: vi.fn() };
 
-vi.mock("../../../src/lib/ssh-manager", () => ({
+vi.mock("@repo/platform/engine/lib/ssh-manager", () => ({
   sshManager: {
     withExecutor: vi.fn(async (_id: string, fn: (e: unknown) => unknown) => fn(executor)),
   },
@@ -86,11 +91,15 @@ import {
   refreshServerContainer,
   scanInstanceContainers,
   scanOrgContainers,
-} from "../../../src/modules/system/server-containers.service";
+  runContainerApply,
+} from "@repo/platform/engine/modules/system/server-containers.service";
 import { repos } from "@repo/db";
 import { dockerAvailable, detectEdgeContainer, detectMailEngine } from "@repo/adapters";
-import { reconcileServerEdge } from "../../../src/lib/edge-reconcile";
-import { reconcileServerMail, repairServerMail } from "../../../src/lib/mail-reconcile";
+import { reconcileServerEdge } from "@repo/platform/engine/lib/edge-reconcile";
+import { reconcileServerMail, repairServerMail } from "@repo/platform/engine/lib/mail-reconcile";
+import { drainBackgroundWork } from "@repo/platform/engine/lib/background-work";
+
+afterEach(drainBackgroundWork);
 
 /** An installed edge probe result, running the given image (or stopped). */
 function edgeContainer(image: string | null, running = true) {
@@ -363,6 +372,25 @@ describe("applyAllContainers", () => {
     detail: null,
   });
 
+  it("requires target authorization before any fleet target is flagged or probed", async () => {
+    mocked.server.listByOrganization.mockResolvedValue([box("srv_forbidden")] as never);
+    mocked.status.listByOrg.mockResolvedValue([behindEdge("srv_forbidden")] as never);
+    await expect(applyAllContainers("org_1", ["update"], async () => { throw new Error("Host execution is disabled"); }))
+      .rejects.toThrow("Host execution is disabled");
+    expect(mocked.status.setInProgress).not.toHaveBeenCalled();
+    expect(mocked.reconcileEdge).not.toHaveBeenCalled();
+  });
+
+  it("settles queued work as failed and clears its flag when authority is revoked", async () => {
+    const started = runContainerApply({ ...box("srv_revoked"), organizationId: "org_1" } as never, "edge", "update", async () => {
+      throw new Error("Server authorization was revoked");
+    });
+    await started.done;
+    expect(started.session).toMatchObject({ status: "failed", error: "Server authorization was revoked" });
+    expect(mocked.status.setInProgress).toHaveBeenCalledWith("srv_revoked", "edge", false);
+    expect(mocked.reconcileEdge).not.toHaveBeenCalled();
+  });
+
   it("flags every accepted target before returning — queued ones included", async () => {
     // Five targets against a concurrency of 3: two of them cannot have been started
     // by the time the response is built, and used to be indistinguishable from
@@ -632,6 +660,11 @@ describe("refreshServerContainer", () => {
 });
 
 describe("scanInstanceContainers", () => {
+  it("refreshes mail certificate observations on the existing scan connection", async () => {
+    mocked.server.list.mockResolvedValue([server] as never);
+    await scanInstanceContainers();
+    expect(certificateCheck).toHaveBeenCalledWith("srv_1", { executor, force: true });
+  });
   beforeEach(() => {
     mocked.server.list.mockResolvedValue([server] as never);
     mocked.edge.mockResolvedValue(edgeContainer("ghcr.io/oblien/openship-edge:0.4.0") as never); // behind

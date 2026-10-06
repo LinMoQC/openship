@@ -26,7 +26,7 @@ import {
   mailPgDumpToStdout,
   mailPsqlFromStdin,
   type MailEngineFlavor,
-} from "../mail-engine";
+} from "@repo/platform/engine/modules/mail/mail-engine";
 
 /** The four tables that hold accounts / domains / aliases / admins. */
 const ACCOUNT_TABLES = ["domain", "mailbox", "forwardings", "domain_admins"] as const;

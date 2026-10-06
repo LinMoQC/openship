@@ -25,17 +25,17 @@ vi.mock("@repo/db", () => ({
     service: { listByDeployment: vi.fn(async () => []) },
   },
 }));
-vi.mock("../../../src/lib/notification-dispatcher", () => ({
+vi.mock("@repo/platform/engine/lib/notification-dispatcher", () => ({
   notification: { emit: vi.fn() },
 }));
 vi.mock("../../../src/lib/audit", () => ({ audit: { recordAsync: vi.fn(), record: vi.fn() } }));
-vi.mock("../../../src/lib/favicon-detector", () => ({
+vi.mock("@repo/platform/engine/lib/favicon-detector", () => ({
   detectAndStoreFavicon: vi.fn(async () => {}),
 }));
-vi.mock("../../../src/modules/mail/webmail/webmail-install.service", () => ({
+vi.mock("@repo/platform/engine/modules/mail/webmail/webmail-install.service", () => ({
   onWebmailDeployed: vi.fn(async () => {}),
 }));
-vi.mock("../../../src/modules/deployments/session-manager", () => ({
+vi.mock("@repo/platform/engine/modules/deployments/session-manager", () => ({
   updateStatus: vi.fn(),
   broadcastServiceStatus: vi.fn(),
   broadcastInstallPhase: vi.fn(),
@@ -43,7 +43,7 @@ vi.mock("../../../src/modules/deployments/session-manager", () => ({
   endSession: vi.fn(),
 }));
 
-import { onCancelled, onFailure } from "../../../src/modules/deployments/deployment-lifecycle";
+import { onCancelled, onFailure } from "@repo/platform/engine/modules/deployments/deployment-lifecycle";
 
 /**
  * `ctx.provisioned.imageRef` is a RECLAIM LIST, not a record of what got deployed:
@@ -104,7 +104,7 @@ describe("a reused artifact is not on the failure reclaim list", () => {
 
   it("the pipeline records ONLY an artifact this deploy produced", () => {
     const src = readFileSync(
-      resolve(import.meta.dirname, "../../../src/modules/deployments/build-pipeline.ts"),
+      resolve(import.meta.dirname, "../../../../../packages/platform/src/engine/modules/deployments/build-pipeline.ts"),
       "utf8",
     );
     // The one assignment, gated on the reuse. An ungated `provisioned.imageRef =`
@@ -118,12 +118,13 @@ describe("a reused artifact is not on the failure reclaim list", () => {
 
   it("a refresh fails closed when its active artifact is gone", () => {
     const src = readFileSync(
-      resolve(import.meta.dirname, "../../../src/modules/deployments/build-pipeline.ts"),
+      resolve(import.meta.dirname, "../../../../../packages/platform/src/engine/modules/deployments/build-pipeline.ts"),
       "utf8",
     );
     const refreshStart = src.indexOf("const refreshFrom = refreshAppDeploymentId(snapshot)");
+    // Skip the image declarations inside the Kubernetes and Docker refresh branches.
     const ordinaryPinStart = src.indexOf(
-      "const image = pinnedAppImage(snapshot)",
+      "\n  const image = pinnedAppImage(snapshot);",
       refreshStart + 1,
     );
     const refreshBranch = src.slice(refreshStart, ordinaryPinStart);
@@ -135,3 +136,6 @@ describe("a reused artifact is not on the failure reclaim list", () => {
     expect(refreshBranch).not.toContain("return gone(");
   });
 });
+
+// The application seams moved with the shared engine.
+vi.mock("@repo/platform/engine/lib/audit-emitter", () => ({ audit: { recordAsync: vi.fn(), record: vi.fn() } }));

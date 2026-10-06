@@ -5,7 +5,7 @@ const { githubFetch, compareCache } = vi.hoisted(() => ({
   compareCache: new Map<string, unknown>(),
 }));
 
-vi.mock("../../../src/modules/github/github.auth", () => ({
+vi.mock("@repo/platform/engine/modules/github/github.auth", () => ({
   githubFetch,
   getUserStatus: vi.fn(),
   getUserInstallations: vi.fn(),
@@ -13,11 +13,11 @@ vi.mock("../../../src/modules/github/github.auth", () => ({
   getGitHubAuthMode: vi.fn(),
 }));
 
-vi.mock("../../../src/modules/github/github.local-auth", () => ({
+vi.mock("@repo/platform/engine/modules/github/github.local-auth", () => ({
   getLocalGhStatus: vi.fn(),
 }));
 
-vi.mock("../../../src/lib/cache-store", () => ({
+vi.mock("@repo/platform/engine/lib/cache-store/index", () => ({
   cacheStore: vi.fn(async () => ({
     name: "memory",
     get: async (key: string) => compareCache.get(key) ?? null,
@@ -36,12 +36,12 @@ vi.mock("../../../src/lib/cache-store", () => ({
   })),
 }));
 
-vi.mock("../../../src/config/env", () => ({
+vi.mock("@repo/platform/engine/config/env", () => ({
   env: {},
   runtimeTarget: { id: "local" },
 }));
 
-import { compareCommits, listRepositoryTree } from "../../../src/modules/github/github.service";
+import { compareCommits, listRepositoryTree } from "@repo/platform/engine/modules/github/github.service";
 import type { RequestContext } from "../../../src/lib/request-context";
 
 const ctx = { organizationId: "org_compare_cache" } as RequestContext;

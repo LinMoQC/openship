@@ -6,7 +6,7 @@ import {
   parseHostProbeOutput,
   waitForForwardedReady,
   waitForReadyFromExecutor,
-} from "../../../src/modules/deployments/forwarded-readiness";
+} from "@repo/platform/engine/modules/deployments/forwarded-readiness";
 import type { CommandExecutor } from "@repo/adapters";
 
 function response(status: number): Duplex {

@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { serializeEnvFile } from "@repo/core";
 import {
   blockingComposeFields,
   parseComposeEnvFile,
   parseComposeFile,
   resolveComposeEnvironmentTemplates,
-} from "../../src/lib/compose-parser";
+} from "@repo/platform/engine/lib/compose-parser";
 
 describe("parseComposeFile", () => {
   it("resolves Docker Compose environment interpolation from .env content", () => {
@@ -335,6 +336,34 @@ BAZ=qux
     expect(parseComposeEnvFile('BLOCK="never closed\nAFTER=ok')).toEqual({
       BLOCK: "never closed",
       AFTER: "ok",
+    });
+  });
+
+  it("loads downloaded production variables without expanding or truncating secrets", () => {
+    const rows = [
+      { key: "REF", value: "must-not-be-substituted" },
+      { key: "PASSWORD", value: "user's${REF} $REF $$ 'single' \"double\" `backtick`" },
+      { key: "PATH_VALUE", value: "  C:\\new\\folder\\" },
+      { key: "CERT", value: "first\r\nNEXT=still part of the certificate\nlast\n" },
+      { key: "ESCAPES", value: "'literal \\n and real\nnewline'" },
+      { key: "__proto__", value: "valid-environment-key" },
+      { key: "AFTER", value: "intact" },
+    ];
+    expect(parseComposeEnvFile(serializeEnvFile(rows))).toEqual(Object.fromEntries(rows.map(({ key, value }) => [key, value])));
+  });
+
+  it("interpolates unescaped references while preserving escaped dollars and closing backslashes", () => {
+    expect(parseComposeEnvFile(String.raw`REF=expanded
+VALUE="\$REF $REF \${REF} \\\$REF"
+PATH_VALUE="ends with\\"
+AFTER=ok`)).toEqual({
+      REF: "expanded", VALUE: "$REF expanded ${REF} \\$REF", PATH_VALUE: "ends with\\", AFTER: "ok",
+    });
+  });
+
+  it("uses the last assignment's interpolation rule for duplicate keys", () => {
+    expect(parseComposeEnvFile("REF=value\nA=$REF\nA='$REF'\nB='$REF'\nB=$REF")).toEqual({
+      REF: "value", A: "$REF", B: "value",
     });
   });
 
@@ -1123,6 +1152,29 @@ describe("parseComposeFile — service resource limits", () => {
     const parsed = parseComposeFile(svc("    mem_limit: lots\n    cpus: many\n"));
     expect(parsed.services[0]?.advanced?.resources).toBeUndefined();
   });
+
+  // A sub-1-MB numeric limit (often `mem_limit: 512` written meaning 512m) floors
+  // to 0 MB, and memoryMb:0 reads downstream as "no limit" — so it must be DROPPED
+  // like the equivalent string form already is, never kept as an accidental
+  // unlimited. The number and string byte paths must agree.
+  it("drops a numeric byte limit under 1 MB instead of reading it as unlimited", () => {
+    const mem = (v: string) =>
+      parseComposeFile(svc(`    mem_limit: ${v}\n`)).services[0]?.advanced?.resources?.memoryMb;
+    expect(mem("512")).toBeUndefined(); // 512 bytes → <1 MB
+    expect(mem("1048575")).toBeUndefined(); // one byte under 1 MB
+    expect(mem("1048576")).toBe(1); // exactly 1 MB still parses
+  });
+
+  it.each(["512", "1048575", ".inf", "-.inf", ".nan"])(
+    "rejects an unusable memory value in both Compose forms: %s", (value) => {
+      for (const body of [
+        `    mem_limit: ${value}\n    cpus: 0.5\n`,
+        `    deploy:\n      resources:\n        limits:\n          memory: ${value}\n          cpus: 0.5\n`,
+      ]) {
+        expect(parseComposeFile(svc(body)).services[0]?.advanced?.resources).toEqual({ cpuCores: 0.5 });
+      }
+    },
+  );
 
   it("keeps a healthcheck and resources side by side in one advanced blob", () => {
     const parsed = parseComposeFile(

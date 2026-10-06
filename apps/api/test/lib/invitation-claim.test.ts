@@ -24,7 +24,7 @@ vi.mock("@repo/db", () => ({
   },
 }));
 
-import { invitationAccountCreationMode, resolveInvitationClaim } from "@/lib/invitation-claim";
+import { invitationAccountCreationMode, resolveInvitationClaim } from "@repo/platform/engine/lib/invitation-claim";
 
 const now = new Date("2026-09-01T12:00:00.000Z");
 

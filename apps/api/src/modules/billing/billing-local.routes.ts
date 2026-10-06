@@ -13,9 +13,10 @@
  */
 
 import { Hono } from "hono";
+import { BillingOperationSchemas, CreateSubscriptionBody, CreateTopupBody } from "@repo/contracts";
 import { authMiddleware } from "../../middleware";
 import { secureRouter } from "../../lib/secure-router";
-import * as billingLocal from "./billing-local.controller";
+import * as billingLocal from "./billing.controller";
 
 export const billingLocalRoutes = new Hono();
 const r = secureRouter(billingLocalRoutes, {
@@ -32,44 +33,56 @@ const r = secureRouter(billingLocalRoutes, {
 // POST /payment-methods, and GET /invoices do not exist on the SaaS
 // side — invoices and payment methods are owned by Stripe's hosted
 // portal (POST /portal returns the redirect URL), and subscription
-// updates are POST /subscription (replace) or POST /cancel. Mounting
+// updates use POST /subscription (checkout), /cancel, or /resume. Mounting
 // the orphan routes here just routed dashboard calls into 404 HTML
 // pages from the SaaS proxy, breaking dashboard error handling.
 r.use("/state", authMiddleware);
+r.use("/checkout", authMiddleware);
 r.use("/subscription", authMiddleware);
 r.use("/cancel", authMiddleware);
+r.use("/resume", authMiddleware);
 r.use("/usage", authMiddleware);
+r.use("/resources", authMiddleware);
+r.use("/allowances", authMiddleware);
 r.use("/topup", authMiddleware);
 r.use("/topup-packs", authMiddleware);
 r.use("/portal", authMiddleware);
 
 /* ---------- Dashboard state snapshot ---------- */
-r.get("/state", { tag: "billing:read" }, billingLocal.getState);
+r.get("/state", { tag: "billing:read", authorizationHandledByOperation: true, mcp: { description: "Read the workspace’s Cloud billing state, current plan, balance and limits. Self-hosted instances need a connected Cloud account for this data." } }, billingLocal.getState);
+r.get(
+  "/checkout",
+  { tag: "billing:read", authorizationHandledByOperation: true, mcpExcluded: "Browser checkout configuration; use the billing reads to inspect a plan and complete purchases in Settings → Billing." },
+  billingLocal.getCheckout,
+);
 
 /* ---------- Subscriptions ---------- */
-r.get("/subscription", { tag: "billing:read" }, billingLocal.getSubscription);
-r.post("/subscription", { tag: "billing:write" }, billingLocal.createSubscription);
+r.get("/subscription", { tag: "billing:read", authorizationHandledByOperation: true, mcp: { description: "Read the workspace’s current subscription tier, state and billing period." } }, billingLocal.getSubscription);
+r.post("/subscription", { body: CreateSubscriptionBody, tag: "billing:write", authorizationHandledByOperation: true, auditHandledByOperation: true, rateLimit: "billing-portal", mcpExcluded: "Starts a paid browser checkout. Purchases and payment authorization are completed in Settings → Billing." }, billingLocal.createSubscription);
 
 /* ---------- Cancellation ---------- */
-// Destructive — admin tier per the same precedent as the SaaS sibling.
-r.post("/cancel", { tag: "billing:admin" }, billingLocal.cancelSubscription);
+// Renewal controls use the same grants as the SaaS operations.
+r.post("/cancel", { tag: "billing:admin", authorizationHandledByOperation: true, auditHandledByOperation: true, rateLimit: "billing-portal", mcpExcluded: "Paid subscription renewal is managed by the account owner in Settings → Billing; MCP exposes the resulting subscription state." }, billingLocal.cancelSubscription);
+r.post("/resume", { tag: "billing:admin", authorizationHandledByOperation: true, auditHandledByOperation: true, rateLimit: "billing-portal", mcpExcluded: "Paid subscription renewal is managed by the account owner in Settings → Billing; MCP exposes the resulting subscription state." }, billingLocal.resumeSubscription);
 
 /* ---------- Usage ---------- */
-r.get("/usage", { tag: "billing:read" }, billingLocal.getUsage);
+r.get("/usage", { tag: "billing:read", authorizationHandledByOperation: true, mcp: { description: "Read metered Cloud usage over the requested date range, grouped by hour or day. This is billing data, not live workload metrics." }, query: BillingOperationSchemas.getUsage.input }, billingLocal.getUsage);
+r.get("/resources", { tag: "billing:read", authorizationHandledByOperation: true, mcp: { description: "List Cloud resources contributing to this workspace’s bill and usage." } }, billingLocal.getResources);
+r.get("/allowances", { tag: "billing:read", authorizationHandledByOperation: true, mcp: { description: "List resources consuming workspace allowances, including the projects holding managed domains." } }, billingLocal.listAllowanceDetail);
 
 /* ---------- Top-ups ---------- */
-r.get("/topup-packs", { tag: "billing:read" }, billingLocal.listTopupPacks);
+r.get("/topup-packs", { tag: "billing:read", authorizationHandledByOperation: true, mcp: { description: "List available Cloud credit packs and prices. Reading this does not buy credits." } }, billingLocal.listTopupPacks);
 r.post(
   "/topup",
-  { tag: "billing:write", rateLimit: "billing-portal" },
+  { body: CreateTopupBody, tag: "billing:write", authorizationHandledByOperation: true, auditHandledByOperation: true, rateLimit: "billing-portal", mcpExcluded: "Starts a paid browser checkout. Buy credits in Settings → Billing; MCP can list pack prices and current balance." },
   billingLocal.createTopup,
 );
 
-/* ---------- Stripe Portal (invoices + PM management) ---------- */
+/* ---------- Namespace billing portal ---------- */
 // Each call mints a Stripe portal session — tight per-org limit (20/min)
 // stops a runaway frontend retry loop from racking up Stripe API spend.
 r.post(
   "/portal",
-  { tag: "billing:write", rateLimit: "billing-portal" },
+  { tag: "billing:admin", authorizationHandledByOperation: true, auditHandledByOperation: true, rateLimit: "billing-portal", mcpExcluded: "Creates an account billing-portal session. Open Settings → Billing to manage payment details." },
   billingLocal.createPortal,
 );

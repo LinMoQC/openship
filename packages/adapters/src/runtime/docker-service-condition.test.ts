@@ -53,7 +53,7 @@ describe("DockerRuntime.ensureNetwork", () => {
       createNetwork,
     };
 
-    await expect(runtime.ensureNetwork("ignored", "magic-prod_default")).resolves.toBe(
+    await expect(runtime.ensureNetwork("ignored", undefined, "magic-prod_default")).resolves.toBe(
       "network-existing",
     );
     expect(createNetwork).not.toHaveBeenCalled();
@@ -67,7 +67,7 @@ describe("DockerRuntime.ensureNetwork", () => {
       createNetwork,
     };
 
-    await expect(runtime.ensureNetwork("ignored", "missing-network")).rejects.toThrow(
+    await expect(runtime.ensureNetwork("ignored", undefined, "missing-network")).rejects.toThrow(
       "does not exist",
     );
     expect(createNetwork).not.toHaveBeenCalled();

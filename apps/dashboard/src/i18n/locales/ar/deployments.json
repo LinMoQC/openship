@@ -32,7 +32,8 @@
       "total": "الإجمالي",
       "successful": "ناجحة",
       "failed": "فاشلة",
-      "inProgress": "قيد التنفيذ"
+      "inProgress": "قيد التنفيذ",
+      "pageTitle": "في هذه الصفحة"
     },
     "autoDeploy": {
       "title": "النشر التلقائي",
@@ -191,5 +192,14 @@
     "untouchedNote": "تستمر في العمل ولا تُمسّ: {names}",
     "confirm": "تراجع",
     "cancel": "إلغاء"
+  },
+  "loadFailed": "تعذّر تحميل عمليات النشر.",
+  "retry": "حاول مجددًا",
+  "pagination": {
+    "label": "صفحات سجل النشر",
+    "previous": "الصفحة السابقة",
+    "next": "الصفحة التالية",
+    "pageOf": "الصفحة {page} من {total}",
+    "range": "عمليات النشر {from}–{to} من {total}"
   }
 }

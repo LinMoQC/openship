@@ -1,5 +1,9 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
+// This file isolates subscription/default fan-out; real recipient policy is
+// exercised through notification SDK/HTTP parity and queue tests.
+vi.mock("@repo/platform/engine/lib/notification-access", () => ({ canReceiveNotification: async () => true }));
+
 /**
  * Dispatcher tier-1 (explicit subscriptions) + tier-2 (org-default fallback)
  * fan-out. Tier-2 is the consumer that makes default-enabled categories notify
@@ -46,13 +50,13 @@ vi.mock("@repo/db", () => ({
 
 // Job-trigger side-effect is irrelevant here — stub it so we don't pull the
 // job machinery (and its config/env chain) into this unit test.
-vi.mock("../../src/modules/jobs/job-events", () => ({
+vi.mock("@repo/platform/engine/modules/jobs/job-events", () => ({
   fireJobTriggers: (eventType: string, organizationId: string) => {
     h.jobTriggers.push({ eventType, organizationId });
   },
 }));
 
-import { notification } from "../../src/lib/notification-dispatcher";
+import { notification } from "@repo/platform/engine/lib/notification-dispatcher";
 
 const ch = (id: string, userId: string, kind: string, over?: Partial<{ enabled: boolean; verified: boolean }>) => ({
   id,

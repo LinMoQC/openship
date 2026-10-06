@@ -64,6 +64,40 @@ const deployConfig = (overrides: Partial<DeployConfig> = {}): DeployConfig => ({
 });
 
 describe("CloudRuntime prebuilt images", () => {
+  it("fails and deletes a workspace when its cleanup TTL cannot be set", async () => {
+    const cloud = fakeCloud();
+    cloud.makeTemporary.mockRejectedValue(new Error("lifecycle unavailable"));
+    const runtime = new CloudRuntime(cloud.client as never, { namespace: "ns-customer" });
+    expect(await runtime.prepareImage(imageConfig())).toMatchObject({ status: "failed" });
+    expect(cloud.deleteWorkspace).toHaveBeenCalledOnce();
+    expect(cloud.runtime).not.toHaveBeenCalled();
+  });
+
+  it("sends the customer namespace explicitly on workspace creation", async () => {
+    const cloud = fakeCloud();
+    const runtime = new CloudRuntime(cloud.client as never, { namespace: "ns-customer" });
+    await runtime.prepareImage(imageConfig());
+    expect(cloud.createWorkspace).toHaveBeenCalledWith(expect.objectContaining({ namespace: "ns-customer" }));
+  });
+
+  it("refuses billable work from the global reseller platform", async () => {
+    const cloud = fakeCloud();
+    const runtime = new CloudRuntime(cloud.client as never, { allowProvisioning: false });
+    await expect(runtime.prepareImage(imageConfig())).rejects.toThrow("organization-scoped");
+    await expect(runtime.deploy(deployConfig())).rejects.toThrow("organization-scoped");
+    expect(cloud.createWorkspace).not.toHaveBeenCalled();
+    expect(cloud.makePermanent).not.toHaveBeenCalled();
+  });
+
+  it("refuses new work on a failed billing check while still allowing cleanup", async () => {
+    const cloud = fakeCloud();
+    const runtime = new CloudRuntime(cloud.client as never, { beforeProvision: async () => { throw new Error("billing blocked"); } });
+    await expect(runtime.prepareImage(imageConfig())).rejects.toThrow("billing blocked");
+    await runtime.destroy("ws-prebuilt");
+    expect(cloud.createWorkspace).not.toHaveBeenCalled();
+    expect(cloud.deleteWorkspace).toHaveBeenCalledOnce();
+  });
+
   it("creates an owned temporary workspace directly from the application image", async () => {
     const cloud = fakeCloud();
     const runtime = new CloudRuntime(cloud.client as never);

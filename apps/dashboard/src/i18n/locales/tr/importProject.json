@@ -106,7 +106,12 @@
     "modeStatic": "Statik",
     "workerModeDesc": "Bağlantı noktası veya genel URL olmadan sürekli çalışır — bir kuyruk tüketicisi, cron veya bot.",
     "staticPathHint": "Edge üzerinden statik dosyalar olarak sunulur — hiçbir işlem çalışmaz.",
-    "buildSettingsTitle": "Derleme Ayarları"
+    "buildSettingsTitle": "Derleme Ayarları",
+    "releaseTitle": "Etkinleştirmeden önce",
+    "releaseDescription": "Derleme sonrası isteğe bağlı komutlar. Hata dağıtımı durdurur. Yalnızca Docker ve Bare uygulamaları.",
+    "releaseCommand": "Komut {number}",
+    "addReleaseCommand": "Komut ekle",
+    "removeReleaseCommand": "{number}. komutu kaldır"
   },
   "projectSettings": {
     "framework": "Framework",
@@ -124,6 +129,7 @@
     "noneSet": "Hiçbiri ayarlanmadı",
     "pasteEnv": ".env Yapıştır",
     "uploadEnv": ".env Yükle",
+    "downloadEnv": ".env İndir",
     "edit": "Düzenle",
     "cancel": "İptal",
     "saving": "Kaydediliyor...",
@@ -145,6 +151,7 @@
       "interpolated": "Değişkenlerden türetildi"
     },
     "toast": {
+      "downloadFailed": "Ortam değişkenleri indirilemedi.",
       "title": "Ortam Değişkenleri",
       "added": "{count} eklendi",
       "updated": "{count} güncellendi",
@@ -208,9 +215,9 @@
       "volumes": "Disk Birimleri (Volumes)",
       "statefulWarnPart1": "Buluttaki durum bilgisi tutan (stateful) servis: veriler çalışma alanının kalıcı diskinde kalır (yeniden başlatmalarda korunur) ancak yedeklemeler etkinleştirilmediği sürece ",
       "statefulWarnBold": "yeniden derlemelerde korunmaz",
-      "statefulWarnPart2": ". Docker volume bağlamaları geçerli değildir.",
+      "statefulWarnPart2": ". Çalışma alanını değiştirmeden önce verileri açıkça yedekleyin ve geri yükleyin.",
       "volumeHint": "Adlandırılmış disk birimi veya sunucu yolu → konteyner yolu.",
-      "volumeCloudNote": "Bulutta bu bağlamalar geçerli değildir — veriler çalışma alanının diskinde kalır (yedekleme olmadan yeniden derlemelerde korunmaz).",
+      "volumeCloudNote": "Openship Cloud kalıcı birim bağlamalarını desteklemez. Birim gerektiren iş yükleri için bir sunucu seçin.",
       "sourcePlaceholder": "Kaynak",
       "containerPathPlaceholder": "Konteyner yolu",
       "readOnlyMount": "Salt okunur bağlama",
@@ -331,7 +338,7 @@
       "successful": "Dağıtım Başarılı",
       "deploying": "Dağıtılıyor..."
     },
-    "visitSite": "Siteyi Ziyaret Et",
+    "openSite": "Siteyi aç",
     "warningTitle": "Dağıtım tamamlandı ancak bazı servisler hâlâ müdahale gerektiriyor.",
     "productionLogs": "Canlı ortam günlükleri",
     "buildTerminal": "Derleme Terminali",
@@ -341,7 +348,7 @@
     "stopDeployment": "Dağıtımı Durdur",
     "redeploy": "Yeniden Dağıt",
     "goToProject": "Projeye git",
-    "openDashboard": "Paneli Aç",
+    "openProject": "Projeyi aç",
     "edit": "Düzenle",
     "status": {
       "cancelled": "İptal Edildi",

@@ -105,7 +105,12 @@
     "modeWorker": "Worker",
     "modeStatic": "Estático",
     "workerModeDesc": "Se ejecuta de forma continua sin puerto ni URL pública: un consumidor de cola, cron o bot.",
-    "buildSettingsTitle": "Configuración de compilación"
+    "buildSettingsTitle": "Configuración de compilación",
+    "releaseTitle": "Antes de activar",
+    "releaseDescription": "Comandos opcionales después del build. Un fallo detiene el despliegue. Solo para apps Docker y Bare.",
+    "releaseCommand": "Comando {number}",
+    "addReleaseCommand": "Añadir comando",
+    "removeReleaseCommand": "Eliminar comando {number}"
   },
   "projectSettings": {
     "framework": "Framework",
@@ -123,6 +128,7 @@
     "noneSet": "Ninguna establecida",
     "pasteEnv": "Pegar .env",
     "uploadEnv": "Subir .env",
+    "downloadEnv": "Descargar .env",
     "edit": "Editar",
     "cancel": "Cancelar",
     "saving": "Guardando...",
@@ -144,6 +150,7 @@
       "interpolated": "Interpolada"
     },
     "toast": {
+      "downloadFailed": "No se pudieron descargar las variables de entorno.",
       "title": "Variables de entorno",
       "added": "{count} añadidas",
       "updated": "{count} actualizadas",
@@ -205,9 +212,9 @@
       "volumes": "Volúmenes",
       "statefulWarnPart1": "Servicio con estado en la nube: los datos residen en el disco persistente del espacio de trabajo (sobreviven a los reinicios) pero ",
       "statefulWarnBold": "no se conservan entre recompilaciones",
-      "statefulWarnPart2": " a menos que las copias de seguridad estén habilitadas. Los montajes de volúmenes de Docker no se aplican.",
+      "statefulWarnPart2": ". Realiza una copia y restaura los datos explícitamente antes de reemplazar el espacio de trabajo.",
       "volumeHint": "Volumen con nombre o ruta del host → ruta del contenedor.",
-      "volumeCloudNote": "En la nube estos montajes no se aplican: los datos persisten en el disco del espacio de trabajo (no entre recompilaciones sin copias de seguridad).",
+      "volumeCloudNote": "Openship Cloud no admite montajes de volúmenes persistentes. Elige un servidor para cargas que necesiten volúmenes.",
       "sourcePlaceholder": "Origen",
       "containerPathPlaceholder": "Ruta del contenedor",
       "readOnlyMount": "Montaje de solo lectura",
@@ -315,7 +322,7 @@
       "successful": "Despliegue exitoso",
       "deploying": "Desplegando..."
     },
-    "visitSite": "Visitar el sitio",
+    "openSite": "Abrir sitio",
     "warningTitle": "El despliegue finalizó, pero algunos servicios aún necesitan atención.",
     "productionLogs": "Registros de producción",
     "buildTerminal": "Terminal de compilación",
@@ -325,7 +332,7 @@
     "stopDeployment": "Detener despliegue",
     "redeploy": "Redesplegar",
     "goToProject": "Ir al proyecto",
-    "openDashboard": "Abrir panel",
+    "openProject": "Abrir proyecto",
     "edit": "Editar",
     "status": {
       "cancelled": "Cancelado",

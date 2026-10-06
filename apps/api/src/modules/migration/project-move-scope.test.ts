@@ -15,10 +15,10 @@ import { readFileSync } from "node:fs";
  * exercised by `docker-inspect` behaviour; what matters here is that this caller uses it, and
  * that the label set — not the scan option — remains the ownership check.
  */
-const move = readFileSync(new URL("./project-move.ts", import.meta.url), "utf8");
-const inspect = readFileSync(new URL("./docker-inspect.service.ts", import.meta.url), "utf8");
+const move = readFileSync(new URL("../../../../../packages/platform/src/engine/modules/migration/project-move.ts", import.meta.url), "utf8");
+const inspect = readFileSync(new URL("../../../../../packages/platform/src/engine/modules/migration/docker-inspect.service.ts", import.meta.url), "utf8");
 const orchestrator = readFileSync(
-  new URL("./migration.orchestrator.ts", import.meta.url),
+  new URL("../../../../../packages/platform/src/engine/modules/migration/migration.orchestrator.ts", import.meta.url),
   "utf8",
 );
 

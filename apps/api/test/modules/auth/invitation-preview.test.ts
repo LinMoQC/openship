@@ -15,11 +15,11 @@ const h = vi.hoisted(() => ({
   existingUser: undefined as { id: string } | undefined,
 }));
 
-vi.mock("@/lib/auth", () => ({
+vi.mock("@repo/platform/engine/lib/auth", () => ({
   auth: {},
   isSaasDeployment: false,
 }));
-vi.mock("@/lib/invitation-claim", async (importOriginal) => ({
+vi.mock("@repo/platform/engine/lib/invitation-claim", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/invitation-claim")>()),
   resolveInvitationClaim: vi.fn(async () => h.claim),
 }));

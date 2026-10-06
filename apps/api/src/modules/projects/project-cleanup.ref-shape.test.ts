@@ -51,6 +51,8 @@ const h = vi.hoisted(() => ({
   })),
   isReachable: vi.fn(async () => true),
   getServer: vi.fn(async () => null as Record<string, unknown> | null),
+  cloudBinding: undefined as Record<string, unknown> | undefined,
+  resolveCloudPlatform: vi.fn(),
 }));
 
 vi.mock("@repo/db", () => ({
@@ -62,10 +64,11 @@ vi.mock("@repo/db", () => ({
     deployment: { listByProject: vi.fn(async () => ({ rows: h.deployments })) },
     domain: { listByProject: vi.fn(async () => h.domains) },
     server: { getInOrganization: h.getServer },
+    cloudDockerWorkspace: { find: vi.fn(async () => undefined) },
   },
 }));
 
-vi.mock("../../lib/deployment-runtime", () => ({
+vi.mock("@repo/platform/engine/lib/deployment-runtime", () => ({
   resolveDeploymentRuntime: vi.fn(async (dep: { id: string }) =>
     h.resolveErrors[dep.id]
       ? Promise.reject(h.resolveErrors[dep.id])
@@ -74,9 +77,7 @@ vi.mock("../../lib/deployment-runtime", () => ({
         : { runtime: h.runtime },
   ),
   disposeRuntime: vi.fn(),
-  resolveDeploymentPlatform: vi.fn(async () => {
-    throw new Error("no cloud workspace in these fixtures");
-  }),
+  resolveDeploymentPlatform: h.resolveCloudPlatform,
 }));
 
 // `platform().runtime` must NOT be a DockerRuntime, or the local-host sweep adds a
@@ -85,30 +86,33 @@ vi.mock("../../lib/controller-helpers", () => ({
   platform: () => ({ runtime: { name: "bare" }, routing: { removeRoute: h.removeRoute } }),
 }));
 
-vi.mock("./cleanup-keep-set", () => ({ computeCleanupKeepSet: vi.fn(async () => h.keep) }));
-vi.mock("../../lib/routing-domains", () => ({
+vi.mock("@repo/platform/engine/modules/projects/cleanup-keep-set", () => ({ computeCleanupKeepSet: vi.fn(async () => h.keep) }));
+vi.mock("@repo/platform/engine/lib/routing-domains", () => ({
   buildServiceRouteDomains: () => h.derivedServiceRoutes,
 }));
-vi.mock("../../lib/managed-edge-proxy", () => ({
+vi.mock("@repo/platform/engine/lib/managed-edge-proxy", () => ({
   releaseManagedHostnames: h.releaseManagedHostnames,
 }));
-vi.mock("../../lib/server-reachability", () => ({
+vi.mock("@repo/platform/engine/lib/server-reachability", () => ({
   createReachabilityProbe: () => ({ isReachable: h.isReachable }),
 }));
-vi.mock("../../lib/cloud/transport", () => ({ resolveOrgCloudUserId: vi.fn(async () => null) }));
-vi.mock("../services/live-state", () => ({ resolveLiveServiceState: () => new Map() }));
-vi.mock("../deployments/pinned-host-ports", () => ({
+vi.mock("@repo/platform/engine/lib/cloud/transport", () => ({ resolveOrgCloudUserId: vi.fn(async () => null) }));
+vi.mock("@repo/platform/engine/lib/cloud-docker-workspace", () => ({ cloudDockerWorkspaceForCleanup: vi.fn(async () => h.cloudBinding) }));
+vi.mock("@repo/platform/engine/modules/services/live-state", () => ({ resolveLiveServiceState: () => new Map() }));
+vi.mock("@repo/platform/engine/modules/deployments/pinned-host-ports", () => ({
   convergeTargetHostPortClaims: h.convergeClaims,
 }));
 
-import { DockerRuntime } from "@repo/adapters";
+import { CloudDockerRuntime, DockerRuntime } from "@repo/adapters";
+import { resolveDeploymentRuntime, disposeRuntime } from "@repo/platform/engine/lib/deployment-runtime";
 import {
   collectDeploymentManifest,
   collectProjectManifest,
   executeCleanup,
+  previewProjectDeletion,
   type CleanupManifest,
   type CleanupRouteContext,
-} from "./project-cleanup.service";
+} from "@repo/platform/engine/modules/projects/project-cleanup.service";
 
 /** A compose static sub-app's doc-root, as written into `service_deployment.image_ref`. */
 const STATIC_BUILD_DIR = "/opt/openship/static/.builds/bld_1-svc_1";
@@ -174,6 +178,70 @@ beforeEach(() => {
   h.keep = { images: new Set<string>(), containers: new Set<string>() };
   h.isReachable.mockResolvedValue(true);
   h.getServer.mockResolvedValue(null);
+  h.cloudBinding = undefined;
+  h.resolveCloudPlatform.mockReset().mockRejectedValue(new Error("no cloud workspace in these fixtures"));
+});
+
+describe("Cloud Docker project teardown", () => {
+  const destroyVm = vi.fn(async () => {});
+  const listRoutes = vi.fn(async () => ["app.opsh.io", "console.opsh.io"]);
+  const cloudDocker = Object.assign(Object.create(CloudDockerRuntime.prototype), {
+    name: "cloud", listProjectRouteHostnames: listRoutes,
+  });
+  beforeEach(() => {
+    h.cloudBinding = { projectId: "p1", namespace: "org-ns", workspaceId: "shared-vm" };
+    h.deployments = [deployment({ containerId: "web-container", meta: { deployTarget: "cloud",
+      cloudDockerWorkspace: { projectId: "p1", workspaceId: "shared-vm" } } })];
+    h.serviceRows.dep_1 = [serviceRow({ containerId: "web-container", imageRef: IMAGE_TAG })];
+    listRoutes.mockResolvedValue(["app.opsh.io", "console.opsh.io"]);
+    destroyVm.mockResolvedValue();
+    h.removeRoute.mockResolvedValue();
+    h.resolveCloudPlatform.mockImplementation(async (snapshot) => ({ platform: {
+      runtime: snapshot.cloudDockerWorkspace ? cloudDocker : { name: "cloud", destroy: destroyVm },
+      routing: { removeRoute: h.removeRoute },
+    } }));
+  });
+  it("removes the routing Pages before deleting the one shared VM without inspecting containers", async () => {
+    const order: string[] = [];
+    h.removeRoute.mockImplementation(async () => { order.push("route"); });
+    destroyVm.mockImplementation(async () => { order.push("vm"); });
+    const manifest = await collectProjectManifest({ ...project, cloudWorkspaceId: "shared-vm" } as never, { wipeVolumes: true });
+    expect(manifest.resources.map(resource => resource.type)).toEqual(["route", "route", "cloud_workspace"]);
+    expect(resolveDeploymentRuntime).not.toHaveBeenCalled();
+    expect(docker.inspectNamedVolumes).not.toHaveBeenCalled();
+    expect((await executeCleanup(manifest)).failed).toEqual([]);
+    expect(order).toEqual(["route", "route", "vm"]);
+    expect(destroyVm).toHaveBeenCalledExactlyOnceWith("shared-vm");
+    expect(h.releaseManagedHostnames).not.toHaveBeenCalled();
+  });
+  it("retains the workspace when any Page cleanup fails", async () => {
+    h.removeRoute.mockRejectedValue(new Error("provider route removal unavailable"));
+    const manifest = await collectProjectManifest({ ...project, cloudWorkspaceId: "shared-vm" } as never);
+    expect((await executeCleanup(manifest)).failed).toContainEqual(expect.objectContaining({ ref: "shared-vm", type: "cloud_workspace" }));
+    expect(destroyVm).not.toHaveBeenCalled();
+  });
+  it("fails before cleanup if a deployment claims a different shared workspace", async () => {
+    h.deployments[0]!.meta = { cloudDockerWorkspace: { projectId: "p1", workspaceId: "other-vm" } };
+    await expect(collectProjectManifest(project as never)).rejects.toThrow("does not match");
+    expect(h.resolveCloudPlatform).not.toHaveBeenCalled();
+    expect(destroyVm).not.toHaveBeenCalled();
+  });
+  it("keeps cleanup retryable when the Page inventory cannot be confirmed", async () => {
+    listRoutes.mockRejectedValue(new Error("registry unavailable"));
+    await expect(collectProjectManifest(project as never)).rejects.toThrow("could not confirm");
+    expect(disposeRuntime).toHaveBeenCalledWith(cloudDocker);
+    expect(destroyVm).not.toHaveBeenCalled();
+  });
+});
+
+it("holds preview transports open until their volume inspections finish", async () => {
+  h.deployments = [deployment({ containerId: "container-with-volume" })];
+  vi.mocked(docker.inspectNamedVolumes).mockImplementationOnce(async () => {
+    expect(disposeRuntime).not.toHaveBeenCalled();
+    return ["persistent-data"];
+  });
+  expect((await previewProjectDeletion(project as never)).deploymentVolumes).toEqual(["persistent-data"]);
+  expect(disposeRuntime).toHaveBeenCalledWith(docker);
 });
 
 describe("collectProjectManifest — a ref is classified by its shape", () => {
@@ -673,3 +741,12 @@ describe("collectDeploymentManifest — protectRetained covers directories too",
     expect(typesOf(manifest, FOREIGN_IMAGE)).toEqual([]);
   });
 });
+
+// The application seams moved with the shared engine.
+vi.mock("@repo/platform/engine/lib/platform-config", () => ({
+  platform: () => ({ runtime: { name: "bare" }, routing: { removeRoute: h.removeRoute } }),
+}));
+
+vi.mock("@repo/platform/engine/lib/resource-access", () => ({
+  platform: () => ({ runtime: { name: "bare" }, routing: { removeRoute: h.removeRoute } }),
+}));

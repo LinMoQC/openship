@@ -20,7 +20,7 @@ vi.mock("@repo/db", () => ({
   },
 }));
 
-vi.mock("../../src/config/env", () => ({
+vi.mock("@repo/platform/engine/config/env", () => ({
   env: {
     CLOUD_MODE: false,
     SMTP_HOST: undefined,
@@ -30,15 +30,15 @@ vi.mock("../../src/config/env", () => ({
   },
 }));
 
-vi.mock("../../src/lib/cloud/client", () => ({
+vi.mock("@repo/platform/engine/lib/cloud/client", () => ({
   cloudClient: vi.fn(),
 }));
 
-vi.mock("../../src/lib/encryption", () => ({
+vi.mock("@repo/platform/engine/lib/encryption", () => ({
   decrypt: vi.fn(),
 }));
 
-vi.mock("../../src/modules/mail/admin/platform-mailbox.service", () => ({
+vi.mock("@repo/platform/engine/modules/mail/admin/platform-mailbox.service", () => ({
   ensureOpenshipPlatformMailbox: mocks.ensurePlatformMailbox,
 }));
 
@@ -80,7 +80,7 @@ describe("platform transport self-repair", () => {
   });
 
   it("rotates once and retries when a cached platform credential gets EAUTH", async () => {
-    const { sendMail } = await import("../../src/lib/mail");
+    const { sendMail } = await import("@repo/platform/engine/lib/mail");
 
     await expect(
       sendMail({

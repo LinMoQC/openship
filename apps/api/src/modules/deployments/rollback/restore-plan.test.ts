@@ -1,11 +1,11 @@
-import { COMPOSE_SENTINEL } from "../../../lib/container-ref";
+import { COMPOSE_SENTINEL } from "@repo/platform/engine/lib/container-ref";
 import { describe, it, expect } from "vitest";
 import {
   ROLLBACK_ERROR_CODES,
   planNeedsRepository,
   planRestore,
   type RestorePlanInput,
-} from "./restore-plan";
+} from "@repo/platform/engine/modules/deployments/rollback/restore-plan";
 
 const FROZEN_RELEASE_IMAGE = `ghcr.io/acme/app@sha256:${"a".repeat(64)}`;
 
@@ -157,6 +157,30 @@ describe("planRestore — docker (image is the artifact)", () => {
       }),
     );
     expect(plan).toMatchObject({ mode: "ineligible", code: ROLLBACK_ERROR_CODES.ARTIFACT_GONE });
+  });
+});
+
+describe("planRestore — cluster registry artifacts", () => {
+  it("reuses a source-built release's digest after its local build cache was removed", () => {
+    const plan = planRestore(input({
+      target: {
+        imageRef: FROZEN_RELEASE_IMAGE,
+        artifactRetainedAt: null,
+        meta: { clusterId: "cluster-1", source: "git", repoUrl: "https://github.com/acme/app" },
+      } as never,
+      imagePresent: () => false,
+    }));
+    expect(plan).toEqual({ mode: "reacquire-image", releaseImageRef: FROZEN_RELEASE_IMAGE });
+    expect(planNeedsRepository(plan)).toBe(false);
+  });
+
+  it("does not promise a registry restore from a mutable or malformed reference", () => {
+    for (const imageRef of ["ghcr.io/acme/app:latest", "ghcr.io/acme/app@sha256:abc"]) {
+      expect(planRestore(input({
+        target: { imageRef, meta: { clusterId: "cluster-1", source: "git" } } as never,
+        imagePresent: () => false,
+      }))).toEqual({ mode: "rebuild", commitSha: "abc1234def" });
+    }
   });
 });
 

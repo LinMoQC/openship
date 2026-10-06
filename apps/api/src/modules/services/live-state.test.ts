@@ -6,7 +6,7 @@ import {
   liveMatchTiersForDeployment,
   resolveLiveServiceState,
   type LiveContainerLike,
-} from "./live-state";
+} from "@repo/platform/engine/modules/services/live-state";
 
 const container = (over: Partial<LiveContainerLike> & { id: string }): LiveContainerLike => ({
   names: [],

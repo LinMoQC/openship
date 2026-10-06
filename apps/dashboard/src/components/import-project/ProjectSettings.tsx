@@ -1,10 +1,11 @@
 "use client";
 
+import { Icon as UiIcon } from "@repo/ui/icons";
+
 import React, { useCallback, useState, useMemo } from "react";
 import { frameworks, getFrameworkConfig, stackCategories } from "./Frameworks";
 import type { StackCategory } from "./Frameworks";
 import { STACKS } from "@repo/core";
-import { Sparkles, ChevronDown, ChevronUp } from "lucide-react";
 import { useDeployment } from "@/context/DeploymentContext";
 import { useI18n } from "@/components/i18n-provider";
 import type { FrameworkId } from "./types";
@@ -18,7 +19,11 @@ const ProjectSettings: React.FC = () => {
   const detectedFw = config.detectedFramework ? getFrameworkConfig(config.detectedFramework) : null;
 
   const currentFwConfig = getFrameworkConfig(config.framework);
-  const [activeTab, setActiveTab] = useState<StackCategory>(currentFwConfig.category);
+  const [activeTab, setActiveTab] = useState<StackCategory>(
+    stackCategories.some((category) => category.id === currentFwConfig.category)
+      ? currentFwConfig.category
+      : stackCategories[0].id,
+  );
 
   const filteredFrameworks = useMemo(
     () => frameworks.filter((fw) => fw.category === activeTab),
@@ -70,7 +75,7 @@ const ProjectSettings: React.FC = () => {
                 </p>
                 <div className="flex items-center gap-1.5 mt-0.5">
                   <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-primary/10 text-[10px] font-medium text-primary">
-                    <Sparkles className="size-2.5" />
+                    <UiIcon name="sparkles" className="size-2.5" />
                     {t.importProject.projectSettings.detected}
                   </span>
                 </div>
@@ -82,7 +87,7 @@ const ProjectSettings: React.FC = () => {
               className="flex items-center gap-1 text-sm font-medium text-primary hover:text-primary/80 transition-colors"
             >
               {t.importProject.projectSettings.change}
-              <ChevronDown className="size-3.5" />
+              <UiIcon name="chevron-down" className="size-3.5" />
             </button>
           </div>
         </div>
@@ -105,15 +110,15 @@ const ProjectSettings: React.FC = () => {
                 }}
                 className="flex items-center gap-1 text-xs font-medium text-primary hover:text-primary/80 transition-colors"
               >
-                <Sparkles className="size-3" />
+                <UiIcon name="sparkles" className="size-3" />
                 {t.importProject.projectSettings.useDetected}
-                <ChevronUp className="size-3" />
+                <UiIcon name="chevron-up" className="size-3" />
               </button>
             )}
           </div>
 
           {/* Category tabs */}
-          <div className="flex gap-1 p-1 bg-muted/50 rounded-lg mb-4 w-fit">
+          <div className="flex flex-wrap gap-1 p-1 bg-muted/50 rounded-lg mb-4 w-fit max-w-full">
             {stackCategories.map((cat) => (
               <button
                 key={cat.id}

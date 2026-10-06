@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import type { DockerContainerDetail, DockerNetworkInfo, DockerVolumeInfo } from "@repo/adapters";
-import { declaredKey, reconcileStack } from "../../../src/modules/migration/docker-reconcile";
-import { parseComposeFile, type ComposeService } from "../../../src/lib/compose-parser";
+import { declaredKey, reconcileStack } from "@repo/platform/engine/modules/migration/docker-reconcile";
+import { parseComposeFile, type ComposeService } from "@repo/platform/engine/lib/compose-parser";
 
 /** Declarations are keyed by COMPOSE PROJECT + service, not by bare service name: a
  *  host can run two stacks that both declare `postgres`, and a flat map let the first

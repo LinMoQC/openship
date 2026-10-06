@@ -12,7 +12,13 @@
  * while the supervisor handles process lifecycle portably.
  */
 
-import type { CommandExecutor, LogEntry, LogCallback, ResourceUsage } from "../../types";
+import type {
+  CommandExecutor,
+  LogEntry,
+  LogCallback,
+  ResourceUsage,
+  RuntimeLogStreamOptions,
+} from "../../types";
 
 // ─── Deploy options ──────────────────────────────────────────────────────────
 
@@ -46,6 +52,9 @@ export interface ProcessSupervisor {
   /** Start a previously stopped process (unit/config must still exist) */
   start(deploymentId: string): Promise<void>;
 
+  /** Whether the saved activation configuration can restart this process. */
+  canStart(deploymentId: string): Promise<boolean>;
+
   /** Restart a process (stop + start with same config) */
   restart(deploymentId: string): Promise<void>;
 
@@ -74,7 +83,7 @@ export interface ProcessSupervisor {
   streamLogs(
     deploymentId: string,
     onLog: LogCallback,
-    opts?: { tail?: number },
+    opts?: RuntimeLogStreamOptions,
   ): Promise<() => void>;
 }
 

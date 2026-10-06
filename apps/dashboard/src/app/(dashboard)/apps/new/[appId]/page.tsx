@@ -1,18 +1,9 @@
 "use client";
 
+import { Icon as UiIcon } from "@repo/ui/icons";
+
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
-import {
-  Loader2,
-  ArrowRight,
-  ArrowLeft,
-  SlidersHorizontal,
-  Network,
-  Globe,
-  Lock,
-  AlertTriangle,
-  Cpu,
-} from "lucide-react";
 import {
   getAppTemplate,
   getAppSettings,
@@ -68,6 +59,7 @@ import { useI18n, interpolate } from "@/components/i18n-provider";
 import { usePlatform } from "@/context/PlatformContext";
 import { useCloud } from "@/context/CloudContext";
 import { useModal } from "@/context/ModalContext";
+import { useCloudDeployPricing } from "@/hooks/useCloudDeployPricing";
 import { LocalDeployComingSoonModal } from "@/components/LocalDeployComingSoonModal";
 import { useLocalDeployGate } from "@/hooks/useLocalDeployGate";
 import { defaultDomainType } from "@/lib/default-domain-type";
@@ -262,6 +254,7 @@ export default function AppInstallPage() {
   // preflight hard-fail. Forced true on SaaS/native (CloudContext).
   const { connected: cloudConnected, requireCloud } = useCloud();
   const { showModal, hideModal } = useModal();
+  const showCloudPricing = useCloudDeployPricing();
   // Desktop mode: apps can't run on this machine yet — see useLocalDeployGate.
   const localDeployGate = useLocalDeployGate();
 
@@ -1053,6 +1046,7 @@ export default function AppInstallPage() {
           setStartedAt(Date.now());
           setPhase("installing");
         } catch (err) {
+          if (!started && showCloudPricing(err)) return;
           const msg = getApiErrorMessage(err, w.installFailed).replace(
             /^Pre-deploy checks failed:\s*/i,
             "",
@@ -1105,6 +1099,7 @@ export default function AppInstallPage() {
 
       await startDeploy(pid);
     } catch (err) {
+      if (!started && showCloudPricing(err)) return;
       // Strip the server's "Pre-deploy checks failed:" prefix for a cleaner
       // message. Nothing deployed yet → toast + stay on the form; a deploy that
       // already started keeps the log-bearing error card (with build details).
@@ -1325,7 +1320,7 @@ export default function AppInstallPage() {
           onClick={() => router.push("/apps/new")}
           className="mb-4 inline-flex items-center gap-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
         >
-          <ArrowLeft className="size-4 rtl:rotate-180" />
+          <UiIcon name="arrow-left" className="size-4 rtl:rotate-180" />
           {w.back}
         </button>
 
@@ -1490,7 +1485,7 @@ export default function AppInstallPage() {
                                 value="port"
                                 selected={st.mode === "port"}
                                 onSelect={() => setExpoMode(key, "port")}
-                                icon={<Network className="size-4" />}
+                                icon={<UiIcon name="network" className="size-4" />}
                                 label={w.routePortLabel}
                                 description={w.routePortDesc}
                               />
@@ -1500,7 +1495,7 @@ export default function AppInstallPage() {
                                 value="domain"
                                 selected={st.mode === "domain"}
                                 onSelect={() => setExpoMode(key, "domain")}
-                                icon={<Globe className="size-4" />}
+                                icon={<UiIcon name="globe" className="size-4" />}
                                 label={w.routeDomainLabel}
                                 description={w.routeDomainDesc}
                               />
@@ -1550,7 +1545,7 @@ export default function AppInstallPage() {
                                 value="publish"
                                 selected={st.mode === "publish"}
                                 onSelect={() => setExpoMode(key, "publish")}
-                                icon={<Network className="size-4" />}
+                                icon={<UiIcon name="network" className="size-4" />}
                                 label={w.tcpPublishLabel}
                                 description={w.tcpPublishDesc}
                               />
@@ -1560,7 +1555,7 @@ export default function AppInstallPage() {
                                 value="internal"
                                 selected={st.mode === "internal"}
                                 onSelect={() => setExpoMode(key, "internal")}
-                                icon={<Lock className="size-4" />}
+                                icon={<UiIcon name="lock" className="size-4" />}
                                 label={w.tcpInternalLabel}
                                 description={w.tcpInternalDesc}
                               />
@@ -1596,7 +1591,7 @@ export default function AppInstallPage() {
                   informed rather than corrected afterwards. */}
               {declaresResources && (
                 <p className="mt-2 flex items-center gap-1.5 text-xs text-muted-foreground">
-                  <Cpu className="size-3.5 shrink-0" />
+                  <UiIcon name="cpu" className="size-3.5 shrink-0" />
                   <span className="font-medium text-foreground">{w.needsTitle}:</span>
                   {[
                     template.minResources?.memoryMb
@@ -1624,7 +1619,7 @@ export default function AppInstallPage() {
                   which is never one. */}
               {hostFit && !hostFit.fit.ok && (
                 <div className="mt-4 flex items-start gap-2.5 rounded-xl border border-warning/40 bg-warning/[0.05] px-3.5 py-3 text-xs text-warning">
-                  <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+                  <UiIcon name="warning" className="mt-0.5 size-4 shrink-0" />
                   <div className="space-y-1">
                     <p className="font-semibold">
                       {interpolate(w.hostFitTitle, { app: template.name })}
@@ -1660,9 +1655,9 @@ export default function AppInstallPage() {
                 className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-primary px-5 py-2.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
               >
                 {busy ? (
-                  <Loader2 className="size-4 animate-spin" />
+                  <UiIcon name="spinner" className="size-4 animate-spin" />
                 ) : (
-                  <ArrowRight className="size-4 rtl:rotate-180" />
+                  <UiIcon name="arrow-right" className="size-4 rtl:rotate-180" />
                 )}
                 {busy ? w.installing : w.install}
               </button>
@@ -1672,7 +1667,7 @@ export default function AppInstallPage() {
                 disabled={busy}
                 className="inline-flex w-full items-center justify-center gap-2 rounded-xl py-2 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
               >
-                <SlidersHorizontal className="size-3.5" /> {w.advanced}
+                <UiIcon name="sliders" className="size-3.5" /> {w.advanced}
               </button>
             </div>
           </div>

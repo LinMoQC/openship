@@ -18,30 +18,30 @@ vi.mock("../../../src/lib/controller-helpers", () => ({
   platform: () => ({ target: "desktop" }),
 }));
 
-vi.mock("../../../src/lib/cloud/client", () => ({
+vi.mock("@repo/platform/engine/lib/cloud/client", () => ({
   cloudClient,
 }));
 
-vi.mock("../../../src/lib/cloud/session", () => ({
+vi.mock("@repo/platform/engine/lib/cloud/session", () => ({
   // De-conflation reads this when a cloud preflight comes back null; stub
   // it so the mock surface is complete even on that branch.
   isCloudConnectedForOrg: vi.fn().mockResolvedValue(true),
 }));
 
-vi.mock("../../../src/lib/cloud-preflight", () => ({
+vi.mock("@repo/platform/engine/lib/cloud-preflight", () => ({
   runCloudPreflight,
 }));
 
 // Keep the custom-domain DNS branch (checkCustomDomainSelfHosted) off the network
 // and deterministic — a custom host resolves to "no records yet" (a warn on the
 // `domain` check), never a cloud requirement. Isolates the cloud-gating assertions.
-vi.mock("../../../src/lib/dns-resolver", () => ({
+vi.mock("@repo/platform/engine/lib/dns-resolver", () => ({
   resolveRecords: vi.fn().mockResolvedValue([]),
   lookupAddresses: vi.fn().mockResolvedValue([]),
 }));
 
-import { runPreflightChecks } from "../../../src/modules/deployments/preflight";
-import { isCloudConnectedForOrg } from "../../../src/lib/cloud/session";
+import { runPreflightChecks } from "@repo/platform/engine/modules/deployments/preflight";
+import { isCloudConnectedForOrg } from "@repo/platform/engine/lib/cloud/session";
 
 describe("runPreflightChecks", () => {
   beforeEach(() => {
@@ -64,6 +64,14 @@ describe("runPreflightChecks", () => {
     runCloudPreflight.mockImplementation(async (_userId: string, input: { slug?: string }) =>
       preflightFn(input),
     );
+  });
+
+  it.each(["services", "single"] as const)("checks Cloud volume support for %s projects before deployment", async mode => {
+    const result = await runPreflightChecks({ deployTarget: "cloud", organizationId: "org-1", serviceDeploymentMode: mode,
+      buildStrategy: "server", framework: "docker", buildImage: "node:22", hasServer: true, port: 8080 } as any,
+    { multiService: true, composeServices: [{ name: "db", image: "postgres:17", ports: ["5432"], exposed: false,
+      enabled: true, volumes: ["data:/var/lib/postgresql/data"], dependsOn: [] }] as any });
+    expect(result.checks.find(check => check.id === "cloud-storage")).toMatchObject({ status: mode === "services" ? "pass" : "fail" });
   });
 
   it("checks free-domain availability for every public endpoint", async () => {
@@ -724,3 +732,12 @@ describe("runPreflightChecks", () => {
     });
   });
 });
+
+// The application seams moved with the shared engine.
+vi.mock("@repo/platform/engine/lib/platform-config", () => ({
+  platform: () => ({ target: "desktop" }),
+}));
+
+vi.mock("@repo/platform/engine/lib/resource-access", () => ({
+  platform: () => ({ target: "desktop" }),
+}));

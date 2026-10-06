@@ -6,15 +6,14 @@ import { useI18n } from "@/components/i18n-provider";
 import { useProjectSettings } from "@/context/ProjectSettingsContext";
 import { AppSettingsTab } from "./AppSettingsTab";
 import { ServicesTab } from "./ServicesTab";
-import { BuildSettings } from "./BuildSettings";
+import { BuildSettings, ProjectEnvironmentSettings } from "./BuildSettings";
 
 /**
- * The Configuration tab for an installed app — one surface, two modes:
+ * Installed-app configuration within project Settings, with two modes:
  *  - "App settings": the business-logic form (schema → env), the friendly view.
  *  - "Deployment": the raw deployment config (per-service for compose apps,
  *    build/runtime for single-container apps).
- * Both edit the same project; apps are otherwise identical to any project. No
- * new tab — this is the content of the existing Configuration tab for apps.
+ * Both edit the same project through the existing settings components.
  */
 export function AppConfiguration() {
   const { t } = useI18n();
@@ -51,7 +50,10 @@ export function AppConfiguration() {
       {mode === "app" ? (
         <AppSettingsTab />
       ) : isServices ? (
-        <ServicesTab />
+        <>
+          <ProjectEnvironmentSettings />
+          <ServicesTab />
+        </>
       ) : (
         <BuildSettings />
       )}

@@ -55,8 +55,10 @@ export interface ProxySiteRouteSsl {
 }
 
 export interface ProxySiteRoute {
-  /** Published host port the proxy forwards to — the container-join key. */
+  /** Upstream port (a host publish OR a port on a Docker-private address). */
   port: number;
+  /** Full upstream identity. A port alone cannot distinguish Docker services. */
+  upstream?: string;
   /** Location path this upstream serves (e.g. "/", "/v3"). */
   path: string;
   /** Whether the source used nginx's exact-match selector (`location = …`). */
@@ -76,14 +78,13 @@ export interface ProxySiteRoute {
 }
 
 /**
- * PURE. Reverse-index parsed sites by their upstream (published host) port.
+ * PURE. Reverse-index parsed sites by their upstream port.
  * A vhost's `routes` (per-location upstreams) are indexed individually, so a
  * path-fan-out domain (`/ → :1010`, `/v3 → :1020`) yields one entry PER port,
  * each carrying its path — letting a join attach `/v3` to the `:1020` service.
  * Each port maps to a LIST (a port can serve multiple paths / come from multiple
- * vhosts). Static docroots (no upstream port) are skipped. Same (port,path,match
- * mode) from multiple vhosts union their domains and prefer an SSL-terminating
- * one's cert.
+ * vhosts). Static docroots are skipped. Only identical upstreams and location
+ * selectors union their domains; two private Docker IPs on :3000 are distinct.
  */
 export function buildProxyRouteIndex(sites: ImportedSite[]): Map<number, ProxySiteRoute[]> {
   const byPort = new Map<number, ProxySiteRoute[]>();
@@ -93,17 +94,19 @@ export function buildProxyRouteIndex(sites: ImportedSite[]): Map<number, ProxySi
       site.routes ?? (site.target.kind === "proxy" ? [{ path: "/", url: site.target.url }] : []);
 
     for (const up of upstreams) {
-      let port: number;
+      let url: URL;
       try {
-        port = Number(new URL(up.url).port);
+        url = new URL(up.url);
       } catch {
         continue;
       }
-      if (!Number.isFinite(port) || port <= 0) continue;
+      if (url.protocol !== "http:" && url.protocol !== "https:") continue;
+      const port = Number(url.port || (url.protocol === "https:" ? 443 : 80));
+      if (!Number.isInteger(port) || port <= 0 || port > 65535) continue;
 
       const list = byPort.get(port) ?? [];
       const existing = list.find(
-        (r) => r.path === up.path && Boolean(r.exact) === Boolean(up.exact),
+        (r) => r.upstream === url.href && r.path === up.path && Boolean(r.exact) === Boolean(up.exact),
       );
       if (existing) {
         existing.domains = [...new Set([...existing.domains, ...site.serverNames])];
@@ -120,6 +123,7 @@ export function buildProxyRouteIndex(sites: ImportedSite[]): Map<number, ProxySi
       } else {
         list.push({
           port,
+          upstream: url.href,
           path: up.path,
           ...(up.exact ? { exact: true } : {}),
           domains: [...site.serverNames],

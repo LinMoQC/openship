@@ -1,7 +1,8 @@
-import { eq, and, desc, gte, lte, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
-import { generateId } from "@repo/core";
-import type { Database } from "../client";
-import { deployment, buildSession, project } from "../schema";
+import { ilike, type SQL, eq, and, desc, gte, lte, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
+import { generateId, DEPLOYMENT_HISTORY_STATUSES, type DeploymentHistoryQuery } from "@repo/core";
+import type { Database } from "../connection";
+import { createConfigurationSecrets, type ConfigurationEncryption } from "../configuration-secrets";
+import { deployment, buildSession, project, releaseRun } from "../schema";
 import { detailOf } from "./storable-detail";
 import { withProjectWorkAdmission } from "./project-work-admission";
 
@@ -14,53 +15,90 @@ export type NewBuildSession = typeof buildSession.$inferInsert;
 
 // ─── Repository ──────────────────────────────────────────────────────────────
 
-export function createDeploymentRepo(db: Database) {
+export function createDeploymentRepo(db: Database, encryption: ConfigurationEncryption) {
+  const codec = createConfigurationSecrets(encryption);
+
+  // Pin the outcome and its clock in the same transaction. The cancel handler
+  // and the worker can both finish the session later, but neither may replace
+  // this duration with cleanup time or a missing build result (zero). The worker
+  // lease, finishedAt, remains open until its outer finally acknowledges it.
+  async function recordCancellation(where: SQL, extra?: Partial<NewDeployment>): Promise<boolean> {
+    const now = new Date();
+    return db.transaction(async (tx) => {
+      const rows = await tx
+        .update(deployment)
+        .set(codec.sealDeployment({ ...extra, status: "cancelled", updatedAt: now }))
+        .where(where)
+        .returning();
+      if (rows.length === 0) return false;
+      await tx
+        .update(buildSession)
+        .set({
+          status: "cancelled",
+          // Preserve a measured duration if this is a completed partial release
+          // being superseded. Bound legacy stuck sessions to the integer column.
+          durationMs: sql`coalesce(${buildSession.durationMs}, case
+            when ${buildSession.startedAt} is null then 0
+            else least(2147483647, greatest(0, floor(extract(epoch from
+              (${now.toISOString()}::timestamp - ${buildSession.startedAt})) * 1000)))
+            end)`,
+        })
+        .where(eq(buildSession.deploymentId, rows[0].id));
+      return true;
+    });
+  }
+
+  async function listHistory(scope: SQL, opts: DeploymentHistoryQuery = {}) {
+    const page = opts.page ?? 1;
+    const perPage = opts.perPage ?? 20;
+    const conditions = [scope];
+    if (opts.environment) conditions.push(eq(deployment.environment, opts.environment));
+    if (opts.status) conditions.push(inArray(deployment.status, [...DEPLOYMENT_HISTORY_STATUSES[opts.status]]));
+    const query = opts.search?.trim();
+    if (query) {
+      // A literal search: '%' and '_' in a commit message are not wildcards.
+      const pattern = `%${query.replace(/[\\%_]/g, "\\$&")}%`;
+      conditions.push(or(
+        ilike(deployment.commitMessage, pattern),
+        ilike(deployment.commitSha, pattern),
+        ilike(sql<string>`${deployment.meta}->>'gitOwner'`, pattern),
+        sql`exists (select 1 from "project" where "project"."id" = ${deployment.projectId} and "project"."name" ilike ${pattern})`,
+      )!);
+    }
+    const where = and(...conditions);
+    const rows = (await db.query.deployment.findMany({
+      where,
+      orderBy: [desc(deployment.createdAt), desc(deployment.id)],
+      limit: perPage,
+      offset: (page - 1) * perPage,
+    })).map(codec.openDeployment);
+    const [{ value: total }] = await db.select({ value: sql<number>`count(*)` }).from(deployment).where(where);
+    return { rows, total: Number(total), page, perPage };
+  }
+
   return {
     // ── Deployments ────────────────────────────────────────────────────
 
     async findById(id: string) {
-      return db.query.deployment.findFirst({
+      return codec.openDeployment(await db.query.deployment.findFirst({
         where: eq(deployment.id, id),
-      });
+      }));
     },
 
     /** All deployments in a given status (e.g. "reconciling") — drives the
      *  reconcile sweep. Bounded to avoid pulling an unbounded history. */
     async listByStatus(status: string, limit = 200) {
-      return db
+      const rows = await db
         .select()
         .from(deployment)
         .where(eq(deployment.status, status))
         .orderBy(desc(deployment.createdAt))
         .limit(limit);
+      return rows.map(codec.openDeployment);
     },
 
-    async listByProject(
-      projectId: string,
-      opts?: { page?: number; perPage?: number; environment?: string },
-    ) {
-      const page = opts?.page ?? 1;
-      const perPage = opts?.perPage ?? 20;
-      const offset = (page - 1) * perPage;
-
-      const conditions = [eq(deployment.projectId, projectId)];
-      if (opts?.environment) {
-        conditions.push(eq(deployment.environment, opts.environment));
-      }
-
-      const rows = await db.query.deployment.findMany({
-        where: and(...conditions),
-        orderBy: [desc(deployment.createdAt)],
-        limit: perPage,
-        offset,
-      });
-
-      const [{ value: total }] = await db
-        .select({ value: sql<number>`count(*)` })
-        .from(deployment)
-        .where(and(...conditions));
-
-      return { rows, total: Number(total), page, perPage };
+    async listByProject(projectId: string, opts?: DeploymentHistoryQuery) {
+      return listHistory(eq(deployment.projectId, projectId), opts);
     },
 
     /** Exact active-work query for the project teardown safety gate.
@@ -76,7 +114,7 @@ export function createDeploymentRepo(db: Database) {
      * status side at one; the EXISTS side covers its still-running cancelled
      * worker without trusting that terminal-looking status. */
     async listInFlightByProject(projectId: string): Promise<Deployment[]> {
-      return db.query.deployment.findMany({
+      return (await db.query.deployment.findMany({
         where: and(
           eq(deployment.projectId, projectId),
           or(
@@ -91,7 +129,7 @@ export function createDeploymentRepo(db: Database) {
             )`,
           ),
         ),
-      }) as Promise<Deployment[]>;
+      })).map(codec.openDeployment);
     },
 
     async hasLiveBuildExecution(deploymentId: string, projectId: string): Promise<boolean> {
@@ -114,24 +152,19 @@ export function createDeploymentRepo(db: Database) {
     // is gone; access is org-only.
 
     /** Org-scoped list — every deployment for the active org. */
-    async listByOrganization(organizationId: string, opts?: { page?: number; perPage?: number }) {
-      const page = opts?.page ?? 1;
-      const perPage = opts?.perPage ?? 50;
-      const offset = (page - 1) * perPage;
+    async listByOrganization(organizationId: string, opts?: DeploymentHistoryQuery) {
+      return listHistory(eq(deployment.organizationId, organizationId), { ...opts, perPage: opts?.perPage ?? 50 });
+    },
 
-      const rows = await db.query.deployment.findMany({
-        where: eq(deployment.organizationId, organizationId),
-        orderBy: [desc(deployment.createdAt)],
-        limit: perPage,
-        offset,
-      });
-
-      const [{ value: total }] = await db
-        .select({ value: sql<number>`count(*)` })
-        .from(deployment)
-        .where(eq(deployment.organizationId, organizationId));
-
-      return { rows, total: Number(total), page, perPage };
+    /** Options for the global history's project filter. Independent of the
+     * current page/filter; also supplies row metadata without one query per row. */
+    async listHistoryProjects(organizationId: string) {
+      return db.selectDistinct({
+        id: project.id, name: project.name,
+        activeDeploymentId: project.activeDeploymentId, favicon: project.favicon,
+      }).from(project).innerJoin(deployment, eq(deployment.projectId, project.id))
+        .where(and(eq(project.organizationId, organizationId), eq(deployment.organizationId, organizationId)))
+        .orderBy(project.name, project.id);
     },
 
     /**
@@ -142,7 +175,7 @@ export function createDeploymentRepo(db: Database) {
      * of soft-deleted projects stay out of the counts, matching what the
      * org-scoped project listings show.
      */
-    async countByStatusForOrganization(organizationId: string): Promise<Record<string, number>> {
+    async countByStatusForOrganization(organizationId: string, projectIds?: readonly string[]): Promise<Record<string, number>> {
       const rows = await db
         .select({
           status: deployment.status,
@@ -150,7 +183,7 @@ export function createDeploymentRepo(db: Database) {
         })
         .from(deployment)
         .innerJoin(project, eq(deployment.projectId, project.id))
-        .where(and(eq(project.organizationId, organizationId), isNull(project.deletedAt)))
+        .where(and(eq(project.organizationId, organizationId), isNull(project.deletedAt), projectIds ? inArray(project.id, [...projectIds]) : undefined))
         .groupBy(deployment.status);
 
       const out: Record<string, number> = {};
@@ -180,6 +213,18 @@ export function createDeploymentRepo(db: Database) {
       const { id: providedId, ...rest } = data;
       const id = providedId ?? generateId("dep");
       return withProjectWorkAdmission(db, rest.projectId, rest.organizationId, async (tx) => {
+        const releaseRunId = (rest.meta as { releaseRunId?: string } | null)?.releaseRunId;
+        if (releaseRunId) {
+          const [run] = await tx.select().from(releaseRun).where(eq(releaseRun.id, releaseRunId)).for("update");
+          if (!run || run.projectId !== rest.projectId || run.organizationId !== rest.organizationId || !run.workflowRunId ||
+              !["queued", "syncing", "pulling", "deploying"].includes(run.stage)) return undefined;
+          if (run.deploymentId) {
+            const existing = await tx.query.deployment.findFirst({ where: eq(deployment.id, run.deploymentId) });
+            if (!existing || existing.projectId !== rest.projectId || existing.commitSha !== rest.commitSha || existing.environment !== rest.environment)
+              throw new Error("RELEASE_DEPLOYMENT_CONFLICT");
+            return codec.openDeployment(existing);
+          }
+        }
         // A terminal-looking deployment can still have a worker unwinding after
         // cancellation. The partial unique status index no longer covers that
         // row, so refuse its replacement until the worker's outermost finally
@@ -200,10 +245,16 @@ export function createDeploymentRepo(db: Database) {
 
         const [inserted] = await tx
           .insert(deployment)
-          .values({ id, ...rest })
+          .values(codec.sealDeployment({ id, ...rest }))
           .onConflictDoNothing()
           .returning();
-        return inserted as Deployment | undefined;
+        if (inserted && releaseRunId) {
+          // The Run association and worker lease exist before any network reply
+          // or host operation. Lost CLI responses cannot authorize a second deploy.
+          await tx.update(releaseRun).set({ deploymentId: inserted.id, updatedAt: new Date() }).where(eq(releaseRun.id, releaseRunId));
+          await tx.insert(buildSession).values({ id: generateId("bld"), deploymentId: inserted.id, projectId: rest.projectId, status: "queued" });
+        }
+        return codec.openDeployment(inserted as Deployment | undefined);
       });
     },
 
@@ -371,14 +422,14 @@ export function createDeploymentRepo(db: Database) {
      */
     async findInProgressByCommit(projectId: string, commitSha: string | null | undefined) {
       if (!commitSha) return undefined;
-      return db.query.deployment.findFirst({
+      return codec.openDeployment(await db.query.deployment.findFirst({
         where: and(
           eq(deployment.projectId, projectId),
           eq(deployment.commitSha, commitSha),
           inArray(deployment.status, ["queued", "building", "deploying"]),
         ),
         orderBy: [desc(deployment.createdAt)],
-      });
+      }));
     },
 
     /**
@@ -393,14 +444,14 @@ export function createDeploymentRepo(db: Database) {
       releaseVersion: string | null | undefined,
     ) {
       if (!releaseVersion) return undefined;
-      return db.query.deployment.findFirst({
+      return codec.openDeployment(await db.query.deployment.findFirst({
         where: and(
           eq(deployment.projectId, projectId),
           eq(deployment.releaseVersion, releaseVersion),
           inArray(deployment.status, ["queued", "building", "deploying"]),
         ),
         orderBy: [desc(deployment.createdAt)],
-      });
+      }));
     },
 
     /**
@@ -424,9 +475,12 @@ export function createDeploymentRepo(db: Database) {
       status: string,
       extra?: Partial<NewDeployment>,
     ): Promise<boolean> {
+      if (status === "cancelled") {
+        return recordCancellation(and(eq(deployment.id, id), ne(deployment.status, "cancelled"))!, extra);
+      }
       const rows = await db
         .update(deployment)
-        .set({ status, ...extra, updatedAt: new Date() })
+        .set(codec.sealDeployment({ status, ...extra, updatedAt: new Date() }))
         .where(and(eq(deployment.id, id), ne(deployment.status, "cancelled")))
         .returning();
       return rows.length > 0;
@@ -441,17 +495,10 @@ export function createDeploymentRepo(db: Database) {
      * prevents the worker from publishing ready/failure over the user's cancel.
      */
     async cancelInFlight(id: string, extra?: Partial<NewDeployment>): Promise<boolean> {
-      const rows = await db
-        .update(deployment)
-        .set({ ...extra, status: "cancelled", updatedAt: new Date() })
-        .where(
-          and(
-            eq(deployment.id, id),
-            inArray(deployment.status, ["queued", "building", "deploying"]),
-          ),
-        )
-        .returning();
-      return rows.length > 0;
+      return recordCancellation(
+        and(eq(deployment.id, id), inArray(deployment.status, ["queued", "building", "deploying"]))!,
+        extra,
+      );
     },
 
     /**
@@ -580,10 +627,10 @@ export function createDeploymentRepo(db: Database) {
 
     /** Find the most recent deployment for a project (any status) */
     async findLatestByProject(projectId: string) {
-      return db.query.deployment.findFirst({
+      return codec.openDeployment(await db.query.deployment.findFirst({
         where: eq(deployment.projectId, projectId),
         orderBy: [desc(deployment.createdAt)],
-      });
+      }));
     },
 
     /**
@@ -597,10 +644,10 @@ export function createDeploymentRepo(db: Database) {
      */
     async findLatestByProjects(projectIds: string[]): Promise<Map<string, Deployment>> {
       if (projectIds.length === 0) return new Map();
-      const rows = await db.query.deployment.findMany({
+      const rows = (await db.query.deployment.findMany({
         where: inArray(deployment.projectId, projectIds),
         orderBy: [desc(deployment.createdAt)],
-      });
+      })).map(codec.openDeployment);
       const out = new Map<string, Deployment>();
       for (const row of rows) {
         if (!out.has(row.projectId)) out.set(row.projectId, row);
@@ -630,20 +677,20 @@ export function createDeploymentRepo(db: Database) {
       if (ids.length === 0) return new Map();
       const rows = await db.select().from(deployment).where(inArray(deployment.id, ids));
       const out = new Map<string, Deployment>();
-      for (const row of rows) out.set(row.id, row);
+      for (const row of rows) out.set(row.id, codec.openDeployment(row));
       return out;
     },
 
     /** Find the most recent successful deployment for rollback */
     async findLatestReady(projectId: string, environment: string) {
-      return db.query.deployment.findFirst({
+      return codec.openDeployment(await db.query.deployment.findFirst({
         where: and(
           eq(deployment.projectId, projectId),
           eq(deployment.environment, environment),
           eq(deployment.status, "ready"),
         ),
         orderBy: [desc(deployment.createdAt)],
-      });
+      }));
     },
 
     /**
@@ -656,14 +703,14 @@ export function createDeploymentRepo(db: Database) {
      * that did come up.
      */
     async getLatestSuccessfulForBranch(projectId: string, branch: string) {
-      return db.query.deployment.findFirst({
+      return codec.openDeployment(await db.query.deployment.findFirst({
         where: and(
           eq(deployment.projectId, projectId),
           eq(deployment.branch, branch),
           inArray(deployment.status, ["ready", "partial_failure"]),
         ),
         orderBy: [desc(deployment.createdAt)],
-      });
+      }));
     },
 
     // ── Rollback / retention ───────────────────────────────────────────
@@ -671,6 +718,23 @@ export function createDeploymentRepo(db: Database) {
     // Owned by the RollbackOrchestrator. These methods are policy-free
     // — they only do the DB work. Decisions (when to archive, when to
     // purge, pin limits) live in the orchestrator.
+
+    /** Successful/unverified releases plus artifacts still awaiting cleanup. Partial
+     * releases are valid rollback targets too; omitting them leaks their badge
+     * and files forever once they stop being active. */
+    async listForRetention(projectId: string) {
+      return (await db.query.deployment.findMany({
+        where: and(
+          eq(deployment.projectId, projectId),
+          or(
+            inArray(deployment.status, ["ready", "partial_failure", "reconciling"]),
+            isNotNull(deployment.artifactRetainedAt),
+            eq(deployment.pinned, true),
+          ),
+        ),
+        orderBy: [desc(deployment.createdAt), desc(deployment.id)],
+      })).map(codec.openDeployment);
+    },
 
     /** Set the timestamp marking "this deployment's artifact is archived
      *  and rollback-restorable". Pass null to mark it purged. */
@@ -708,10 +772,10 @@ export function createDeploymentRepo(db: Database) {
       if (environment) {
         conditions.push(eq(deployment.environment, environment));
       }
-      return db.query.deployment.findMany({
+      return (await db.query.deployment.findMany({
         where: and(...conditions),
         orderBy: [desc(deployment.createdAt)],
-      });
+      })).map(codec.openDeployment);
     },
 
     // ── Build sessions ─────────────────────────────────────────────────
@@ -781,8 +845,12 @@ export function createDeploymentRepo(db: Database) {
         db
           .update(buildSession)
           .set({
-            status,
-            durationMs,
+            // Cancellation pins both fields atomically with the deployment
+            // outcome. Late worker writes can still append their cleanup logs.
+            status: sql`case when ${buildSession.status} = 'cancelled'
+              then ${buildSession.status} else ${status} end`,
+            durationMs: sql`case when ${buildSession.status} = 'cancelled'
+              then ${buildSession.durationMs} else ${durationMs} end`,
             ...(payload === OMIT ? {} : { logs: payload as never }),
           })
           .where(eq(buildSession.id, id));

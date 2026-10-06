@@ -78,8 +78,10 @@ export interface ProjectCompositeRoute {
   isCustomDomain: boolean;
   /** Service served at `/` (the route's primary upstream). */
   rootServiceId: string;
+  /** Explicit listen port when a service has several upstreams. */
+  rootPort?: number;
   /** Extra literal-path locations, resolved to their service's upstream at deploy. */
-  locations: { pathPrefix: string; serviceId: string; exact?: boolean }[];
+  locations: { pathPrefix: string; serviceId: string; port?: number; exact?: boolean }[];
 }
 
 /**

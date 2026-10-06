@@ -5,6 +5,10 @@ import { getTableConfig, PgTable } from "drizzle-orm/pg-core";
 
 import * as schema from "./schema";
 import { EXCLUDED_TABLES, topoOrderedTables } from "./dump";
+import {
+  PROJECT_TRANSFER_TABLES,
+  PROJECT_TRANSFER_UNSUPPORTED_TABLES,
+} from "./project-transfer";
 
 // Invariants over the dump catalogue itself. Pure — no DB, no fixtures — so they
 // run everywhere and cost nothing.
@@ -82,6 +86,33 @@ describe("dump catalogue: insert order", () => {
 });
 
 describe("dump catalogue: coverage", () => {
+  it("classifies every durable project-owned child for project transfers", () => {
+    const owners = new Set([
+      "project",
+      "service",
+      "deployment",
+      "domain",
+      "backup_policy",
+      "backup_run",
+    ]);
+    // A mail server merely points to its optional webmail UI project. Exporting
+    // that UI must not take the server's mailboxes or organization configuration.
+    const sharedChildren = new Set(["mail_servers"]);
+    const missing = [...schemaTables()]
+      .filter(
+        ([name, table]) =>
+          fkParents(table, name).some((parent) => owners.has(parent)) &&
+          !PROJECT_TRANSFER_TABLES.has(name) &&
+          !PROJECT_TRANSFER_UNSUPPORTED_TABLES[name] &&
+          !EXCLUDED_TABLES[name] &&
+          !sharedChildren.has(name),
+      )
+      .map(([name]) => name);
+    expect(
+      missing,
+      "Classify new project data in the project-transfer catalogue before shipping it.",
+    ).toEqual([]);
+  });
   it("classifies every table in the schema as carried or excluded", () => {
     const all = [...schemaTables().keys()].sort();
     const carried = new Set(topoOrderedTables().map((s) => s.sqlName));

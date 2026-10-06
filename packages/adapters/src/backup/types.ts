@@ -111,6 +111,8 @@ export interface ExecuteCommandOpts {
   /** Absolute ceiling regardless of traffic, behind `idleTimeoutMs`. Docker
    *  exec default 6 hours, matching capture/restore helpers. */
   timeoutMs?: number;
+  /** Cancel a command/restore owned by this operation. */
+  signal?: AbortSignal;
 }
 
 export interface StreamPathOpts {
@@ -188,6 +190,8 @@ export interface ReceiveStreamOpts {
 export interface BackupExecutor {
   /** Identifies which RuntimeAdapter this executor pairs with. */
   readonly runtimeName: "docker" | "bare" | "cloud";
+  /** False when stopping the service also stops access to its filesystem. */
+  readonly supportsOfflineVolumeRestore?: boolean;
 
   /** Discover what's backupable inside a service. */
   listSources(service: ServiceHandle): Promise<BackupSource[]>;
@@ -314,6 +318,8 @@ export type { PayloadCompression, PayloadKind };
  * the config unfiltered so the two halves cannot drift again.
  */
 export interface ProducerOpts {
+  /** Store complete snapshots with reusable blocks; interpreted by the storage pipeline. */
+  incremental?: boolean;
   /** Which sources from `listSources()` to back up. Null = producer's
    *  default (usually "everything"). */
   sourceIds?: string[];
@@ -407,8 +413,9 @@ export interface ArtifactRef {
   payloadKind: PayloadKind;
   sha256: string;
   sizeBytes: number;
-  /** Lazily-resolved stream from the destination. The producer pipes
-   *  this through whatever decompression/parsing it needs. */
+  /** Lazily-resolved stream from the destination. Finish validation
+   *  before opening, and open before clearing or writing target data: the
+   *  orchestrator records that writes may begin when it hands out this stream. */
   open: () => Promise<Readable>;
 }
 
@@ -580,7 +587,7 @@ export interface BackupTrigger {
  *  destination directory. Self-contained: anyone with destination
  *  access can hand-restore by reading this file. */
 export interface BackupManifest {
-  version: 1;
+  version: 1 | 2;
   runId: string;
   projectId: string;
   projectSlug: string;

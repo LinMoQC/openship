@@ -105,7 +105,12 @@
     "modeWorker": "Worker",
     "modeStatic": "Statisch",
     "workerModeDesc": "Läuft kontinuierlich ohne Port oder öffentliche URL – ein Queue-Consumer, Cronjob oder Bot.",
-    "buildSettingsTitle": "Build-Einstellungen"
+    "buildSettingsTitle": "Build-Einstellungen",
+    "releaseTitle": "Vor der Aktivierung",
+    "releaseDescription": "Optionale Befehle nach dem Build. Ein Fehler stoppt das Deployment. Nur für Docker- und Bare-Apps.",
+    "releaseCommand": "Befehl {number}",
+    "addReleaseCommand": "Befehl hinzufügen",
+    "removeReleaseCommand": "Befehl {number} entfernen"
   },
   "projectSettings": {
     "framework": "Framework",
@@ -123,6 +128,7 @@
     "noneSet": "Keine festgelegt",
     "pasteEnv": ".env einfügen",
     "uploadEnv": ".env hochladen",
+    "downloadEnv": ".env herunterladen",
     "edit": "Bearbeiten",
     "cancel": "Abbrechen",
     "saving": "Wird gespeichert...",
@@ -144,6 +150,7 @@
       "interpolated": "Interpoliert"
     },
     "toast": {
+      "downloadFailed": "Umgebungsvariablen konnten nicht heruntergeladen werden.",
       "title": "Umgebungsvariablen",
       "added": "{count} hinzugefügt",
       "updated": "{count} aktualisiert",
@@ -205,9 +212,9 @@
       "volumes": "Volumes",
       "statefulWarnPart1": "Zustandsbehafteter Service in der Cloud: Daten liegen auf der persistenten Festplatte des Workspace (überstehen Neustarts), werden aber ",
       "statefulWarnBold": "nicht über Rebuilds hinweg übernommen",
-      "statefulWarnPart2": ", sofern keine Backups aktiviert sind. Docker-Volume-Mounts gelten nicht.",
+      "statefulWarnPart2": ". Sichere und stelle die Daten ausdrücklich wieder her, bevor du den Workspace ersetzt.",
       "volumeHint": "Benanntes Volume oder Host-Pfad → Container-Pfad.",
-      "volumeCloudNote": "In der Cloud gelten diese Mounts nicht – Daten bleiben auf der Festplatte des Workspace erhalten (ohne Backups nicht über Rebuilds hinweg).",
+      "volumeCloudNote": "Persistente Volume-Mounts werden in Openship Cloud nicht unterstützt. Wähle einen Server für Workloads, die Volumes benötigen.",
       "sourcePlaceholder": "Quelle",
       "containerPathPlaceholder": "Container-Pfad",
       "readOnlyMount": "Schreibgeschützter Mount",
@@ -315,7 +322,7 @@
       "successful": "Bereitstellung erfolgreich",
       "deploying": "Wird bereitgestellt..."
     },
-    "visitSite": "Website besuchen",
+    "openSite": "Website öffnen",
     "warningTitle": "Bereitstellung abgeschlossen, aber einige Services benötigen noch Aufmerksamkeit.",
     "productionLogs": "Produktionsprotokolle",
     "buildTerminal": "Build-Terminal",
@@ -325,7 +332,7 @@
     "stopDeployment": "Bereitstellung stoppen",
     "redeploy": "Erneut bereitstellen",
     "goToProject": "Zum Projekt",
-    "openDashboard": "Dashboard öffnen",
+    "openProject": "Projekt öffnen",
     "edit": "Bearbeiten",
     "status": {
       "cancelled": "Abgebrochen",

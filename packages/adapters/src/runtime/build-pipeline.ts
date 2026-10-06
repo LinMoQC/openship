@@ -13,7 +13,13 @@
 
 import type { BuildConfig, BuildStep, LogEntry, LogCallback } from "../types";
 import { safeErrorMessage, packageManagerEnsureCommand, nodeBinPathExport } from "@repo/core";
-import { sq, injectGitToken, assembleGitClone, gitShellCommand } from "./git-clone";
+import {
+  sq,
+  injectGitToken,
+  assembleGitClone,
+  gitShellCommand,
+  GIT_SUBMODULE_UPDATE_ARGS,
+} from "./git-clone";
 import { materializeGitSsh, shellGitSshWriter, type GitSshMaterial } from "./git-ssh-material";
 
 // Re-exported for the docker adapters that import these from here.
@@ -351,6 +357,9 @@ export async function runBuildPipeline(
                 ),
               );
             }
+            await exec(
+              `cd ${sq(env.projectDir)} && ${gitShellCommand(gitInvocation, GIT_SUBMODULE_UPDATE_ARGS.join(" "))}`,
+            );
           } finally {
             // Always remove the ephemeral SSH key material, success or fail.
             await sshMaterial?.cleanup();

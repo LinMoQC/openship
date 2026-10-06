@@ -17,6 +17,8 @@
  */
 
 import { shellQuote } from "./shell-split";
+import { normalizeImageRef } from "./backup-image-detect";
+import { validateImageReference } from "./project-source";
 
 // ─── Language definitions ────────────────────────────────────────────────────
 
@@ -659,8 +661,18 @@ export const STACKS = {
     category: "fullstack",
     outputDirectory: ".",
     defaultPort: 3000,
-    defaultBuildCommand: "bundle install && bundle exec rails assets:precompile",
-    defaultStartCommand: "bundle exec rails server -b 0.0.0.0",
+    // Precompile only — `bundle install` is already the install step. The dummy
+    // secret is what Rails' own Dockerfile sets: an app touching credentials
+    // during eager load raises without it.
+    defaultBuildCommand:
+      "RAILS_ENV=production SECRET_KEY_BASE_DUMMY=1 bundle exec rails assets:precompile",
+    // Stock config/puma.rb reads PORT, but a trimmed one falls back to 3000.
+    defaultStartCommand: 'bundle exec rails server -b 0.0.0.0 -p "${PORT:-3000}"',
+    // Rails 8 keeps the SQLite database AND Active Storage here; Rails' own
+    // Dockerfile declares `VOLUME /rails/storage`. Not `db/` — it holds
+    // migrations, so mounting over it would shadow later releases'.
+    persistentPaths: ["storage"],
+    cacheDirs: ["tmp/cache", "tmp/pids"],
     detection: {
       // Rails: Gemfile is required; bin/rails or config/routes.rb confirms.
       // The conjunction is encoded as an override in stack-detector.
@@ -1057,13 +1069,30 @@ export const STACK_ROOT_MARKERS: ReadonlySet<string> = new Set(
 /** JS/TS languages that should use oven/bun when the package manager is bun */
 const BUN_ELIGIBLE_LANGUAGES: ReadonlySet<string> = new Set(["javascript", "typescript"]);
 
+/** Only Ruby pins a runtime version today: bundler enforces the Gemfile's ruby
+ *  directive, so a hardcoded image fails before installing a single gem. */
+const RUNTIME_VERSION_RE = /^\d+\.\d+(?:\.\d+)?$/;
+
+/** Swap the version segment of a `ruby:<version><suffix>` tag, preserving the
+ *  variant (`-slim`). The version comes from a file in the repo being deployed,
+ *  so anything but a plain X.Y[.Z] is ignored rather than spliced into a tag. */
+function applyRuntimeVersion(image: string, language: Language, version?: string): string {
+  if (language !== "ruby" || !version || !RUNTIME_VERSION_RE.test(version)) return image;
+  return image.replace(/^ruby:[^-]+(-.*)?$/, (_full, suffix) => `ruby:${version}${suffix ?? ""}`);
+}
+
 /** Get the resolved Docker build image for a stack */
-export function getBuildImage(stackId: StackId, packageManager?: string): string {
+export function getBuildImage(
+  stackId: StackId,
+  packageManager?: string,
+  runtimeVersion?: string,
+): string {
   const stack = STACKS[stackId] as StackDefinition;
   if (packageManager === "bun" && BUN_ELIGIBLE_LANGUAGES.has(stack.language)) {
     return "oven/bun:latest";
   }
-  return stack.buildImage ?? LANGUAGES[stack.language].buildImage;
+  const image = stack.buildImage ?? LANGUAGES[stack.language].buildImage;
+  return applyRuntimeVersion(image, stack.language, runtimeVersion);
 }
 
 /**
@@ -1134,11 +1163,20 @@ export function nodeBinPathExport(packageManager: string | undefined, roots: str
   return `export PATH=${dirs.map(shellQuote).join(":")}:"$PATH"`;
 }
 
-/** Get the resolved Docker runtime image for a stack */
-export function getRuntimeImage(stackId: StackId, packageManager?: string): string {
+/** Resolve the runtime image. Ruby copies compiled gems from the builder, so
+ *  retain its full image reference, including the OS variant and digest. */
+export function getRuntimeImage(
+  stackId: StackId,
+  packageManager?: string,
+  buildImage?: string | null,
+): string {
   const stack = STACKS[stackId] as StackDefinition;
   if (packageManager === "bun" && BUN_ELIGIBLE_LANGUAGES.has(stack.language)) {
     return "oven/bun:latest";
+  }
+  if (stack.language === "ruby" && buildImage &&
+      !validateImageReference(buildImage) && /^ruby(?::|$)/.test(normalizeImageRef(buildImage))) {
+    return buildImage;
   }
   return stack.runtimeImage ?? LANGUAGES[stack.language].runtimeImage;
 }

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import {
   resolveProjectInfo,
   resolveProjectSourceEnv,
-} from "../../../src/modules/deployments/prepare.service";
+} from "@repo/platform/engine/modules/deployments/prepare.service";
 
 describe("resolveProjectInfo", () => {
   const tempDirs: string[] = [];
@@ -544,6 +544,60 @@ describe("resolveProjectInfo", () => {
       expect(info.port).toBe(8080);
       expect(info.configDiagnostics?.errors.some((e) => e.startsWith("framework:"))).toBe(true);
       expect(info.configDiagnostics?.warnings).toEqual([]);
+    });
+
+    it("reports monorepo declarations that cannot be matched to discovered apps (#873)", async () => {
+      const tempDir = await repoWithConfig(
+        JSON.stringify({
+          monorepo: {
+            apps: [{ name: "worker", rootDirectory: "private-path-SENTINEL" }],
+            workspace: { packageManager: "npm", prepareCommand: "secret-command-SENTINEL" },
+          },
+        }),
+      );
+      const info = await resolveProjectInfo({ source: "local", path: tempDir });
+      expect(info.monorepoApps).toBeUndefined();
+      expect(info.configDiagnostics?.warnings).toEqual([
+        expect.stringMatching(/^monorepo\.apps\[0\]:.*did not match/),
+        expect.stringMatching(/^monorepo\.workspace:.*no workspace was detected/),
+      ]);
+      expect(JSON.stringify(info.configDiagnostics)).not.toContain("SENTINEL");
+    });
+
+    it("applies matched workspace overrides and reports only the missing app (#873)", async () => {
+      const tempDir = await repoWithConfig(
+        JSON.stringify({
+          monorepo: {
+            apps: [
+              { name: "web", rootDirectory: "./apps/web/", port: 8080 },
+              { name: "missing", rootDirectory: "apps/missing" },
+            ],
+          },
+        }),
+      );
+      await writeFile(
+        join(tempDir, "package.json"),
+        JSON.stringify({ name: "workspace", workspaces: ["apps/*"] }),
+      );
+      for (const app of ["web", "admin"]) {
+        await mkdir(join(tempDir, "apps", app), { recursive: true });
+        await writeFile(
+          join(tempDir, "apps", app, "package.json"),
+          JSON.stringify({
+            name: app,
+            dependencies: { next: "^15.0.0" },
+            scripts: { build: "next build", start: "next start" },
+          }),
+        );
+        await writeFile(join(tempDir, "apps", app, "package-lock.json"), "{}");
+      }
+      const info = await resolveProjectInfo({ source: "local", path: tempDir });
+      expect(info.projectType).toBe("monorepo");
+      expect(info.monorepoApps).toHaveLength(2);
+      expect(info.monorepoApps?.find((app) => app.rootDirectory === "apps/web")?.port).toBe(8080);
+      expect(info.configDiagnostics?.warnings).toEqual([
+        expect.stringMatching(/^monorepo\.apps\[1\]:/),
+      ]);
     });
 
     it("reports an unrecognized top-level key as a warning, not an error", async () => {

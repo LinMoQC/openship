@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { auth } from "../../src/lib/auth";
-import { resolveDashboardPublicUrl } from "../../src/lib/public-url";
+import { auth } from "@repo/platform/engine/lib/auth";
+import { resolveDashboardPublicUrl } from "@repo/platform/engine/lib/public-url";
 
 describe("Better Auth browser error redirect", () => {
   it("sends OAuth failures to the public dashboard error page with their details", async () => {

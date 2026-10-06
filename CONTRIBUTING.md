@@ -213,6 +213,38 @@ bun run --cwd packages/db db:studio  # Open Drizzle Studio (database browser)
 
 Schema lives in `packages/db/src/schema/`.
 
+## Testing
+
+Most workspaces run [Vitest](https://vitest.dev/), and most colocate tests with the code they
+cover, so `foo.test.ts` sits next to `foo.ts`. Some group them under a `test/` directory
+instead (`packages/adapters/test/`, `apps/cli/test/`), and `apps/email/server` uses Bun's
+built-in test runner rather than Vitest. Follow whichever convention the workspace you are
+editing already uses.
+
+The rest of this section covers `apps/dashboard`, which is Vitest with colocated tests.
+
+Run repository script tests with `bun run test:scripts`; CI includes them in its
+Other packages job. The root `bun run test` command runs workspace tests and accepts
+Turbo filters, such as `bun run test --filter=@repo/sdk`.
+
+### Dashboard test environments
+
+Dashboard tests use Node by default. Tests that need browser events opt into the
+existing Happy DOM environment with `// @vitest-environment happy-dom`. Follow
+`apps/dashboard/src/components/ui/button.test.tsx`: create a React root for each
+test, wrap rendering and interactions in `act()`, and unmount the root and restore
+globals during cleanup. Pure rendering tests can use `react-dom/server` in Node.
+
+The `@/*` alias and automatic JSX runtime already match those used by the app.
+Keep parser and other pure-logic tests on Node. Run a focused dashboard suite with
+`bun run --cwd apps/dashboard test src/lib/dotenv.test.ts`, or omit the path for
+all dashboard tests.
+
+### Prove the test can fail
+
+A test that cannot fail proves nothing. Before opening a PR, deliberately break the code
+under test, confirm the test fails, then restore it. Say so in the PR description.
+
 ## Verification
 
 The root test and build scripts run the corresponding tasks across the workspaces that

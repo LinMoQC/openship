@@ -1,3 +1,4 @@
+import { refreshMailCertificate } from "@repo/platform/engine/modules/mail/mail-certificate.service";
 /**
  * Mail setup controller - HTTP endpoints for the iRedMail setup wizard.
  *
@@ -31,24 +32,24 @@ import { lookup as dnsLookup } from "node:dns/promises";
 import { buildMailBackupPayload } from "./admin/backup-plan";
 // The mail server is one more backup SOURCE in the general system, so its policy
 // goes through the same cron validation + schedule registration as a project's.
-import { syncPolicySchedule, validateCronExpression } from "../backups/triggers/cron";
+import { syncPolicySchedule, validateCronExpression } from "@repo/platform/engine/modules/backups/triggers/cron";
 import { streamSSE } from "../../lib/sse";
 import { requestTag } from "../../middleware/error-handler";
-import { invalidatePlatformTransport } from "../../lib/mail";
-import { env } from "../../config";
+import { invalidatePlatformTransport } from "@repo/platform/engine/lib/mail";
+import { env } from "@repo/platform/engine/config/index";
 import { safeErrorMessage, DEFAULT_RETAIN_COUNT, mailHostname } from "@repo/core";
-import { sshManager } from "../../lib/ssh-manager";
+import { sshManager } from "@repo/platform/engine/lib/ssh-manager";
 import { repos } from "@repo/db";
 import { getRequestContext, type RequestContext } from "../../lib/request-context";
 import { permission } from "../../lib/permission";
 // Shared org-scope guard (single implementation in controller-helpers) —
 // the mail stack gives SSH-level reach into the box, so a cross-org
 // serverId here is the same severity as the terminal hole.
-import { isServerInOrg } from "../../lib/controller-helpers";
+import { isServerInOrg } from "@repo/platform/engine/lib/resource-access";
 import type { CommandExecutor } from "@repo/adapters";
-import { pinnedEdgeImage } from "../../lib/edge-image";
-import { pinnedMailImage } from "../../lib/mail-image";
-import { deliverManagedImage } from "../../lib/deliver-managed-image";
+import { pinnedEdgeImage } from "@repo/platform/engine/lib/edge-image";
+import { pinnedMailImage } from "@repo/platform/engine/lib/mail-image";
+import { deliverManagedImage } from "@repo/platform/engine/lib/deliver-managed-image";
 import {
   MAIL_SETUP_STEPS,
   TOTAL_STEPS,
@@ -61,22 +62,22 @@ import {
   type InstallerStepFn,
   type SslStepFn,
   type IRedMailConfig,
-} from "./mail.service";
+} from "@repo/platform/engine/modules/mail/mail.service";
 import { checkMailDelivery } from "./mail-delivery.service";
-import { checkMailHealth, mailIsServing, MAIL_COMPONENTS } from "./mail-health.service";
-import { checkMailPortReachability } from "./mail-port-reachability.service";
-import { resolveMailEngine, resolveMailFlavor } from "./mail-engine";
+import { checkMailHealth, mailIsServing, MAIL_COMPONENTS } from "@repo/platform/engine/modules/mail/mail-health.service";
+import { checkMailPortReachability } from "@repo/platform/engine/modules/mail/mail-port-reachability.service";
+import { resolveMailEngine, resolveMailFlavor } from "@repo/platform/engine/modules/mail/mail-engine";
 import { updatePostmasterPassword } from "./mail-credentials.service";
 import { reserveMailSetup } from "./mail-setup-lease";
 import { preflightMailSetup } from "./mail-setup-preflight";
-import { applyRelayToState } from "./admin/outbound-relay.service";
+import { applyRelayToState } from "@repo/platform/engine/modules/mail/admin/outbound-relay.service";
 // The webmail is an ordinary project: its status is resolved from the DB, not
 // from this server's state file.
 import {
   resolveLinkedWebmailProject,
   resolveWebmailSummary,
   type WebmailSummary,
-} from "./webmail/webmail-install.service";
+} from "@repo/platform/engine/modules/mail/webmail/webmail-install.service";
 import {
   readState,
   writeState,
@@ -88,7 +89,7 @@ import {
   appendLog,
   type MailServerState,
   type MailSessionLogLine,
-} from "./mail-state";
+} from "@repo/platform/engine/modules/mail/mail-state";
 
 // ─── In-memory pointer to the currently-running install ──────────────────────
 
@@ -1083,7 +1084,7 @@ export async function startSetup(c: Context) {
       // load-time cycle (mail-state ↔ mail.controller ↔ admin services).
       try {
         const { ensureOpenshipPlatformMailbox } = await import(
-          "./admin/platform-mailbox.service"
+          "@repo/platform/engine/modules/mail/admin/platform-mailbox.service"
         );
         // Clear any cached "platform mailbox unavailable" marker from BEFORE the
         // install finished — otherwise the send path keeps skipping this server
@@ -1622,15 +1623,16 @@ export async function getHealth(c: Context) {
   }
 
   try {
-    const { components, delivery, reachability } = await sshManager.withExecutor(serverId, async (executor) => {
+    const { components, delivery, reachability, certificate } = await sshManager.withExecutor(serverId, async (executor) => {
       // Both sweeps share the engine probe (memoized per executor), so running them
       // together costs one extra exec, not a second topology detection.
-      const [components, delivery, state] = await Promise.all([
+      const [components, delivery, state, certificate] = await Promise.all([
         checkMailHealth(executor),
         // `delivery` reports its own failures as `status: "unknown"` rather than
         // throwing, so a box whose queue we can't read still renders its daemons.
         checkMailDelivery(executor),
         readState(executor),
+        refreshMailCertificate(serverId, { executor }),
       ]);
       const reachability = state?.domain
         ? await checkMailPortReachability(executor, mailHostname(state.domain), {
@@ -1641,9 +1643,9 @@ export async function getHealth(c: Context) {
             force: refreshReachability,
           })
         : null;
-      return { components, delivery, reachability };
+      return { components, delivery, reachability, certificate };
     });
-    return c.json({ serverId, components, definitions: MAIL_COMPONENTS, delivery, reachability });
+    return c.json({ serverId, components, definitions: MAIL_COMPONENTS, delivery, reachability, certificate });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Health check failed";
     // Same reason as the mail-admin funnel: this 500 is answered here, so `app.onError`

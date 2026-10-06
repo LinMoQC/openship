@@ -2,6 +2,11 @@ import { describe, it, expect } from "vitest";
 import { parseOpenshipConfig, parseOpenshipConfigJson } from "./parse";
 
 describe("parseOpenshipConfig", () => {
+  it.each(["web\nEOF\nprintf injected\n#", "web;id", "$(id)", "two services", "-option"])("rejects unsafe service name %s", name => {
+    const { config, errors } = parseOpenshipConfig({ services: [{ name, image: "nginx:alpine" }] });
+    expect(errors.length).toBeGreaterThan(0);
+    expect(config?.services ?? []).toEqual([]);
+  });
   it("accepts a full, valid config and strips undefined fields", () => {
     const { config, errors, warnings } = parseOpenshipConfig({
       framework: "nextjs",
@@ -225,6 +230,27 @@ describe("parseOpenshipConfig", () => {
     }
   });
 
+  describe("monorepo override roots (#873)", () => {
+    it.each([
+      ["platform/dashboard_web", "./platform/dashboard_web/"],
+      [".", "./"],
+      ["apps\\web", "apps/web"],
+    ])("rejects duplicate monorepo override roots %s and %s (#873)", (first, second) => {
+      const { config, errors } = parseOpenshipConfig({
+        monorepo: {
+          apps: [
+            { name: "web", rootDirectory: first },
+            { name: "worker", rootDirectory: second },
+          ],
+        },
+      });
+      expect(errors).toEqual([
+        expect.stringMatching(/monorepo\.apps\[1\]\.rootDirectory: duplicates monorepo\.apps\[0\]/),
+      ]);
+      expect(config?.monorepo?.apps).toHaveLength(1);
+    });
+  });
+
   describe("composePath", () => {
     it("round-trips a file path and a directory path", () => {
       for (const composePath of [
@@ -246,6 +272,43 @@ describe("parseOpenshipConfig", () => {
     it("is absent (not undefined-valued) when undeclared", () => {
       const { config } = parseOpenshipConfig({ framework: "nextjs" });
       expect(config && "composePath" in config).toBe(false);
+    });
+  });
+
+  describe("releaseCommands", () => {
+    it("round-trips a list of commands in declared order", () => {
+      const releaseCommands = [
+        "php artisan migrate --force",
+        "php artisan db:seed --force",
+      ];
+      const { config, errors, warnings } = parseOpenshipConfig({ releaseCommands });
+      expect(errors).toEqual([]);
+      expect(warnings).toEqual([]);
+      expect(config?.releaseCommands).toEqual(releaseCommands);
+    });
+
+    it("rejects a bare string and a non-string entry", () => {
+      expect(parseOpenshipConfig({ releaseCommands: "php artisan migrate" }).errors).toEqual([
+        "releaseCommands: must be an array of strings",
+      ]);
+      expect(parseOpenshipConfig({ releaseCommands: ["ok", 7] }).errors).toEqual([
+        "releaseCommands[1]: must be a string",
+      ]);
+    });
+
+    // Absent must stay distinguishable from `[]` all the way to the column: the
+    // phase is opt-in, and an undeclared field has to behave exactly as it did
+    // before the field existed.
+    it("is absent (not undefined-valued) when undeclared", () => {
+      const { config, errors } = parseOpenshipConfig({ framework: "nextjs" });
+      expect(errors).toEqual([]);
+      expect(config && "releaseCommands" in config).toBe(false);
+    });
+
+    it("keeps an explicit empty list as a declared opt-out", () => {
+      const { config, errors } = parseOpenshipConfig({ releaseCommands: [] });
+      expect(errors).toEqual([]);
+      expect(config?.releaseCommands).toEqual([]);
     });
   });
 

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { githubApi } from "@/lib/api";
+import { GITHUB_SOURCES_CHANGED_EVENT, githubApi } from "@/lib/api";
 import type { GitHubRepo } from "@/context/GitHubContext";
 import type { VisibilityFilter, SortBy } from "./types";
 
@@ -91,38 +91,54 @@ export function useLibraryRepos(owner: string, enabled: boolean): LibraryReposSt
       reqId.current++; // invalidate any in-flight response so it can't repopulate
       setRepos([]);
       setMeta(EMPTY_META);
+      setLoading(false);
       return;
     }
-    const id = ++reqId.current;
-    setLoading(true);
-    githubApi
-      .getUserRepos(owner, {
-        page: query.page,
-        perPage: REPOS_PER_PAGE,
-        search: debouncedSearch || undefined,
-        visibility: query.visibility,
-        sort: query.sort,
-      })
-      .then((res) => {
-        if (id !== reqId.current) return; // superseded by a newer request
-        setRepos((res.data ?? []) as GitHubRepo[]);
-        setMeta({
-          count: res.count ?? 0,
-          total: res.total ?? 0,
-          publicCount: res.publicCount ?? 0,
-          privateCount: res.privateCount ?? 0,
-          page: res.page ?? 1,
-          totalPages: res.totalPages ?? 1,
+    const load = (force = false) => {
+      const id = ++reqId.current;
+      setLoading(true);
+      githubApi
+        .getUserRepos(
+          owner,
+          {
+            page: query.page,
+            perPage: REPOS_PER_PAGE,
+            search: debouncedSearch || undefined,
+            visibility: query.visibility,
+            sort: query.sort,
+          },
+          force,
+        )
+        .then((res) => {
+          if (id !== reqId.current) return; // superseded by a newer request
+          setRepos((res.data ?? []) as GitHubRepo[]);
+          setMeta({
+            count: res.count ?? 0,
+            total: res.total ?? 0,
+            publicCount: res.publicCount ?? 0,
+            privateCount: res.privateCount ?? 0,
+            page: res.page ?? 1,
+            totalPages: res.totalPages ?? 1,
+          });
+        })
+        .catch(() => {
+          if (id !== reqId.current) return;
+          setRepos([]);
+          setMeta(EMPTY_META);
+        })
+        .finally(() => {
+          if (id === reqId.current) setLoading(false);
         });
-      })
-      .catch(() => {
-        if (id !== reqId.current) return;
-        setRepos([]);
-        setMeta(EMPTY_META);
-      })
-      .finally(() => {
-        if (id === reqId.current) setLoading(false);
-      });
+    };
+    load();
+    // Installing the App can grant repos without changing the OAuth user or
+    // `enabled`. Re-read after completion, bypassing any pre-install request.
+    const onSourcesChanged = () => load(true);
+    window.addEventListener(GITHUB_SOURCES_CHANGED_EVENT, onSourcesChanged);
+    return () => {
+      reqId.current++;
+      window.removeEventListener(GITHUB_SOURCES_CHANGED_EVENT, onSourcesChanged);
+    };
   }, [owner, enabled, query.page, query.visibility, query.sort, debouncedSearch]);
 
   return {

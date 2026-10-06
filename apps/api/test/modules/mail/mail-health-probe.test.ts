@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { checkMailHealth } from "../../../src/modules/mail/mail-health.service";
-import { parseMailUnitProbe } from "../../../src/modules/mail/mail-engine";
+import { checkMailHealth } from "@repo/platform/engine/modules/mail/mail-health.service";
+import { parseMailUnitProbe } from "@repo/platform/engine/modules/mail/mail-engine";
 import type { CommandExecutor } from "@repo/adapters";
 
 /**
@@ -220,4 +220,24 @@ describe("checkMailHealth", () => {
     expect(rows.every((r) => r.status === "missing")).toBe(true);
     expect(rows.every((r) => r.detail === undefined)).toBe(true);
   });
+});
+
+
+it("leaves SSH channel capacity for the queue, state and certificate probes", async () => {
+  let active = 0;
+  let peak = 0;
+  const executor = { exec: vi.fn(async (command: string) => {
+    if (command.includes("{{.Config.Image}}")) return "true\topenship/mail:latest";
+    active++;
+    peak = Math.max(peak, active);
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    active--;
+    if (command.includes("{{.State.Running}}")) return "true";
+    const unit = /supervisorctl status '([^']+)'/.exec(command)?.[1];
+    return `${unit} RUNNING pid 12`;
+  }) } as unknown as CommandExecutor;
+  const states = await checkMailHealth(executor);
+  expect(states).toHaveLength(9);
+  expect(states.every((state) => state.status === "active")).toBe(true);
+  expect(peak).toBeLessThanOrEqual(4);
 });

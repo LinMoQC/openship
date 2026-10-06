@@ -4,11 +4,13 @@ import { rateLimiter } from "../../middleware/rate-limiter";
 import { secureRouter } from "../../lib/secure-router";
 import { cloudSessionAuth } from "./cloud-session-auth";
 import * as saas from "./cloud-saas.controller";
+import { cloudResourceProxy, cloudRouteRegistry } from "./cloud-resource.controller";
 
 /** SaaS-only cloud routes. */
 const r = secureRouter(new Hono(), {
   module: "cloud-saas",
   basePath: "/api/cloud",
+  mcpExcluded: "Internal Cloud relay or browser credential handoff. Use the authenticated project, domain, GitHub, analytics and Cloud status tools instead.",
 });
 
 // PUBLIC handoff endpoints — arrive from browser redirects with signed tokens
@@ -60,6 +62,11 @@ r.post("/pages", { tag: "cloud:write" }, saas.pagesProxy);
 r.post("/pages/disable", { tag: "cloud:write" }, saas.pagesDisable);
 r.post("/pages/enable", { tag: "cloud:write" }, saas.pagesEnable);
 r.post("/pages/delete", { tag: "cloud:write" }, saas.pagesDelete);
+
+r.use("/resource-proxy", cloudSessionAuth, rateLimiter, bodyLimit({ maxSize: 256_000 }));
+r.post("/resource-proxy", { tag: "cloud:write" }, cloudResourceProxy);
+r.use("/route-registry", cloudSessionAuth);
+r.get("/route-registry", { tag: "cloud:read" }, cloudRouteRegistry);
 
 r.use("/send-invitation", cloudSessionAuth);
 r.post("/send-invitation", { tag: "cloud:write" }, saas.sendInvitation);

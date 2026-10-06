@@ -30,7 +30,7 @@
  */
 import { Command, Option } from "commander";
 import { spawnSync } from "node:child_process";
-import { resolveCliUpdatePlan, cliInstallCommand, type CliPackageManager } from "@repo/core";
+import { resolveCliUpdatePlan, cliInstallCommand, magicRuntimeBaseline, type CliPackageManager } from "@repo/core";
 import { resolveLatestTag } from "../lib/github-releases";
 import { restart as restartService, selfInvocation } from "../lib/service";
 import { readInstallMethod, composeUpdate } from "../lib/compose";
@@ -307,6 +307,13 @@ export const updateCommand = new Command("update")
   // (freshly-fetched) bundle. Set by reexecApply after the fetch; not for users.
   .addOption(new Option("--apply-only").hideHelp())
   .action(async (opts: UpdateOpts) => {
+    if (magicRuntimeBaseline(__CLI_VERSION__)) {
+      const message = "This custom control platform requires a verified matched runtime bundle, deployment freeze and matching database backup. The upstream installer cannot update it.";
+      if (isJsonMode()) printJson({ current: __CLI_VERSION__, updateAvailable: false, customRuntime: true, code: "CUSTOM_RUNTIME_RELEASE_REQUIRED", message });
+      else info(message);
+      if (!opts.check) process.exitCode = 1;
+      return;
+    }
     // Phase 2: the new binary re-exec'd itself to apply its own template/unit.
     // Skip every fetch path and just reconcile.
     if (opts.applyOnly) {

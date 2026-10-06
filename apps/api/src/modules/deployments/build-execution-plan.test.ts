@@ -6,7 +6,7 @@ import {
   resolveBuildRuntimeModes,
   resolveDeployRouting,
   reusedReleaseRouting,
-} from "./build-execution-plan";
+} from "@repo/platform/engine/modules/deployments/build-execution-plan";
 
 /**
  * Locks the behavior-equivalence tables the pipeline restructure relied on. Each
@@ -268,7 +268,7 @@ describe("reusedReleaseRouting (a release that already exists)", () => {
   });
 
   it("is wired to the REUSE branch, and its answer is what the deploy phase gets", () => {
-    const src = readFileSync(new URL("./build-pipeline.ts", import.meta.url), "utf8");
+    const src = readFileSync(new URL("../../../../../packages/platform/src/engine/modules/deployments/build-pipeline.ts", import.meta.url), "utf8");
     // Gated on the reuse actually happening: a pin whose artifact is gone rebuilds
     // from source, and then the BUILD's answer is the correct one.
     expect(src).toMatch(

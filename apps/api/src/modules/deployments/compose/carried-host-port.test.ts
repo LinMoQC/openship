@@ -48,7 +48,7 @@ describe("pickHostPort's preferred-port contract", () => {
 });
 
 describe("the deploy routes the carried port through the allocator", () => {
-  const src = readFileSync(new URL("./deploy.service.ts", import.meta.url), "utf8");
+  const src = readFileSync(new URL("../../../../../../packages/platform/src/engine/modules/deployments/compose/deploy.service.ts", import.meta.url), "utf8");
   /** The loopback-port allocation block, bounded by its own loop. */
   const block = (() => {
     const from = src.indexOf("for (const containerPort of routedContainerPorts) {");

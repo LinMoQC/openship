@@ -58,6 +58,7 @@ import {
   type RouteConfig,
 } from "@repo/adapters";
 import type { RoutingConfig } from "@repo/core";
+import { buildDomainFanoutRegistrations } from "@repo/platform/engine/modules/deployments/compose/composite-route";
 import type Dockerode from "dockerode";
 import { describeDockerE2E, requireDocker } from "../helpers/docker-e2e";
 
@@ -323,6 +324,30 @@ http {
       ],
     } as unknown as RouteConfig);
 
+    // Start with a complete migrated route, then simulate a retry whose live
+    // inspection cannot observe the backend. The old planner replaced this
+    // vhost with a root-only route, sending /api requests to the frontend.
+    for (const backend of ["http://127.0.0.1:9904", null]) {
+      const planned = buildDomainFanoutRegistrations({
+        routes: [
+          {
+            hostname: "retry.test",
+            isCustomDomain: true,
+            rootServiceId: "web",
+            locations: [{ pathPrefix: "/api/", serviceId: "api" }],
+          },
+        ],
+        resolveTargetUrl: (id) => (id === "web" ? "http://127.0.0.1:9901" : backend),
+      });
+      for (const route of planned)
+        out["retry"] = await renderVhost({
+          domain: route.hostname,
+          tls: false,
+          targetUrl: route.targetUrl!,
+          proxyLocations: route.proxyLocations,
+        });
+    }
+
     return out;
   }
 
@@ -481,6 +506,23 @@ http {
     expect(final.body.trim()).toBe("ROOT-INDEX");
   });
 
+  it.each([
+    ["enforce.test", "/ui", "/ui/"],
+    ["strip.test", "/ui/", "/ui"],
+    ["clean.test", "/about.html", "/about"],
+  ])(
+    "preserves raw query parameters through URL normalization on %s (#845)",
+    async (host, path, target) => {
+      const query = "?token=abc%2B123%2F%3D&next=%2Fui%3Ftab%3D1&tag=a&tag=b";
+      const answer = await ask(port, path + query, host);
+      expect(answer.status).toBe(308);
+      expect(answer.location).toBe(`http://${host}${target}${query}`);
+      const result = await follow(port, path + query, host);
+      expect(result.hops).toEqual([answer.location]);
+      expect(result.final.status).toBe(200);
+    },
+  );
+
   // ── The silent one ───────────────────────────────────────────────────────────
 
   it("gives every path-scoped header rule its own value", async () => {
@@ -530,6 +572,14 @@ http {
     expect((await ask(port, "/deep/a/b?q=1", "hooks.test")).body).toContain(
       "THIRDPARTY uri=/x/deep/a/b?q=1",
     );
+  });
+
+  it("keeps serving the complete route when a retry cannot observe one of its upstreams", async () => {
+    expect((await ask(port, "/", "retry.test")).body).toContain("APP uri=/");
+    const api = await ask(port, "/api/health", "retry.test");
+    expect(api.status).toBe(200);
+    expect(api.body).toContain("BACKEND uri=/api/health");
+    expect(api.body).not.toContain("APP uri=");
   });
 
   it("leaves the ACME challenge reachable on every host, catch-all or not", async () => {

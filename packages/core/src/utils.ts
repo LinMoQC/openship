@@ -16,6 +16,20 @@ function bytesToBase64Url(bytes: Uint8Array): string {
   return b64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
+/** Normalize repository-relative roots for discovery and config override matching. */
+export function normalizeProjectRootDirectory(value?: string): string {
+  const normalized = value
+    ?.trim()
+    .replace(/^\.\//, "")
+    .replace(/^\/+|\/+$/g, "");
+
+  if (!normalized || normalized === ".") {
+    return "";
+  }
+
+  return normalized.split(/[\\/]/).filter(Boolean).join("/");
+}
+
 /** Generate a URL-safe slug from a string */
 export function slugify(text: string): string {
   return text

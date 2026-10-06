@@ -55,6 +55,7 @@
     "viewAllApps": "Tüm {count} uygulamayı gör →"
   },
   "nav": {
+    "scale": "Ölçeklendirme",
     "home": "Ana Sayfa",
     "new-project": "Yeni Proje",
     "projects": "Projeler",

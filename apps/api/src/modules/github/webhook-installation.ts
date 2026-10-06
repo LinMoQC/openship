@@ -4,15 +4,15 @@
  */
 
 import { repos } from "@repo/db";
-import { env } from "../../config/env";
+import { env } from "@repo/platform/engine/config/env";
 import {
   getGitHubAuthMode,
   invalidateOrgGitHubCache,
   invalidateUserGitHubCache,
-} from "./github.auth";
-import type { WebhookHandlerResult } from "../webhooks/webhook.types";
-import type { GitHubInstallationPayload } from "./github.types";
-import { listGitHubSourcesForWebhook } from "./github-source.service";
+} from "@repo/platform/engine/modules/github/github.auth";
+import type { WebhookHandlerResult } from "@repo/platform/engine/modules/webhooks/webhook.types";
+import type { GitHubInstallationPayload } from "@repo/contracts";
+import { listGitHubSourcesForWebhook } from "@repo/platform/engine/modules/github/github-source.service";
 
 interface InstallationWebhookScope {
   sourceIds: Set<string>;

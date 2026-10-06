@@ -29,7 +29,8 @@ import {
   type OpenshipService,
   type ParseResult,
 } from "./schema";
-import { isValidEnvKey } from "../utils";
+import { isValidEnvKey, normalizeProjectRootDirectory } from "../utils";
+import { isValidServiceName } from "../service-name";
 
 const TOP_LEVEL_KEYS = new Set([
   "$schema",
@@ -40,6 +41,7 @@ const TOP_LEVEL_KEYS = new Set([
   "installCommand",
   "buildCommand",
   "startCommand",
+  "releaseCommands",
   "outputDirectory",
   "buildImage",
   "productionPaths",
@@ -357,6 +359,10 @@ function parseServices(ctx: Ctx, v: unknown, path: string): OpenshipService[] | 
       ctx.err(p, "requires a `name`");
       return;
     }
+    if (!isValidServiceName(name)) {
+      ctx.err(p, "requires a service name starting with a letter or digit and containing only letters, digits, dots, underscores or hyphens");
+      return;
+    }
     out.push({
       name,
       image: ctx.str(item.image, `${p}.image`),
@@ -408,6 +414,7 @@ function parseMonorepo(ctx: Ctx, v: unknown, path: string): OpenshipMonorepo | u
     if (!Array.isArray(v.apps)) ctx.err(`${path}.apps`, "must be an array");
     else {
       const apps: OpenshipMonorepoApp[] = [];
+      const roots = new Map<string, number>();
       v.apps.forEach((a, i) => {
         const p = `${path}.apps[${i}]`;
         if (!ctx.isObj(a)) {
@@ -420,6 +427,15 @@ function parseMonorepo(ctx: Ctx, v: unknown, path: string): OpenshipMonorepo | u
           ctx.err(p, "requires `name` and `rootDirectory`");
           return;
         }
+        const root = normalizeProjectRootDirectory(rootDirectory);
+        if (roots.has(root)) {
+          ctx.err(
+            `${p}.rootDirectory`,
+            `duplicates ${path}.apps[${roots.get(root)}]; each override must target a different detected app`,
+          );
+          return;
+        }
+        roots.set(root, i);
         apps.push({
           name,
           rootDirectory,
@@ -468,6 +484,7 @@ export function parseOpenshipConfig(raw: unknown): ParseResult {
     installCommand: ctx.str(raw.installCommand, "installCommand"),
     buildCommand: ctx.str(raw.buildCommand, "buildCommand"),
     startCommand: ctx.str(raw.startCommand, "startCommand"),
+    releaseCommands: ctx.strArray(raw.releaseCommands, "releaseCommands"),
     outputDirectory: ctx.str(raw.outputDirectory, "outputDirectory"),
     buildImage: ctx.str(raw.buildImage, "buildImage"),
     productionPaths: ctx.strArray(raw.productionPaths, "productionPaths"),

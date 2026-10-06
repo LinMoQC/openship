@@ -39,7 +39,7 @@ vi.mock("@repo/db", () => ({
   },
 }));
 
-vi.mock("../github/github.service", () => ({
+vi.mock("@repo/platform/engine/modules/github/github.service", () => ({
   createCheckRun: async (_ctx: unknown, owner: string, repo: string, opts: Record<string, unknown>) => {
     h.createCalls.push({ owner, repo, ...opts });
     return { id: 555, htmlUrl: "https://github.com/acme/app/runs/555" };
@@ -49,17 +49,17 @@ vi.mock("../github/github.service", () => ({
   },
 }));
 
-vi.mock("../../lib/org-actor", () => ({ resolveOrgOwner: async () => h.orgOwner }));
+vi.mock("@repo/platform/engine/lib/org-actor", () => ({ resolveOrgOwner: async () => h.orgOwner }));
 vi.mock("../../lib/request-context", () => ({
   buildBackgroundContext: (o: unknown) => o,
 }));
-vi.mock("../../config", () => ({ runtimeTarget: { dashboard: "https://openship.test/" } }));
+vi.mock("@repo/platform/engine/config/index", () => ({ runtimeTarget: { dashboard: "https://openship.test/" } }));
 vi.mock("@repo/core", () => ({
   isServiceSuccessStatus: (s: string) => s === "success" || s === "running",
   isServiceFailureStatus: (s: string) => s === "failure" || s === "cancelled",
 }));
 
-const load = () => import("./service-checks");
+const load = () => import("@repo/platform/engine/modules/deployments/service-checks");
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const project = { gitOwner: "acme", gitRepo: "app" } as any;

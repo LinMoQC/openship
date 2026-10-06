@@ -7,7 +7,7 @@ import {
   HOST_CHANNEL_UNAFFECTED,
   wrapText,
 } from "@repo/core";
-import { env } from "../config/env";
+import { env } from "@repo/platform/engine/config/env";
 
 /**
  * Boot-time diagnosis of the container→host SSH channel (#490).

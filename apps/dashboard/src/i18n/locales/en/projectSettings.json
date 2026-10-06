@@ -409,24 +409,26 @@
   },
   "backup": {
     "live": {
-      "title": "Live backup",
+      "title": "Backup activity",
       "description": "Real-time progress for the run you just kicked off. Survives page refresh.",
       "dismiss": "Dismiss"
     },
     "destinations": {
       "title": "Backup destinations",
-      "description": "Per-user storage targets. Add S3-compatible buckets, SFTP servers, or local disks.",
+      "description": "Storage available to this project.",
       "manage": "Manage",
       "loading": "Loading…",
       "emptyPrefix": "No destinations yet. ",
       "emptyLink": "Create one",
       "emptySuffix": " to start backing up.",
       "verified": "Verified",
-      "failed": "Failed"
+      "failed": "Failed",
+      "emptyHint": "Connect an S3 bucket, an SFTP host, or a server you already use.",
+      "inUse": "In use"
     },
     "services": {
-      "title": "Services + policies",
-      "description": "Each service can have its own backup policy (schedule + destination). Project-level defaults land in Chunk 2.",
+      "title": "Backup policies",
+      "description": "Choose what to back up, when to run it, and where to store it.",
       "refresh": "Refresh",
       "empty": "This project has no services yet. Service-level backups appear here once you add some.",
       "policyLabel": "Policy:",
@@ -438,22 +440,54 @@
       "editPolicy": "Edit policy",
       "addDestinationFirst": "Add a destination first",
       "createPolicyHint": "Create a backup policy for this service",
-      "createPolicy": "Create policy"
+      "createPolicy": "Create policy",
+      "projectHint": "One policy for all services in this project.",
+      "includedInProject": "Included in the project policy.",
+      "retainCount": "Keep {count} backups",
+      "retainDays": "Up to {days} days"
     },
     "recent": {
+      "loadOlder": "Load older backups",
       "title": "Recent backups",
-      "description": "The 25 most recent runs across all services in this project.",
+      "description": "Recent runs, their results, and restore options.",
       "loading": "Loading…",
       "empty": "No backups yet.",
       "protectedTitle": "Protected from retention prune",
       "protected": "Protected",
       "restoreTitle": "Restore from this backup",
       "allowPrune": "Allow retention to prune",
-      "protectFrom": "Protect from retention"
+      "protectFrom": "Protect from retention",
+      "emptyHint": "Create a policy, then run your first backup here.",
+      "backup": "Backup",
+      "viewDetails": "View details",
+      "restore": "Restore",
+      "triggers": {
+        "manual": "On demand",
+        "cron": "Scheduled",
+        "webhook": "Webhook",
+        "pre_deploy": "Before deployment"
+      }
     },
     "toast": {
       "runFailed": "Backup run failed",
       "toggleProtectionFailed": "Failed to toggle protection"
+    },
+    "overview": {
+      "description": "Schedule backups and restore your project data.",
+      "lastBackup": "Latest successful backup",
+      "noRecentBackup": "No recent backup",
+      "scheduledPolicies": "Scheduled policies",
+      "projectScope": "Entire project",
+      "serviceBackup": "Service backup",
+      "paused": "Paused",
+      "loadFailed": "Couldn't load backups"
+    },
+    "schedule": {
+      "daily": "Daily at {time}",
+      "weekly": "Every {day} at {time}",
+      "monthly": "Day {day} of each month, {time}",
+      "custom": "Custom schedule",
+      "timezone": "Uses the server’s time zone."
     }
   },
   "build": {
@@ -530,8 +564,8 @@
       "appliesOnDeploy": "Applied on the next deploy."
     },
     "env": {
-      "title": "Environment variables",
-      "description": "Encrypted at rest. Secrets stay masked — only the values you change are written.",
+      "title": "Project environment (build + shared runtime)",
+      "description": "Used for image builds and shared runtime input. Compose values and service runtime overrides take precedence at runtime. Secrets stay masked.",
       "edit": "Edit"
     }
   },
@@ -540,10 +574,10 @@
     "saveChanges": "Save changes",
     "close": "Close",
     "applyTitle": "Apply without a rebuild",
-    "applyText": "Saved. Apply these to the running service — it restarts with the new env, no clone or rebuild.",
+    "applyText": "Saved. Restart to apply runtime changes. Rebuild and redeploy to apply values used when building an image.",
     "applyButton": "Apply (restart, no rebuild)",
-    "title": "Environment variables",
-    "description": "Production. Encrypted at rest. Secrets show as set — type to replace; leave blank to keep.",
+    "title": "Project environment (build + shared runtime)",
+    "description": "Production project variables. Secrets stay masked; leave a saved secret blank to keep it. Service runtime values take precedence for the same key.",
     "empty": "No environment variables yet.",
     "keyPlaceholder": "KEY",
     "secretPlaceholder": "•••••••• (set — type to replace)",
@@ -601,6 +635,7 @@
       "install": "Install GitHub App"
     },
     "webhookBanner": {
+      "summary": "Public endpoint required",
       "title": "Enable auto-deploy",
       "description": "Auto-deploy needs a direct webhook endpoint. Expose this Openship API on a public URL or configure a verified webhook domain for direct delivery."
     },
@@ -640,22 +675,26 @@
       "rebuild": "Rebuild (git)",
       "instant": "Instant (snapshot)",
       "descRebuild": "Rebuilds the old commit, unless its image is still on the host.",
-      "descInstant": "Keeps every version's image, so a restore never rebuilds. Uses more disk.",
+      "descInstant": "Keeps rollback artifacts within the history limit. Older versions may need to be rebuilt.",
       "toggleAria": "Toggle snapshot retention",
-      "keepNone": "Keep no extra copies",
-      "keepCopies": "Keep a copy per version",
+      "keepNone": "Reuse images or rebuild",
+      "keepCopies": "Preserve rollback artifacts",
       "descRebuildFiles": "Rebuilds the old commit, unless its files are still on the host.",
-      "descInstantFiles": "Keeps every version's files, so a restore never rebuilds. Uses more disk."
+      "descInstantFiles": "Keeps built files within the history limit. Older versions may need to be rebuilt."
     },
     "rollbackHistory": {
       "title": "Rollback history",
+      "retentionHint": "Keep recent deployment artifacts for quick rollback.",
+      "retentionDescription": "Maximum number of past releases to keep. Active and pinned releases are extra. Older artifacts are removed; deployment history stays available. Set to 0 to keep only active and pinned releases.",
+      "defaultBadge": "instance default",
+      "loadFailed": "Could not load rollback settings.",
       "valueOne": "{count} version",
       "valueOther": "{count} versions",
       "descSnapshot": "Older versions are pruned to reclaim disk.",
       "descGit": "Recent images are retained either way, so a rollback can skip the build.",
       "decreaseAria": "Decrease rollback history",
       "increaseAria": "Increase rollback history",
-      "sizeEach": "~{size} each",
+      "sizeEach": "~{size} per image, including shared layers",
       "diskFree": "{size} free",
       "autoBadge": "sized automatically",
       "manualBadge": "set manually",
@@ -856,12 +895,13 @@
       "active": "Active",
       "failed": "Failed",
       "removing": "Removing",
-      "pending": "Pending"
+      "pending": "Pending",
+      "waiting": "Waiting"
     },
     "ssl": {
       "includedByHost": "Included by host",
       "active": "Active",
-      "provisioning": "Provisioning",
+      "provisioning": "Awaiting certificate",
       "expired": "Expired",
       "error": "Error",
       "inactive": "Inactive",
@@ -915,10 +955,10 @@
       "includeWwwDesc": "Also generate records for www.{domain}",
       "includeWwwFallback": "yourdomain.com",
       "externalIngress": "External ingress & TLS",
-      "externalIngressDesc": "TLS terminates upstream (Cloudflare Tunnel, load balancer). Verify by TXT only — the domain need not point at this server, and we won't issue a certificate.",
+      "externalIngressDesc": "TLS terminates at your reverse proxy (Cloudflare Tunnel, Nginx Proxy Manager, or a load balancer). The domain need not point at this server, and Openship won't issue a certificate.",
       "dnsChallenge": "Use DNS-01 challenge",
-      "dnsChallengeDesc": "Issue and renew the certificate through your connected DNS provider. Use this when port 80 cannot be reached.",
-      "dnsChallengeWildcardDesc": "Wildcard certificates require DNS-01 and a connected DNS provider.",
+      "dnsChallengeDesc": "Verify through a DNS provider or a temporary TXT record. Useful when port 80 is unavailable.",
+      "dnsChallengeWildcardDesc": "Required for wildcard HTTPS. Use a connected DNS provider, or add a temporary TXT record during HTTPS setup.",
       "noWww": "That domain is already on this project.",
       "adding": "Adding...",
       "submit": "Add domain"
@@ -1064,10 +1104,73 @@
       "foreignProxyHint": "Another proxy holds 80/443"
     },
     "diagnosis": {
-      "title": "Why this isn't working",
+      "title": "Domain details",
       "noneYet": "No check has run yet, so there's no result to show. Add the DNS records shown for this domain, then run Verify.",
       "attempts": "{count} failed attempt(s) so far.",
-      "pillHint": "Show why"
+      "pillHint": "Show why",
+      "lastChecked": "Last check:",
+      "nextCheck": "Next scheduled check:",
+      "scheduleHint": "Checks run while this instance is online. Queued work can delay the start.",
+      "automaticDisabled": "Automatic domain checks are disabled. Retry manually or enable them in Jobs.",
+      "scheduleUnavailable": "The automatic check schedule is unavailable. You can retry manually.",
+      "retryNow": "Retry now",
+      "checking": "Checking…",
+      "reasons": {
+        "verification": "Domain verification has not completed. Check the DNS records before retrying.",
+        "certificate": "HTTPS needs checking on the serving server. Retrying checks for an existing certificate before requesting one.",
+        "deployment": "This route is waiting for a deployment. Deploy the project to apply it.",
+        "disabled": "This project or service is disabled. Enable it before checking the route.",
+        "removing": "This domain is being removed. No verification is scheduled.",
+        "manual_certificate": "This domain uses an uploaded certificate. Upload a valid replacement, then recheck it. Openship does not renew it automatically.",
+        "managed_certificate": "TLS is managed by your external proxy or Openship Cloud. Check that provider’s configuration.",
+        "route_missing": "This configured route has not been applied. Retry routing to apply it. No automatic routing retry is scheduled.",
+        "manual_dns": "This certificate uses manual TXT verification. Open HTTPS setup to confirm a new TXT record, or choose a connected DNS provider for automatic renewal."
+      }
+    },
+    "wildcard": {
+      "title": "DNS-verified HTTPS",
+      "scope": "A wildcard covers one subdomain level. Add the base domain separately if it should serve this app too.",
+      "notice": "Wildcard HTTPS requires DNS verification. After saving, connect a DNS provider or add the TXT record from HTTPS setup.",
+      "automatic": "Automatic provider",
+      "manual": "Manual TXT",
+      "automaticHint": "Connect Cloudflare in Settings → DNS to create certificate challenges and renew HTTPS automatically.",
+      "manualHint": "Add a temporary TXT record at your DNS provider. Each renewal needs a new TXT record; Openship will show when renewal is due.",
+      "routing": "1. Point the domain at this server",
+      "certificate": "2. Enable HTTPS",
+      "startAutomatic": "Enable HTTPS automatically",
+      "startManual": "Get TXT record",
+      "renew": "Renew certificate",
+      "check": "Check TXT & enable HTTPS",
+      "cancel": "Cancel challenge",
+      "refresh": "Refresh status",
+      "close": "Close setup",
+      "loading": "Loading certificate setup",
+      "loadFailed": "Could not load certificate setup. Retry to see its current state.",
+      "recordsFailed": "Could not load the routing DNS records. Your saved certificate challenge is still available.",
+      "actionFailed": "Could not update certificate setup.",
+      "expires": "Complete this challenge by {date}.",
+      "txtHint": "Add this exact TXT value. Keep other TXT values at the same name. If your provider adds the zone name, enter only the relative part.",
+      "cleanup": "You may remove this attempt’s TXT value. Keep all other TXT records.",
+      "logs": "Certificate logs",
+      "states": {
+        "preparing": "Preparing the certificate challenge…",
+        "waiting": "Waiting for your TXT record",
+        "checking": "Checking DNS and certificate ownership…",
+        "installing": "Enabling HTTPS…",
+        "cancelling": "Cancelling the challenge…",
+        "completed": "HTTPS is ready",
+        "failed": "Certificate setup needs attention",
+        "cancelled": "Challenge cancelled",
+        "expired": "TXT challenge expired"
+      }
     }
+  },
+  "serviceEnvironment": {
+    "title": "Service runtime environment",
+    "description": "These variables apply only to this service and override matching Compose or shared project values. Use Apply environment changes to activate saved values.",
+    "overrides": "These keys take precedence over project values for this service: {keys}.",
+    "buildArguments": "Build arguments are configured in the Compose file or source configuration and require a rebuild.",
+    "projectLink": "Edit shared project environment",
+    "loadFailed": "Could not load project variable names to check overrides."
   }
 }

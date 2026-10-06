@@ -46,6 +46,18 @@ themselves separately.
 
 ## Database topology - one host, four DBs
 
+Container installs publish the mail database only on host loopback. New setups try
+port 5432, then the first free port in 5433–5460 if 5432 is occupied. To select a
+specific port, set `OPENSHIP_MAIL_DB_PORT` in the API process environment before
+running mail setup. The value must be a decimal port from 1 to 65535; an occupied
+explicit port stops setup with an error.
+
+The selected port is saved with the mail engine configuration and reused when
+recreating a missing engine. Existing installations keep their retained port;
+changing the API setting does not move a running database. Start-only repairs read
+the existing container binding. Inside the PostgreSQL container the port remains
+5432, and the mail daemons use the selected host port.
+
 ```
 openship Postgres ($DATABASE_URL)                 ← unrelated to mail
 └── schema "public"

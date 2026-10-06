@@ -393,11 +393,19 @@ export const createLogMessageProcessor = (
           break;
 
         case "end":
-          // Container stream ended
-          if (message.exitCode !== undefined && message.exitCode !== 0) {
-            const exitMessage = message.message || `Container exited with code ${message.exitCode}`;
-            callbacks.onContainerExit?.(message.exitCode, exitMessage);
+          if (message.error) {
+            // The transport ended, not the container. Report the failure and
+            // let the viewer's disconnect policy retry the connection.
+            callbacks.onError?.(message.error);
+            break;
           }
+          callbacks.onContainerExit?.(
+            message.exitCode ?? 0,
+            message.message ||
+              (message.exitCode
+                ? `Container exited with code ${message.exitCode}`
+                : "Log stream ended"),
+          );
           break;
 
         case "error":

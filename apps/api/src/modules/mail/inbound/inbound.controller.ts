@@ -30,8 +30,8 @@ import {
   ForeignBccError,
   listEngineDomains,
   ruleDomain,
-} from "./capture";
-import { runInboundForServer } from "./read";
+} from "@repo/platform/engine/modules/mail/inbound/capture";
+import { runInboundForServer } from "@repo/platform/engine/modules/mail/inbound/read";
 
 const SCOPES: readonly MailInboundScope[] = ["mailbox", "domain", "all"];
 const EMAIL_RE = /^[a-z0-9._+-]+@[a-z0-9.-]+\.[a-z]{2,}$/;

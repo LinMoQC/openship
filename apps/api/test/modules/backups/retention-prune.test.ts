@@ -49,13 +49,13 @@ vi.mock("@repo/adapters", async (importOriginal) => ({
 }));
 
 // Registering a real cron schedule is the JobRunner's business, not retention's.
-vi.mock("../../../src/modules/backups/triggers/cron", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../../../src/modules/backups/triggers/cron")>()),
+vi.mock("@repo/platform/engine/modules/backups/triggers/cron", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@repo/platform/engine/modules/backups/triggers/cron")>()),
   syncPolicySchedule: h.syncPolicySchedule,
 }));
 
-import { createPolicy } from "../../../src/modules/backups/backup.service";
-import { prunePolicy, runRetentionSweep } from "../../../src/modules/backups/retention-prune";
+import { createPolicy } from "@repo/platform/engine/modules/backups/backup.service";
+import { prunePolicy, runRetentionSweep } from "@repo/platform/engine/modules/backups/retention-prune";
 import {
   seedBackupDestination,
   seedBackupPolicy,
@@ -240,6 +240,18 @@ describe("runRetentionSweep policy selection", () => {
 });
 
 describe("prunePolicy", () => {
+  it("waits for the winning worker to finish recording a new restore point", async () => {
+    const policy = await seedBackupPolicy(destinationId, { projectId, retainCount: 1 });
+    const runs = await seedRuns(policy.id, 2);
+    const newest = runs[1]!;
+    await db.update(schema.backupRun).set({ executionStartedAt: new Date(), executionFinishedAt: null }).where(eq(schema.backupRun.id, newest.id));
+    expect((await prunePolicy(policy)).dropped).toBe(0);
+    expect(h.deleted).toEqual([]);
+    await repos.backupRun.acknowledgeExecutionFinished(newest.id);
+    expect((await prunePolicy(policy)).dropped).toBe(1);
+    expect(h.deleted).toEqual(["artifact-0.tar"]);
+  });
+
   it("drops the runs outside the window and soft-deletes their rows", async () => {
     const policy = await seedBackupPolicy(destinationId, { projectId, retainCount: 2 });
     const runs = await seedRuns(policy.id, 4);
@@ -291,7 +303,7 @@ describe("prunePolicy", () => {
     expect((await repos.backupRun.findById(runs[2]!.id))?.deletedAt).toBeNull();
   });
 
-  it("names the skip when the mail server row is gone", async () => {
+  it("names the skip when deleting the mail server also removes its policy", async () => {
     // No org means no scoped read; deleting on a guess would cross tenants.
     const mailServerId = await seedMailServer(organizationId);
     const policy = await seedBackupPolicy(destinationId, {
@@ -306,7 +318,7 @@ describe("prunePolicy", () => {
     expect(await prunePolicy(policy)).toEqual({
       dropped: 0,
       deferred: 0,
-      skipped: "mail server row is gone",
+      skipped: "policy deleted",
     });
     expect(h.deleted).toEqual([]);
   });
@@ -375,7 +387,8 @@ describe("prunePolicy", () => {
 
     expect(outcome.dropped).toBe(1);
     // Two policies sharing a destination must not co-mingle their windows.
-    expect(h.deleted).toEqual(["artifact-0.tar"]);
+    // The other policy references this exact key, so keep the shared bytes.
+    expect(h.deleted).toEqual([]);
   });
 });
 

@@ -25,14 +25,14 @@
  */
 
 import type { Context } from "hono";
-import { auth, isSaasDeployment } from "../../lib/auth";
+import { auth, isSaasDeployment } from "@repo/platform/engine/lib/auth";
 import { repos } from "@repo/db";
 import {
   invitationAccountCreationMode,
   resolveInvitationClaim,
-} from "../../lib/invitation-claim";
+} from "@repo/platform/engine/lib/invitation-claim";
 import { setSessionCookie } from "../../lib/session-cookie";
-import { localDashboardUrl } from "../../config/env";
+import { localDashboardUrl } from "@repo/platform/engine/config/env";
 import { alignLoopbackOrigin } from "@repo/core";
 
 // ─── HTML result page ────────────────────────────────────────────────────────

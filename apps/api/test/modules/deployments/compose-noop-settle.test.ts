@@ -50,7 +50,7 @@ vi.mock("@repo/db", () => ({
   },
 }));
 
-vi.mock("../../../src/modules/deployments/session-manager", () => ({
+vi.mock("@repo/platform/engine/modules/deployments/session-manager", () => ({
   updateStatus: (id: string, status: string, detail?: Record<string, unknown>) => {
     h.sessionStatuses.push({ id, status, detail });
   },
@@ -59,19 +59,19 @@ vi.mock("../../../src/modules/deployments/session-manager", () => ({
   appendLog: () => {},
 }));
 
-vi.mock("../../../src/lib/notification-dispatcher", () => ({
+vi.mock("@repo/platform/engine/lib/notification-dispatcher", () => ({
   notification: { emit: (e: { eventType: string }) => h.notifications.push(e.eventType) },
 }));
 vi.mock("../../../src/lib/audit", () => ({
   audit: { recordAsync: (_c: unknown, e: { eventType: string }) => h.audits.push(e.eventType) },
 }));
-vi.mock("../../../src/lib/favicon-detector", () => ({ detectAndStoreFavicon: async () => {} }));
-vi.mock("../../../src/modules/mail/webmail/webmail-install.service", () => ({
+vi.mock("@repo/platform/engine/lib/favicon-detector", () => ({ detectAndStoreFavicon: async () => {} }));
+vi.mock("@repo/platform/engine/modules/mail/webmail/webmail-install.service", () => ({
   onWebmailDeployed: async () => {},
 }));
 
 // Not under test — a zero-image, zero-failure build.
-vi.mock("../../../src/modules/deployments/compose/build.service", () => ({
+vi.mock("@repo/platform/engine/modules/deployments/compose/build.service", () => ({
   buildComposeImages: async () => ({
     imageRefs: new Map<string, string>(),
     builtImageRefs: new Map<string, string>(),
@@ -80,14 +80,14 @@ vi.mock("../../../src/modules/deployments/compose/build.service", () => ({
   }),
 }));
 
-vi.mock("../../../src/modules/deployments/compose/deploy.service", async (importOriginal) => ({
+vi.mock("@repo/platform/engine/modules/deployments/compose/deploy.service", async (importOriginal) => ({
   ...(await importOriginal<
-    typeof import("../../../src/modules/deployments/compose/deploy.service")
+    typeof import("@repo/platform/engine/modules/deployments/compose/deploy.service")
   >()),
   deployComposeServices: async () => h.deployResult,
 }));
 
-const { executeComposePipeline } = await import("../../../src/modules/deployments/compose/pipeline");
+const { executeComposePipeline } = await import("@repo/platform/engine/modules/deployments/compose/pipeline");
 type PipelineOpts = Parameters<typeof executeComposePipeline>[0];
 
 /** db first, app second — topoSort's dependency-first order, i.e. the order in
@@ -258,3 +258,8 @@ describe("executeComposePipeline — an all-carried redeploy must not take over"
     });
   });
 });
+
+// The application seams moved with the shared engine.
+vi.mock("@repo/platform/engine/lib/audit-emitter", () => ({
+  audit: { recordAsync: (_c: unknown, e: { eventType: string }) => h.audits.push(e.eventType) },
+}));

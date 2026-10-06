@@ -12,8 +12,8 @@
  *   - organizationId: string  (required — used to resolve namespace)
  */
 
-import { env } from "../../../config/env";
-import { getOblienClient, ensureNamespaceWithQuota } from "../../../lib/openship-cloud";
+import { env } from "@repo/platform/engine/config/env";
+import { getOblienClient, ensureNamespaceWithQuota } from "@repo/platform/engine/lib/openship-cloud";
 import type {
   TunnelAgent,
   TunnelProvider,

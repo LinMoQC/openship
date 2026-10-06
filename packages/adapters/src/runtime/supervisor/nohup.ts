@@ -14,7 +14,7 @@
  * Good enough for: development, macOS desktop, CI environments.
  */
 
-import type { CommandExecutor, LogEntry, LogCallback, ResourceUsage } from "../../types";
+import type { CommandExecutor, LogEntry, LogCallback, ResourceUsage, RuntimeLogStreamOptions } from "../../types";
 import type { ProcessSupervisor, SupervisorDeployOpts } from "./types";
 import { sampleBareUsage, ZERO_USAGE } from "./usage";
 import { sq, parseLogLevel } from "../build-pipeline";
@@ -189,6 +189,10 @@ export class NohupSupervisor implements ProcessSupervisor {
     );
   }
 
+  async canStart(_deploymentId: string): Promise<boolean> {
+    return false;
+  }
+
   async restart(deploymentId: string): Promise<void> {
     // Nohup can't restart - the service layer must re-deploy.
     await this.stop(deploymentId);
@@ -249,7 +253,7 @@ export class NohupSupervisor implements ProcessSupervisor {
   async streamLogs(
     deploymentId: string,
     onLog: LogCallback,
-    opts?: { tail?: number },
+    opts?: RuntimeLogStreamOptions,
   ): Promise<() => void> {
     const logPath = this.logFile(deploymentId);
     const tailN = opts?.tail ?? 100;
@@ -282,7 +286,16 @@ export class NohupSupervisor implements ProcessSupervisor {
         if (!stopped) onLog({ ...entry, message: entry.message + "\r\n" });
       },
     );
-    promise.catch(() => {});
+    void promise.then(
+      (result) => {
+        if (!stopped) opts?.onEnd?.(result.code === 0
+          ? undefined
+          : new Error(`Log reader exited with code ${result.code}`));
+      },
+      (error) => {
+        if (!stopped) opts?.onEnd?.(error instanceof Error ? error : new Error(String(error)));
+      },
+    );
 
     return () => {
       stopped = true;

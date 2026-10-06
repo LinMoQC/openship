@@ -13,7 +13,7 @@
  * Unit location: /etc/systemd/system/ (standard for admin-created units)
  */
 
-import type { CommandExecutor, LogEntry, LogCallback, ResourceUsage } from "../../types";
+import type { CommandExecutor, LogEntry, LogCallback, ResourceUsage, RuntimeLogStreamOptions } from "../../types";
 import type { ProcessSupervisor, SupervisorDeployOpts } from "./types";
 import { sampleBareUsage, ZERO_USAGE } from "./usage";
 import { sq, parseLogLevel } from "../build-pipeline";
@@ -185,6 +185,10 @@ WantedBy=multi-user.target
     await this.executor.exec(`systemctl start ${sq(unitName)}`);
   }
 
+  async canStart(deploymentId: string): Promise<boolean> {
+    return this.executor.exists(this.unitPath(deploymentId));
+  }
+
   async restart(deploymentId: string): Promise<void> {
     const unitName = this.unitName(deploymentId);
     await this.executor.exec(`systemctl restart ${sq(unitName)}`);
@@ -281,7 +285,7 @@ WantedBy=multi-user.target
   async streamLogs(
     deploymentId: string,
     onLog: LogCallback,
-    opts?: { tail?: number },
+    opts?: RuntimeLogStreamOptions,
   ): Promise<() => void> {
     const unitName = this.unitName(deploymentId);
     const tailN = opts?.tail ?? 100;
@@ -299,7 +303,16 @@ WantedBy=multi-user.target
         onLog(cleaned);
       },
     );
-    promise.catch(() => {});
+    void promise.then(
+      (result) => {
+        if (!stopped) opts?.onEnd?.(result.code === 0
+          ? undefined
+          : new Error(`Log reader exited with code ${result.code}`));
+      },
+      (error) => {
+        if (!stopped) opts?.onEnd?.(error instanceof Error ? error : new Error(String(error)));
+      },
+    );
 
     return () => {
       stopped = true;

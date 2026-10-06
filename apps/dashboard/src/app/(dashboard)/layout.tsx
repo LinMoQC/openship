@@ -2,7 +2,7 @@ import { redirect } from "next/navigation";
 import { getSession, getDeploymentInfoOrNull } from "@/lib/server/session";
 import { resolveRequestProductView } from "@/lib/server/product-view";
 import { ApiUnavailable } from "@/components/api-unavailable";
-import { Sidebar } from "@/components/sidebar";
+import { DashboardShell } from "@/components/dashboard-shell";
 import { UpdateCenter } from "@/components/updates/UpdateCenter";
 import { MigratedLauncher } from "@/components/migrated-launcher";
 import { MigrationInProgress } from "@/components/migration-in-progress";
@@ -168,11 +168,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
             partial outage, maintenance) / available update / what's-new, so it
             adds no chrome when idle. */}
         <UpdateCenter />
-        <div className="flex flex-1 min-h-0">
-          <Sidebar />
-          {/* Main content */}
-          <main className="flex-1 overflow-y-auto">{children}</main>
-        </div>
+        <DashboardShell>{children}</DashboardShell>
       </div>
     </DashboardProviders>
   );

@@ -90,6 +90,15 @@ export interface UpdateGitHubSourceInput {
   webBaseUrl?: string;
 }
 
+export interface BranchPageResponse {
+  data: Array<{ name: string; sha?: string; protected?: boolean }>;
+  pagination: {
+    page: number;
+    perPage: number;
+    hasMore: boolean;
+  };
+}
+
 /* ------------------------------------------------------------------ */
 /*  /github/status request dedup (in-flight only — NOT a cache)        */
 /* ------------------------------------------------------------------ */
@@ -105,7 +114,7 @@ let statusInflight: Promise<unknown> | null = null;
 
 function getStatusDeduped<T = unknown>(force = false): Promise<T> {
   if (!force && statusInflight) return statusInflight as Promise<T>;
-  const work = api.get<T>(endpoints.github.status).finally(() => {
+  const work = api.get<T>(endpoints.github.status, { dedupe: !force }).finally(() => {
     if (statusInflight === work) statusInflight = null;
   });
   statusInflight = work;
@@ -128,7 +137,7 @@ export interface RepoTreeEntry {
 
 export const githubApi = {
   /** Dashboard home - user info, orgs, recent repos */
-  getUserHome: () => api.get<any>(endpoints.github.userHome),
+  getUserHome: (force = false) => api.get<any>(endpoints.github.userHome, { dedupe: !force }),
 
   /**
    * A repo's whole tree, flat and recursive — one call, so the path picker can
@@ -147,15 +156,18 @@ export const githubApi = {
   /** Repos for a specific GitHub user. Server-paginated: pass page/perPage/
    *  search/visibility/sort and read the authoritative `count`/`total` back
    *  (omit the params to get the full set, as MCP + legacy callers do). */
-  getUserRepos: (owner: string, params?: RepoListQuery) =>
+  getUserRepos: (owner: string, params?: RepoListQuery, force = false) =>
     api.get<RepoPageResponse>(endpoints.github.userRepos, {
       params: { owner, ...params },
+      dedupe: !force,
     }),
 
   /** List a repo's branches (used before a project exists — e.g. the migration
    *  wizard's link-repo step, which can't use projectsApi.getBranches). */
-  listBranches: (owner: string, repo: string) =>
-    api.get<{ data: Array<{ name: string }> }>(endpoints.github.repoBranches(owner, repo)),
+  listBranches: (owner: string, repo: string, page = 1) =>
+    api.get<BranchPageResponse>(endpoints.github.repoBranches(owner, repo), {
+      params: { page },
+    }),
 
   /**
    * Mint a short-lived GitHub App installation token for cloning a repo and
@@ -168,7 +180,8 @@ export const githubApi = {
     ),
 
   /** Check GitHub connection status (live, no dedup). */
-  getStatus: () => api.get<any>(endpoints.github.status),
+  getStatus: (options?: { includeInstallUrl?: boolean }) =>
+    api.get<any>(endpoints.github.status, { params: options, dedupe: false }),
 
   /**
    * GitHub connection status, de-duplicated across CONCURRENT callers (Settings

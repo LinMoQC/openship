@@ -40,7 +40,7 @@ vi.mock("@repo/db", async (importOriginal) => {
   };
 });
 
-vi.mock("../../../src/modules/github/github.service", async (importOriginal) => ({
+vi.mock("@repo/platform/engine/modules/github/github.service", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   compareCommits,
 }));
@@ -50,7 +50,7 @@ import {
   evaluateDrift,
   releaseSourceKey,
   type UpstreamDrift,
-} from "../../../src/modules/projects/project-crud.service";
+} from "@repo/platform/engine/modules/projects/project-crud.service";
 import type { Project } from "@repo/db";
 
 const SHIPPED = "13140747f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6";
@@ -82,6 +82,7 @@ const commitUpstream = (p: Project, latestSha: string | null): UpstreamDrift => 
 
 beforeEach(() => {
   for (const fn of Object.values({ ...deploymentRepo, ...serviceRepo })) fn.mockReset();
+  deploymentRepo.findById.mockResolvedValue({ id: "dep_live", projectId: "proj_1", organizationId: "org_1" });
   deploymentRepo.findInProgressByCommit.mockResolvedValue(undefined);
   deploymentRepo.findInProgressByReleaseVersion.mockResolvedValue(undefined);
   serviceRepo.listByProject.mockResolvedValue([]);
@@ -92,7 +93,7 @@ beforeEach(() => {
 describe("commit drift — the deployed side is live", () => {
   it("ignores commits outside the project root (#637)", async () => {
     const p = gitProject({ rootDirectory: "services/backend" });
-    deploymentRepo.findById.mockResolvedValue({ id: "dep_live", commitSha: SHIPPED });
+    deploymentRepo.findById.mockResolvedValue({ id: "dep_live", projectId: "proj_1", organizationId: "org_1", commitSha: SHIPPED });
     compareCommits.mockResolvedValue({
       files: ["services/client/page.tsx"],
       truncated: false,
@@ -106,7 +107,7 @@ describe("commit drift — the deployed side is live", () => {
 
   it("reports an update when the project root changed", async () => {
     const p = gitProject({ rootDirectory: "services/backend" });
-    deploymentRepo.findById.mockResolvedValue({ id: "dep_live", commitSha: SHIPPED });
+    deploymentRepo.findById.mockResolvedValue({ id: "dep_live", projectId: "proj_1", organizationId: "org_1", commitSha: SHIPPED });
     compareCommits.mockResolvedValue({
       files: ["services/backend/src/index.ts"],
       truncated: false,
@@ -121,7 +122,7 @@ describe("commit drift — the deployed side is live", () => {
     "keeps repository-wide build input %s actionable",
     async (file) => {
       const p = gitProject({ rootDirectory: "services/backend" });
-      deploymentRepo.findById.mockResolvedValue({ id: "dep_live", commitSha: SHIPPED });
+      deploymentRepo.findById.mockResolvedValue({ id: "dep_live", projectId: "proj_1", organizationId: "org_1", commitSha: SHIPPED });
       compareCommits.mockResolvedValue({ files: [file], truncated: false });
 
       expect(await evaluateDrift(p, commitUpstream(p, NEWER), {} as never)).toMatchObject({
@@ -135,7 +136,7 @@ describe("commit drift — the deployed side is live", () => {
       rootDirectory: "services/backend",
       monorepoSharedPaths: ["packages/shared"],
     });
-    deploymentRepo.findById.mockResolvedValue({ id: "dep_live", commitSha: SHIPPED });
+    deploymentRepo.findById.mockResolvedValue({ id: "dep_live", projectId: "proj_1", organizationId: "org_1", commitSha: SHIPPED });
     compareCommits.mockResolvedValue({
       files: ["packages/shared/index.ts"],
       truncated: false,
@@ -148,7 +149,7 @@ describe("commit drift — the deployed side is live", () => {
 
   it("keeps the update actionable when GitHub truncates the changed-file list", async () => {
     const p = gitProject({ rootDirectory: "services/backend" });
-    deploymentRepo.findById.mockResolvedValue({ id: "dep_live", commitSha: SHIPPED });
+    deploymentRepo.findById.mockResolvedValue({ id: "dep_live", projectId: "proj_1", organizationId: "org_1", commitSha: SHIPPED });
     compareCommits.mockResolvedValue({
       files: ["services/client/page.tsx"],
       truncated: true,
@@ -163,7 +164,7 @@ describe("commit drift — the deployed side is live", () => {
     // The exact reported case: the cached upstream is old (polled while an older
     // release was live), but the project has since deployed that very commit.
     const p = gitProject();
-    deploymentRepo.findById.mockResolvedValue({ id: "dep_live", commitSha: NEWER });
+    deploymentRepo.findById.mockResolvedValue({ id: "dep_live", projectId: "proj_1", organizationId: "org_1", commitSha: NEWER });
 
     const status = await evaluateDrift(p, commitUpstream(p, NEWER));
 
@@ -177,10 +178,10 @@ describe("commit drift — the deployed side is live", () => {
     const p = gitProject();
     const upstream = commitUpstream(p, NEWER);
 
-    deploymentRepo.findById.mockResolvedValue({ id: "dep_live", commitSha: SHIPPED });
+    deploymentRepo.findById.mockResolvedValue({ id: "dep_live", projectId: "proj_1", organizationId: "org_1", commitSha: SHIPPED });
     const before = await evaluateDrift(p, upstream);
 
-    deploymentRepo.findById.mockResolvedValue({ id: "dep_live", commitSha: NEWER });
+    deploymentRepo.findById.mockResolvedValue({ id: "dep_live", projectId: "proj_1", organizationId: "org_1", commitSha: NEWER });
     const after = await evaluateDrift(p, upstream);
 
     expect(before).toMatchObject({ behind: true, deployedSha: SHIPPED });
@@ -196,7 +197,7 @@ describe("commit drift — the deployed side is live", () => {
     // deployed on 1314074".
     const p = gitProject();
     deploymentRepo.findById.mockResolvedValue({
-      id: "dep_live",
+      id: "dep_live", projectId: "proj_1", organizationId: "org_1",
       commitSha: SHIPPED.slice(0, 7),
     });
 
@@ -209,14 +210,14 @@ describe("commit drift — the deployed side is live", () => {
 
   it("claims nothing when the deployed ref is a tag we cannot compare by value", async () => {
     const p = gitProject();
-    deploymentRepo.findById.mockResolvedValue({ id: "dep_live", commitSha: "v0.6.5" });
+    deploymentRepo.findById.mockResolvedValue({ id: "dep_live", projectId: "proj_1", organizationId: "org_1", commitSha: "v0.6.5" });
 
     expect(await evaluateDrift(p, commitUpstream(p, NEWER))).toMatchObject({ behind: false });
   });
 
   it("suppresses the nudge while the newest commit is already deploying", async () => {
     const p = gitProject();
-    deploymentRepo.findById.mockResolvedValue({ id: "dep_live", commitSha: SHIPPED });
+    deploymentRepo.findById.mockResolvedValue({ id: "dep_live", projectId: "proj_1", organizationId: "org_1", commitSha: SHIPPED });
     deploymentRepo.findInProgressByCommit.mockResolvedValue({ id: "dep_building" });
 
     const status = await evaluateDrift(p, commitUpstream(p, NEWER));
@@ -227,7 +228,7 @@ describe("commit drift — the deployed side is live", () => {
 
   it("claims nothing when the remote HEAD could not be resolved", async () => {
     const p = gitProject();
-    deploymentRepo.findById.mockResolvedValue({ id: "dep_live", commitSha: SHIPPED });
+    deploymentRepo.findById.mockResolvedValue({ id: "dep_live", projectId: "proj_1", organizationId: "org_1", commitSha: SHIPPED });
 
     const status = await evaluateDrift(p, commitUpstream(p, null));
 
@@ -252,7 +253,7 @@ describe("cache keys — a repointed source is a miss, not stale drift", () => {
     // nothing about it, and no invalidation call ran — the key mismatch is what
     // keeps this honest.
     const now = gitProject({ gitBranch: "release/0.6" });
-    deploymentRepo.findById.mockResolvedValue({ id: "dep_live", commitSha: SHIPPED });
+    deploymentRepo.findById.mockResolvedValue({ id: "dep_live", projectId: "proj_1", organizationId: "org_1", commitSha: SHIPPED });
 
     const status = await evaluateDrift(now, upstream);
 
@@ -264,7 +265,7 @@ describe("cache keys — a repointed source is a miss, not stale drift", () => {
   it("ignores a HEAD polled for a different repo", async () => {
     const upstream = commitUpstream(gitProject(), NEWER);
     const now = gitProject({ gitRepo: "openship-fork" });
-    deploymentRepo.findById.mockResolvedValue({ id: "dep_live", commitSha: SHIPPED });
+    deploymentRepo.findById.mockResolvedValue({ id: "dep_live", projectId: "proj_1", organizationId: "org_1", commitSha: SHIPPED });
 
     expect(await evaluateDrift(now, upstream)).toMatchObject({ behind: false, latestSha: null });
   });
@@ -285,7 +286,7 @@ describe("cache keys — a repointed source is a miss, not stale drift", () => {
       gitProvider: "release",
       releaseSource: { mode: "github", repo: "someone/else" } as never,
     });
-    deploymentRepo.findById.mockResolvedValue({ id: "dep_live", releaseVersion: "0.5.0" });
+    deploymentRepo.findById.mockResolvedValue({ id: "dep_live", projectId: "proj_1", organizationId: "org_1", releaseVersion: "0.5.0" });
 
     expect(await evaluateDrift(now, upstream)).toMatchObject({
       behind: false,
@@ -298,7 +299,7 @@ describe("cache keys — a repointed source is a miss, not stale drift", () => {
       gitProvider: "release",
       releaseSource: { mode: "github", repo: "oblien/openship" } as never,
     });
-    deploymentRepo.findById.mockResolvedValue({ id: "dep_live", releaseVersion: "0.5.0" });
+    deploymentRepo.findById.mockResolvedValue({ id: "dep_live", projectId: "proj_1", organizationId: "org_1", releaseVersion: "0.5.0" });
 
     const status = await evaluateDrift(p, {
       supported: true,

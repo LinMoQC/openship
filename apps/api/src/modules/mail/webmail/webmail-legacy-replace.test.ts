@@ -76,33 +76,33 @@ vi.mock("@repo/db", () => ({
       findFirstBySlug: vi.fn(async () => null),
     },
     service: { listByProject: vi.fn(async () => [{ id: "svc1", name: "webmail" }]) },
-    deployment: { findById: vi.fn(async () => ({ status: "ready" })) },
+    deployment: { findById: vi.fn(async () => ({ id: h.linked?.activeDeploymentId, projectId: h.linked?.id, organizationId: "org1", status: "ready" })) },
   },
 }));
 
-vi.mock("../../projects/project-teardown", () => ({
+vi.mock("@repo/platform/engine/modules/projects/project-teardown", () => ({
   teardownProject: h.teardownProject,
 }));
-vi.mock("../../apps/catalog-source", () => ({
+vi.mock("@repo/platform/engine/modules/apps/catalog-source", () => ({
   getTemplateForOrg: vi.fn(async () => h.template),
 }));
-vi.mock("../../apps/app-install.service", () => ({
+vi.mock("@repo/platform/engine/modules/apps/app-install.service", () => ({
   installApp: h.installApp,
   planInstallRouting: vi.fn(() => new Map()),
   ensureGeneratedAppSecrets: h.ensureGeneratedAppSecrets,
 }));
-vi.mock("../../apps/app-settings.service", () => ({
+vi.mock("@repo/platform/engine/modules/apps/app-settings.service", () => ({
   updateAppProjectSettings: h.updateAppProjectSettings,
 }));
-vi.mock("../../deployments/build.service", () => ({
+vi.mock("@repo/platform/engine/modules/deployments/build.service", () => ({
   requestBuildAccess: h.requestBuildAccess,
 }));
-vi.mock("../../domains/project-route.service", () => ({
+vi.mock("@repo/platform/engine/modules/domains/project-route.service", () => ({
   listProjectRouteRows: vi.fn(async () => []),
 }));
-vi.mock("../../services/service.service", () => ({ updateService: h.updateService }));
-vi.mock("../../../lib/ssh-manager", () => ({ sshManager: { withExecutor: vi.fn() } }));
-vi.mock("../mail-state", () => ({ readState: vi.fn(), mutateState: vi.fn() }));
+vi.mock("@repo/platform/engine/modules/services/service.service", () => ({ updateService: h.updateService }));
+vi.mock("@repo/platform/engine/lib/ssh-manager", () => ({ sshManager: { withExecutor: vi.fn() } }));
+vi.mock("@repo/platform/engine/modules/mail/mail-state", () => ({ readState: vi.fn(), mutateState: vi.fn() }));
 
 import { getAppTemplate } from "@repo/core";
 import {
@@ -111,7 +111,7 @@ import {
   startWebmailDeploy,
   WEBMAIL_SETTING_KEYS,
   WEBMAIL_TEMPLATE_ID,
-} from "./webmail-install.service";
+} from "@repo/platform/engine/modules/mail/webmail/webmail-install.service";
 
 const ctx = { organizationId: "org1", userId: "u1" } as never;
 const input = {

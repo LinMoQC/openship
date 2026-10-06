@@ -31,8 +31,8 @@ vi.mock("../../../src/lib/controller-helpers", async (importOriginal) => {
   };
 });
 
-vi.mock("../../../src/lib/server-target", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../../src/lib/server-target")>();
+vi.mock("@repo/platform/engine/lib/server-target", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@repo/platform/engine/lib/server-target")>();
   return {
     ...actual,
     resolveProjectServerHost: vi.fn().mockResolvedValue("203.0.113.10"),
@@ -41,7 +41,7 @@ vi.mock("../../../src/lib/server-target", async (importOriginal) => {
   };
 });
 
-vi.mock("../../../src/lib/domain-ssl", () => ({
+vi.mock("@repo/platform/engine/lib/domain-ssl", () => ({
   installDomainCert: vi.fn(),
   manageDomainSsl: vi.fn(),
 }));
@@ -49,20 +49,20 @@ vi.mock("../../../src/lib/domain-ssl", () => ({
 // Stubbed so the provisioning ARGUMENTS are assertable: which hostnames Openship
 // actually writes records for is the thing that matters, not what Cloudflare says.
 const provisionRecords = vi.fn().mockResolvedValue({ provisioned: true, records: [] });
-vi.mock("../../../src/modules/dns/dns-credential.service", () => ({
+vi.mock("@repo/platform/engine/modules/dns/dns-credential.service", () => ({
   provisionRecords: (...args: unknown[]) => provisionRecords(...args),
   releaseRecords: vi.fn().mockResolvedValue({ deleted: 0 }),
 }));
 
-vi.mock("../../../src/lib/dns-resolver", () => ({
+vi.mock("@repo/platform/engine/lib/dns-resolver", () => ({
   resolveRecords: vi.fn(),
 }));
 
-vi.mock("../../../src/lib/route-apply.service", () => ({
+vi.mock("@repo/platform/engine/lib/route-apply.service", () => ({
   reconcileProjectRoutes: vi.fn(),
 }));
 
-import { addDomain } from "../../../src/modules/domains/domain.service";
+import { addDomain } from "@repo/platform/engine/modules/domains/domain.service";
 
 const project = {
   id: "proj_123",
@@ -145,6 +145,22 @@ describe("addDomain retries", () => {
 
     expect(domainRepo.create).not.toHaveBeenCalled();
     expect(domainRepo.update).not.toHaveBeenCalled();
+  });
+
+  it("enforces DNS-01 for a wildcard even when HTTP is requested, without adding www", async () => {
+    domainRepo.findByHostname.mockResolvedValue(null);
+    domainRepo.create.mockImplementation(async (data: any) => ({ id: "dom_wildcard", ...data }));
+    const result = await addDomain(context as any, {
+      projectId: project.id, hostname: "*.example.com", sslChallenge: "http-01", includeWww: true,
+    });
+    expect(result.domain).toMatchObject({ hostname: "*.example.com", sslChallenge: "dns-01", isPrimary: false });
+    expect(domainRepo.create).toHaveBeenCalledOnce();
+    expect(result.www).toBeUndefined();
+  });
+
+  it("rejects a wildcard as the primary URL before creating a domain", async () => {
+    await expect(addDomain(context as any, { projectId: project.id, hostname: "*.example.com", isPrimary: true })).rejects.toThrow(/concrete hostname/);
+    expect(domainRepo.create).not.toHaveBeenCalled();
   });
 
   // The toggle used to set a flag nothing read: the controller dropped it and the SSL
@@ -321,4 +337,21 @@ describe("addDomain retries", () => {
       { type: "A", host: "*", name: "*.example.com", value: "203.0.113.10" },
     ]);
   });
+});
+
+// The application seams moved with the shared engine.
+vi.mock("@repo/platform/engine/lib/platform-config", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../src/lib/controller-helpers")>();
+  return {
+    ...actual,
+    platform: () => ({ target: "local", runtime: {} }),
+  };
+});
+
+vi.mock("@repo/platform/engine/lib/resource-access", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../src/lib/controller-helpers")>();
+  return {
+    ...actual,
+    platform: () => ({ target: "local", runtime: {} }),
+  };
 });

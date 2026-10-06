@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Icon as UiIcon } from "@repo/ui/icons";
+
+import { useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import { Loader2, Check, X } from "lucide-react";
 import { authClient, useSession } from "@/lib/auth-client";
 import { api } from "@/lib/api";
 import { getApiErrorMessage } from "@/lib/api/client";
@@ -56,16 +57,29 @@ export default function AcceptInvitePage() {
   const [signupError, setSignupError] = useState<string | null>(null);
 
   const inviteId = Array.isArray(params.id) ? params.id[0] ?? "" : String(params.id ?? "");
+  // A session refresh must not let an older preview replace an acceptance.
+  // Scope the attempt to this invitation so navigation also invalidates old work.
+  const claimRef = useRef({ inviteId, phase: "idle" as "idle" | "accepting" | "accepted" });
+  if (claimRef.current.inviteId !== inviteId) claimRef.current = { inviteId, phase: "idle" };
+  const redirectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (redirectRef.current) clearTimeout(redirectRef.current);
+    if (claimRef.current.inviteId === inviteId) {
+      claimRef.current = { inviteId, phase: "idle" };
+    }
+  }, [inviteId]);
 
   useEffect(() => {
-    if (sessionLoading) return;
+    const claim = claimRef.current;
+    if (sessionLoading || claim.phase !== "idle") return;
 
     let active = true;
+    const current = () => active && claimRef.current === claim && claim.phase === "idle";
 
     void (async () => {
       try {
         if (!inviteId) {
-          if (active) setState({ kind: "error", message: m.invalidInvitation });
+          if (current()) setState({ kind: "error", message: m.invalidInvitation });
           return;
         }
         // Better Auth's getInvitation endpoint requires a session. The public
@@ -74,7 +88,7 @@ export default function AcceptInvitePage() {
           `auth/invitation-preview/${encodeURIComponent(inviteId)}`,
         );
         const { invitation, organization, accountCreation } = res.data;
-        if (!active) return;
+        if (!current()) return;
         if (!session?.user) {
           setState({
             kind: "needs-login",
@@ -101,7 +115,7 @@ export default function AcceptInvitePage() {
           role: invitation.role,
         });
       } catch (err) {
-        if (active) {
+        if (current()) {
           setState({
             kind: "error",
             message: getApiErrorMessage(err, m.loadFailed),
@@ -116,10 +130,15 @@ export default function AcceptInvitePage() {
   }, [inviteId, session?.user?.email, sessionLoading, m]);
 
   const handleAccept = async (organizationName: string) => {
+    if (claimRef.current.inviteId !== inviteId || claimRef.current.phase !== "idle") return;
+    const claim: typeof claimRef.current = { inviteId, phase: "accepting" };
+    claimRef.current = claim;
     setState({ kind: "accepting" });
     try {
       const res = await orgClient.acceptInvitation({ invitationId: inviteId });
+      if (claimRef.current !== claim) return;
       if (res.error || !res.data) {
+        claim.phase = "idle";
         setState({
           kind: "error",
           message: res.error?.message ?? m.acceptFailed,
@@ -138,13 +157,19 @@ export default function AcceptInvitePage() {
         console.warn("[accept-invite] materialize failed (continuing):", err);
       }
 
+      if (claimRef.current !== claim) return;
+      claim.phase = "accepted";
       setState({
         kind: "accepted",
         organizationId: res.data.invitation.organizationId,
         organizationName,
       });
-      setTimeout(() => router.push("/"), 1500);
+      redirectRef.current = setTimeout(() => {
+        if (claimRef.current === claim) router.push("/");
+      }, 1500);
     } catch (err) {
+      if (claimRef.current !== claim) return;
+      claim.phase = "idle";
       setState({
         kind: "error",
         message: getApiErrorMessage(err, m.acceptFailed),
@@ -204,7 +229,7 @@ export default function AcceptInvitePage() {
       <div className="w-full max-w-md rounded-2xl border border-border/50 bg-card p-6 space-y-5">
         {state.kind === "loading" || sessionLoading ? (
           <div className="flex items-center justify-center py-8">
-            <Loader2 className="size-6 animate-spin text-muted-foreground" />
+            <UiIcon name="spinner" className="size-6 animate-spin text-muted-foreground" />
           </div>
         ) : state.kind === "needs-login" ? (
           <>
@@ -274,7 +299,7 @@ export default function AcceptInvitePage() {
                   disabled={signupBusy}
                   className="flex items-center justify-center gap-2 w-full py-2.5 bg-primary text-primary-foreground rounded-xl text-sm font-medium hover:bg-primary/90 transition-colors disabled:opacity-60"
                 >
-                  {signupBusy && <Loader2 className="size-4 animate-spin" />}
+                  {signupBusy && <UiIcon name="spinner" className="size-4 animate-spin" />}
                   {m.createAccount}
                 </button>
                 <button
@@ -348,13 +373,13 @@ export default function AcceptInvitePage() {
           </>
         ) : state.kind === "accepting" ? (
           <div className="flex items-center justify-center py-8 gap-3 text-sm text-muted-foreground">
-            <Loader2 className="size-5 animate-spin" />
+            <UiIcon name="spinner" className="size-5 animate-spin" />
             {m.joining}
           </div>
         ) : state.kind === "accepted" ? (
           <div className="flex flex-col items-center gap-3 py-4 text-center">
             <div className="w-12 h-12 rounded-full bg-success-bg flex items-center justify-center">
-              <Check className="size-6 text-success" />
+              <UiIcon name="check" className="size-6 text-success" />
             </div>
             <p className="text-base font-medium text-foreground">{m.acceptedTitle}</p>
             <p className="text-sm text-muted-foreground">{m.acceptedRedirect}</p>
@@ -362,7 +387,7 @@ export default function AcceptInvitePage() {
         ) : (
           <div className="flex flex-col items-center gap-3 py-4 text-center">
             <div className="w-12 h-12 rounded-full bg-destructive/10 flex items-center justify-center">
-              <X className="size-6 text-destructive" />
+              <UiIcon name="close" className="size-6 text-destructive" />
             </div>
             <p className="text-base font-medium text-foreground">{m.errorTitle}</p>
             <p className="text-sm text-muted-foreground">{state.message}</p>

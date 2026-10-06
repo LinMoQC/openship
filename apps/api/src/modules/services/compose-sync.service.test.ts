@@ -1,21 +1,22 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { RequestContext } from "../../lib/request-context";
+import type { ExecutionContext as RequestContext } from "@repo/platform";
 
 const h = vi.hoisted(() => ({ project: vi.fn(), vars: vi.fn(), services: vi.fn(), sync: vi.fn() }));
 vi.mock("@repo/db", () => ({ repos: {
   project: { findById: h.project, listEnvVars: h.vars }, service: { listByProject: h.services },
 } }));
-vi.mock("../../lib/controller-helpers", () => ({
+vi.mock("@repo/platform/engine/lib/resource-access", () => ({
   assertResourceInOrg: (p: { organizationId: string } | null, _label: string, org: string) => {
     if (!p || p.organizationId !== org) throw new Error("Project not found");
   },
 }));
-vi.mock("../../lib/encryption", () => ({ decrypt: (v: string) => {
+vi.mock("@repo/platform/engine/lib/encryption", () => ({ decrypt: (v: string) => {
   if (!v.startsWith("sealed:")) throw new Error("Invalid ciphertext");
   return v.slice(7);
 } }));
-vi.mock("./service.service", () => ({ syncComposeServices: h.sync }));
-import { syncComposeDocument } from "./compose-sync.service";
+vi.mock("@repo/platform/engine/modules/services/service.service", () => ({ syncComposeServices: h.sync }));
+vi.mock("@repo/platform/engine/modules/releases/release-gate", () => ({ assertGitopsCommand: async () => null }));
+import { syncComposeDocument } from "@repo/platform/engine/modules/services/compose-sync.service";
 
 const ctx = { organizationId: "org" } as RequestContext;
 const image = `ghcr.io/example/app@sha256:${"a".repeat(64)}`;

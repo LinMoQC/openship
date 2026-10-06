@@ -31,7 +31,7 @@ vi.mock("@repo/db", async (importOriginal) => {
   };
 });
 
-vi.mock("../../../src/modules/domains/project-route.service", () => ({
+vi.mock("@repo/platform/engine/modules/domains/project-route.service", () => ({
   deriveEnvironmentPublicEndpoints: vi.fn(),
   deriveNextProjectRouteState: vi.fn(),
   listProjectRouteRows: routeState.listProjectRouteRows,
@@ -41,11 +41,11 @@ vi.mock("../../../src/modules/domains/project-route.service", () => ({
   syncProjectRouteState: routeState.syncProjectRouteState,
 }));
 
-vi.mock("../../../src/modules/domains/routing-apply.service", () => ({
+vi.mock("@repo/platform/engine/modules/domains/routing-apply.service", () => ({
   applyProjectRouting,
 }));
 
-import { updateProject } from "../../../src/modules/projects/project-crud.service";
+import { updateProject } from "@repo/platform/engine/modules/projects/project-crud.service";
 
 const project = {
   id: "proj_123",

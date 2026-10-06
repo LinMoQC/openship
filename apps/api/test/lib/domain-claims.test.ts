@@ -29,7 +29,7 @@ vi.mock("@repo/db", () => ({
   },
 }));
 
-import { routableWithoutOwnership } from "../../src/lib/domain-claims";
+import { routableWithoutOwnership } from "@repo/platform/engine/lib/domain-claims";
 
 const MAIL_ROW = {
   hostname: "mail.example.com",

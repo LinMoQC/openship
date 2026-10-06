@@ -46,7 +46,7 @@ vi.mock("@repo/db", async (importOriginal) => {
   };
 });
 
-vi.mock("../../../src/lib/startup", () => ({
+vi.mock("@repo/platform/engine/lib/startup/index", () => ({
   registerStartupHook: (hook: { id: string; run: () => Promise<void> }) => {
     startupHooks.registered.push(hook);
   },
@@ -56,8 +56,8 @@ import {
   createService,
   isMaterializedAppRow,
   registerAppServiceRowReconcile,
-} from "../../../src/modules/services/service.service";
-import { hasSourceBuildRecipe } from "../../../src/lib/deployable-service";
+} from "@repo/platform/engine/modules/services/service.service";
+import { hasSourceBuildRecipe } from "@repo/platform/engine/lib/deployable-service";
 
 const ctx = { organizationId: "org_1" } as never;
 

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { assertProjectMovable, planProjectMove, ProjectMoveRefused } from "./project-move";
-import type { DiscoveredService } from "./docker-reconcile";
+import { assertProjectMovable, planProjectMove, ProjectMoveRefused } from "@repo/platform/engine/modules/migration/project-move";
+import type { DiscoveredService } from "@repo/platform/engine/modules/migration/docker-reconcile";
 
 /**
  * The refusal matrix, and the three fields whose wrong value is destructive:

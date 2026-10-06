@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("@repo/db", () => ({ repos: {} }));
 
 import { NginxProvider, EDGE_HOST_PATHS, type RootChecked } from "@repo/adapters";
-import { reconcileProjectRoutes } from "../../src/lib/route-apply.service";
+import { reconcileProjectRoutes } from "@repo/platform/engine/lib/route-apply.service";
 
 /**
  * The whole chain in one assertion, with the REAL renderer: a value stored on

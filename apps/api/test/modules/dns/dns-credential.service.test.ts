@@ -23,7 +23,7 @@ const credentialRepo = vi.hoisted(() => ({
 vi.mock("@repo/db", () => ({ repos: { credential: credentialRepo } }));
 
 const decrypt = vi.hoisted(() => vi.fn());
-vi.mock("../../../src/lib/credential-encryption", () => ({
+vi.mock("@repo/platform/engine/lib/credential-encryption", () => ({
   encryptSecretField: (v: string | null | undefined) => (v ? `enc1:${v}` : null),
   decryptSecretField: decrypt,
 }));
@@ -43,7 +43,7 @@ const provider = vi.hoisted(() => ({
   deleteRecord: vi.fn(),
 }));
 
-vi.mock("../../../src/modules/dns/registry", () => ({
+vi.mock("@repo/platform/engine/modules/dns/registry", () => ({
   resolveDnsProvider: () => provider,
   listDnsProviders: () => ["cloudflare"],
   describeDnsProviders: () => [provider.descriptor],
@@ -56,8 +56,8 @@ const {
   planRecords,
   provisionRecords,
   releaseRecords,
-} = await import("../../../src/modules/dns/dns-credential.service");
-const { DnsApiError, OPENSHIP_RECORD_COMMENT } = await import("../../../src/modules/dns/types");
+} = await import("@repo/platform/engine/modules/dns/dns-credential.service");
+const { DnsApiError, OPENSHIP_RECORD_COMMENT } = await import("@repo/platform/engine/modules/dns/types");
 
 const row = (over: Record<string, unknown> = {}) => ({
   id: "dns_1",

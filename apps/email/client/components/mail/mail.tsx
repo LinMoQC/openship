@@ -24,6 +24,7 @@ import { SidebarToggle } from '../ui/sidebar-toggle';
 import { PricingDialog } from '../ui/pricing-dialog';
 import { clearBulkSelectionAtom } from './use-mail';
 import { useThreads } from '@/hooks/use-threads';
+import { useMailRefresh } from '@/hooks/use-mail-refresh';
 import { useIsMobile } from '@/hooks/use-mobile';
 import { Button } from '@/components/ui/button';
 import { useSession } from '@/lib/auth-client';
@@ -318,6 +319,7 @@ export function MailLayout() {
   const isMobile = useIsMobile();
   const navigate = useNavigate();
   const { data: session, isPending } = useSession();
+  useMailRefresh(!!session?.user);
   const prevFolderRef = useRef(folder);
   const { enableScope, disableScope } = useHotkeysContext();
   const { data: activeConnection } = useActiveConnection();
@@ -514,6 +516,7 @@ export function MailLayout() {
                     onClick={handleRefetchThreads}
                     variant="ghost"
                     size="icon"
+                    aria-label={m['common.actions.refresh']()}
                     className="border-none bg-transparent hover:bg-accent/50 h-10 w-10 rounded-lg backdrop-blur-sm"
                   >
                     <RefreshCcw className="text-muted-foreground h-4 w-4" />
@@ -637,7 +640,10 @@ export const Categories = () => {
             />
           ),
           colors:
-            'border-0 bg-[#006FFE] text-white dark:bg-[#006FFE] dark:text-white dark:hover:bg-[#006FFE]/90',
+            // #006FFE with white text is ~4.46:1, just under the 4.5:1 text
+            // minimum - darkened to #0062D4 (still the same brand blue family,
+            // ~5.7:1) so white text passes in both themes.
+            'border-0 bg-[#0062D4] text-white dark:bg-[#0062D4] dark:text-white dark:hover:bg-[#0062D4]/90',
         };
       case 'Personal':
         return {

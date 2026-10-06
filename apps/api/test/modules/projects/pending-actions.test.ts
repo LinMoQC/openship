@@ -52,19 +52,20 @@ vi.mock("@repo/db", () => ({
   },
 }));
 
-vi.mock("../../../src/modules/deployments/session-manager", () => ({ getSession }));
+vi.mock("@repo/platform/engine/modules/deployments/session-manager", () => ({ getSession }));
 
 import {
   getDeploymentPendingActions,
   getOrgPendingActions,
   getProjectPendingActions,
-} from "../../../src/modules/projects/pending-actions.service";
+} from "@repo/platform/engine/modules/projects/pending-actions.service";
 
 const ORG = "org-1";
 const PROJECT = "proj-1";
 
 const dep = (over: Record<string, unknown> = {}) => ({
   id: "dep-1",
+  projectId: PROJECT,
   organizationId: ORG,
   status: "ready",
   meta: null,

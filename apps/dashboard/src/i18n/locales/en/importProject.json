@@ -106,7 +106,12 @@
     "modeWorker": "Worker",
     "modeStatic": "Static",
     "workerModeDesc": "Runs continuously with no port or public URL — a queue consumer, cron, or bot.",
-    "buildSettingsTitle": "Build Settings"
+    "buildSettingsTitle": "Build Settings",
+    "releaseTitle": "Before activation",
+    "releaseDescription": "Optional commands after build. Failure stops deployment. Docker and Bare apps only.",
+    "releaseCommand": "Command {number}",
+    "addReleaseCommand": "Add command",
+    "removeReleaseCommand": "Remove command {number}"
   },
   "projectSettings": {
     "framework": "Framework",
@@ -124,6 +129,7 @@
     "noneSet": "None set",
     "pasteEnv": "Paste .env",
     "uploadEnv": "Upload .env",
+    "downloadEnv": "Download .env",
     "edit": "Edit",
     "cancel": "Cancel",
     "saving": "Saving...",
@@ -145,6 +151,7 @@
       "interpolated": "Interpolated"
     },
     "toast": {
+      "downloadFailed": "Couldn’t download environment variables.",
       "title": "Environment Variables",
       "added": "{count} added",
       "updated": "{count} updated",
@@ -208,9 +215,9 @@
       "volumes": "Volumes",
       "statefulWarnPart1": "Stateful service on cloud: data lives on the workspace's persistent disk (survives restarts) but is ",
       "statefulWarnBold": "not carried across rebuilds",
-      "statefulWarnPart2": " unless backups are enabled. Docker volume mounts don't apply.",
+      "statefulWarnPart2": ". Back up and restore data explicitly before replacing the workspace.",
       "volumeHint": "Named volume or host path → container path.",
-      "volumeCloudNote": "On cloud these mounts don't apply — data persists on the workspace's disk (not across rebuilds without backups).",
+      "volumeCloudNote": "Persistent volume mounts are not supported on Openship Cloud. Choose a server for workloads that require volumes.",
       "sourcePlaceholder": "Source",
       "containerPathPlaceholder": "Container path",
       "readOnlyMount": "Read-only mount",
@@ -331,7 +338,7 @@
       "successful": "Deployment Successful",
       "deploying": "Deploying..."
     },
-    "visitSite": "Visit Site",
+    "openSite": "Open site",
     "warningTitle": "Deployment finished, but some services still need attention.",
     "productionLogs": "Production Logs",
     "buildTerminal": "Build Terminal",
@@ -341,7 +348,7 @@
     "stopDeployment": "Stop Deployment",
     "redeploy": "Redeploy",
     "goToProject": "Go to project",
-    "openDashboard": "Open Dashboard",
+    "openProject": "Open project",
     "edit": "Edit",
     "status": {
       "cancelled": "Cancelled",

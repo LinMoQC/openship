@@ -106,7 +106,12 @@
     "modeStatic": "ثابت",
     "workerModeDesc": "يعمل باستمرار بدون منفذ أو رابط عام — مستهلك طابور أو مهمة مجدولة أو روبوت.",
     "staticPathHint": "يُقدَّم كملفات ثابتة من الحافة — لا تعمل أي عملية.",
-    "buildSettingsTitle": "إعدادات البناء"
+    "buildSettingsTitle": "إعدادات البناء",
+    "releaseTitle": "قبل التفعيل",
+    "releaseDescription": "أوامر اختيارية بعد البناء. فشلها يوقف النشر. لتطبيقات Docker وBare فقط.",
+    "releaseCommand": "الأمر {number}",
+    "addReleaseCommand": "إضافة أمر",
+    "removeReleaseCommand": "حذف الأمر {number}"
   },
   "projectSettings": {
     "framework": "إطار العمل",
@@ -124,6 +129,7 @@
     "noneSet": "لم يتم تعيين أي منها",
     "pasteEnv": "لصق .env",
     "uploadEnv": "رفع .env",
+    "downloadEnv": "تنزيل .env",
     "edit": "تعديل",
     "cancel": "إلغاء",
     "saving": "جارٍ الحفظ...",
@@ -145,6 +151,7 @@
       "interpolated": "مُستكمَل"
     },
     "toast": {
+      "downloadFailed": "تعذّر تنزيل متغيرات البيئة.",
       "title": "متغيرات البيئة",
       "added": "{count} مُضاف",
       "updated": "{count} مُحدَّث",
@@ -208,9 +215,9 @@
       "volumes": "وحدات التخزين",
       "statefulWarnPart1": "خدمة ذات حالة في السحابة: تعيش البيانات على القرص الدائم لمساحة العمل (تبقى بعد إعادة التشغيل) لكنها ",
       "statefulWarnBold": "لا تُنقل عبر عمليات إعادة البناء",
-      "statefulWarnPart2": " ما لم تُفعَّل النسخ الاحتياطية. لا تنطبق نقاط تحميل وحدات تخزين Docker.",
+      "statefulWarnPart2": ". انسخ البيانات احتياطيًا واستعدها بشكل صريح قبل استبدال مساحة العمل.",
       "volumeHint": "وحدة تخزين مسماة أو مسار مضيف → مسار الحاوية.",
-      "volumeCloudNote": "في السحابة لا تنطبق نقاط التحميل هذه — تبقى البيانات على قرص مساحة العمل (وليس عبر عمليات إعادة البناء دون نسخ احتياطية).",
+      "volumeCloudNote": "تركيبات وحدات التخزين الدائمة غير مدعومة في Openship Cloud. اختر خادماً لأحمال العمل التي تتطلبها.",
       "sourcePlaceholder": "المصدر",
       "containerPathPlaceholder": "مسار الحاوية",
       "readOnlyMount": "تحميل للقراءة فقط",
@@ -318,7 +325,7 @@
       "successful": "تم النشر بنجاح",
       "deploying": "جارٍ النشر..."
     },
-    "visitSite": "زيارة الموقع",
+    "openSite": "فتح الموقع",
     "warningTitle": "انتهى النشر، لكن بعض الخدمات لا تزال تحتاج إلى انتباه.",
     "productionLogs": "سجلات الإنتاج",
     "buildTerminal": "طرفية البناء",
@@ -328,7 +335,7 @@
     "stopDeployment": "إيقاف النشر",
     "redeploy": "إعادة النشر",
     "goToProject": "الذهاب إلى المشروع",
-    "openDashboard": "فتح لوحة التحكم",
+    "openProject": "فتح المشروع",
     "edit": "تعديل",
     "status": {
       "cancelled": "ملغى",

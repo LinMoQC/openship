@@ -54,5 +54,6 @@ export function useDashboardHome(initialData?: any) {
     })();
   }, [initialData]);
 
-  return { projects, numbers, otherOrgs, loading };
+  const removeProject = (id: string) => setProjects(current => current.filter(project => project.id !== id));
+  return { projects, numbers, otherOrgs, loading, removeProject };
 }

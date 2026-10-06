@@ -32,20 +32,20 @@ const { envMock, findProjectById, findSettingsByUser, decrypt, ghAuth, canUseGit
     getLocalGhToken: vi.fn(),
   }));
 
-vi.mock("../../../src/config/env", () => ({ env: envMock }));
+vi.mock("@repo/platform/engine/config/env", () => ({ env: envMock }));
 vi.mock("@repo/db", () => ({
   repos: {
     project: { findById: findProjectById },
     settings: { findByUser: findSettingsByUser },
   },
 }));
-vi.mock("../../../src/lib/encryption", () => ({ decrypt }));
-vi.mock("../../../src/modules/github/github.auth", () => ghAuth);
-vi.mock("../../../src/modules/github/github-access", () => ({ canUseGitHubRepo }));
-vi.mock("../../../src/modules/github/github.local-auth", () => ({ getLocalGhToken }));
+vi.mock("@repo/platform/engine/lib/encryption", () => ({ decrypt }));
+vi.mock("@repo/platform/engine/modules/github/github.auth", () => ghAuth);
+vi.mock("@repo/platform/engine/modules/github/github-access", () => ({ canUseGitHubRepo }));
+vi.mock("@repo/platform/engine/modules/github/github.local-auth", () => ({ getLocalGhToken }));
 // NOT mocked: @repo/core — requireTokenFor needs the real AppError.
 
-import { tokenFor, canResolveTokenFor, requireTokenFor } from "../../../src/modules/github/github.token";
+import { tokenFor, canResolveTokenFor, requireTokenFor } from "@repo/platform/engine/modules/github/github.token";
 
 const ctxNoOrg = { userId: "u1" } as any; // zero-auth / single-user operator
 const ctxOrg = { userId: "u1", organizationId: "o1" } as any;
@@ -159,6 +159,26 @@ describe("tokenFor — self-hosted local (gh-cli → app → project → user-pa
     setApp(true);
     setProjectPat("projtok");
     expect(await tokenFor(ctxNoOrg, "local", withOwner)).toEqual({ token: "apptok", source: "app-installation" });
+  });
+
+  it("skips a rejected source in both resolution and availability checks", async () => {
+    setGh("rejected-gh-token");
+    setApp(true);
+    const target = { ...withOwner, exclude: ["gh-cli" as const] };
+    expect(await tokenFor(ctxNoOrg, "local", target)).toEqual({ token: "apptok", source: "app-installation" });
+    expect(await canResolveTokenFor(ctxNoOrg, "local", target)).toBe("app-installation");
+    expect(getLocalGhToken).not.toHaveBeenCalled();
+    expect(canUseGitHubRepo).toHaveBeenCalledWith(ctxNoOrg, expect.objectContaining({ owner: "acme", repo: "app" }), "read", expect.anything());
+  });
+
+  it("exclusions cannot expand a pinned credential or bypass a denied App grant", async () => {
+    setGh("ghtok");
+    setApp(false);
+    expect(await tokenFor(ctxOrg, "local", { ...withOwner, exclude: ["gh-cli"] })).toBeNull();
+    setApp(true);
+    expect(await tokenFor(ctxOrg, "local", { ...withOwner, only: ["gh-cli"], exclude: ["gh-cli"] })).toBeNull();
+    expect(await canResolveTokenFor(ctxOrg, "local", { ...withOwner, only: ["gh-cli"], exclude: ["gh-cli"] })).toBeNull();
+    expect(ghAuth.getInstallationToken).not.toHaveBeenCalled();
   });
 
   it("project PAT wins once gh + App are absent", async () => {

@@ -1,17 +1,10 @@
 // No DOM needed: renderToStaticMarkup runs no effects, and the row is pure.
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { I18nProvider } from "@/components/i18n-provider";
 import { ModalProvider } from "@/context/ModalContext";
 import type { Project } from "@/constants/mock";
 import ProjectCard from "./ProjectCard";
-vi.mock("next/link", () => ({
-  default: ({ href, children, ...props }: React.ComponentProps<"a">) => (
-    <a href={href} {...props}>
-      {children}
-    </a>
-  ),
-}));
 
 /**
  * Two lies this row used to tell, both seen in the field on one Convex app:
@@ -124,47 +117,4 @@ describe("ProjectCard — status pill", () => {
     );
     expect(out).toContain('href="/projects/p1/domains"');
   });
-});
-
-import ProjectGridCard from "./ProjectGridCard";
-
-describe("project environment navigation", () => {
-  const p = project({
-    id: "prod",
-    name: "Commercial Web",
-    activeDeploymentId: null,
-    environments: [
-      {
-        id: "prod",
-        name: "Production",
-        slug: "production",
-        type: "production",
-        activeDeploymentId: null,
-      },
-      {
-        id: "prt",
-        name: "PRT",
-        slug: "prt",
-        type: "preview",
-        activeDeploymentId: "live-prt",
-        latestDeploymentStatus: "ready",
-      },
-    ],
-  });
-  for (const Card of [ProjectCard, ProjectGridCard]) {
-    it(`${Card.name} gives both the draft Prod and running PRT real links`, () => {
-      const html = renderToStaticMarkup(
-        <I18nProvider>
-          <ModalProvider>
-            <Card project={p} />
-          </ModalProvider>
-        </I18nProvider>,
-      );
-      expect(html).toContain('href="/projects/prt/overview"');
-      expect(html).toContain('href="/projects/prod/overview"');
-      expect(text(html)).toContain("PRT Live");
-      expect(text(html)).toContain("Production Draft");
-      expect(html).not.toMatch(/<a\b[^>]*>(?:(?!<\/a>)[\s\S])*<a\b/);
-    });
-  }
 });

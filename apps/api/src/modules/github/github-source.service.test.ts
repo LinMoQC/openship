@@ -39,11 +39,11 @@ vi.mock("@repo/db", () => ({
     },
   },
 }));
-vi.mock("../../lib/credential-encryption", () => ({
+vi.mock("@repo/platform/engine/lib/credential-encryption", () => ({
   encryptSecretField: h.encrypt,
   decryptSecretField: h.decrypt,
 }));
-vi.mock("../../lib/public-url", () => ({
+vi.mock("@repo/platform/engine/lib/public-url", () => ({
   getInstanceReachability: vi.fn(async () => ({
     configured: true,
     url: "https://ship.example",
@@ -51,14 +51,14 @@ vi.mock("../../lib/public-url", () => ({
   resolveDashboardPublicUrl: vi.fn(() => "https://ship.example"),
   sharedWebhookUrl: vi.fn(() => "https://ship.example/api/webhooks/github"),
 }));
-vi.mock("./github.app-client", () => ({ githubAppFetch: h.appFetch }));
-vi.mock("./github.auth", () => ({ invalidateOrgGitHubCache: h.invalidateOrg }));
+vi.mock("@repo/platform/engine/modules/github/github.app-client", () => ({ githubAppFetch: h.appFetch }));
+vi.mock("@repo/platform/engine/modules/github/github.auth", () => ({ invalidateOrgGitHubCache: h.invalidateOrg }));
 
 import {
   beginGitHubManifestFlow,
   convertGitHubManifest,
   createManualGitHubSource,
-} from "./github-source.service";
+} from "@repo/platform/engine/modules/github/github-source.service";
 
 const now = new Date("2026-01-01T00:00:00.000Z");
 const ctx = {
@@ -202,7 +202,7 @@ describe("workspace GitHub source service", () => {
         pull_requests: "read",
         statuses: "write",
       },
-      default_events: ["check_run", "installation", "pull_request", "push"],
+      default_events: ["check_run", "pull_request", "push"],
     });
     expect(h.stateCreate).toHaveBeenCalledWith(
       expect.objectContaining({

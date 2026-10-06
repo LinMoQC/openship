@@ -17,6 +17,7 @@
  */
 
 import { buildMailImageRef, safeErrorMessage, mailHostname } from "@repo/core";
+import { DEFAULT_CONTAINER_LOG_ARGS } from "../../container-logging";
 import type { CommandExecutor, LogEntry } from "../../types";
 import type { SystemLog, SystemLogCallback } from "../types";
 import { sq } from "../local-shell";
@@ -31,7 +32,7 @@ import {
 } from "../managed-image";
 import { dirOf, elevatedExecutor } from "../elevated-executor";
 import { resolveEnvironment } from "../environment";
-import { waitForPortListening } from "../port-listen";
+import { waitForPortListening, probePortListeningOnce } from "../port-listen";
 import { rootOrDegrade } from "../privilege";
 import {
   MAIL_CONTAINER,
@@ -44,7 +45,10 @@ import {
   MAIL_DB_NAME,
   MAIL_DB_USER,
   MAIL_DB_HOST_BIND,
-  MAIL_DB_PORT,
+  MAIL_DB_FALLBACK_PORT,
+  MAIL_DB_PORT_RANGE_MAX,
+  MAIL_DB_INTERNAL_PORT,
+  resolveMailDbPort,
   type MailMount,
 } from "../../infra/mail-container";
 
@@ -99,15 +103,17 @@ export interface ContainerMailOptions {
   image?: string;
   container?: string;
   dbContainer?: string;
+  /**
+   * Host port for the PostgreSQL sidecar. Defaults to `OPENSHIP_MAIL_DB_PORT`
+   * if set in the environment, otherwise 5432.
+   */
+  dbPort?: number;
   /** How long to wait for the mail ports before calling the start a failure. */
   verifyTimeoutMs?: number;
 }
 
 /** Is a container present (running or stopped)? */
-async function containerExists(
-  executor: CommandExecutor,
-  container: string,
-): Promise<boolean> {
+async function containerExists(executor: CommandExecutor, container: string): Promise<boolean> {
   return (await containerState(executor, container)) !== null;
 }
 
@@ -130,7 +136,11 @@ function pullFailureMessage(image: string, output: string): string {
       .filter(Boolean)
       .pop() ?? "";
 
-  if (/manifest unknown|manifest for .* not found|not found: manifest|repository .* not found/.test(text)) {
+  if (
+    /manifest unknown|manifest for .* not found|not found: manifest|repository .* not found/.test(
+      text,
+    )
+  ) {
     return (
       `The mail engine image ${image} isn't in the registry. ` +
       "The engine image isn't published yet, so a server can only run it from a local " +
@@ -143,7 +153,11 @@ function pullFailureMessage(image: string, output: string): string {
       "Log this server's Docker into that registry, or set OPENSHIP_MAIL_IMAGE to one it can read."
     );
   }
-  if (/timeout|timed out|no such host|temporary failure|network is unreachable|connection refused|i\/o timeout|tls|certificate/.test(text)) {
+  if (
+    /timeout|timed out|no such host|temporary failure|network is unreachable|connection refused|i\/o timeout|tls|certificate/.test(
+      text,
+    )
+  ) {
     return (
       `This server couldn't reach the registry to pull ${image} (${lastLine || "network error"}). ` +
       "Check its outbound network/DNS and proxy settings, then retry."
@@ -374,15 +388,121 @@ async function retainedDbPassword(
   );
 }
 
+/**
+ * For an existing initialised cluster, read the retained database port from ENGINE_ENV_FILE.
+ * Preserving the previously assigned port prevents repairs/restarts from drifting ports.
+ */
+export async function retainedDbPort(
+  executor: CommandExecutor,
+  onLog?: SystemLogCallback,
+): Promise<number | null> {
+  const initialised = await executor
+    .exec(`test -s ${sq(`${MAIL_DB_HOST_DATA_DIR}/pgdata/PG_VERSION`)} && echo yes || true`)
+    .then((out) => out.trim() === "yes")
+    .catch(() => false);
+  if (!initialised) return null;
+
+  const retained = await readEnvFileValue(executor, ENGINE_ENV_FILE, "OPENSHIP_MAIL_DB_PORT");
+  if (!retained) return null;
+  const n = resolveMailDbPort(retained);
+
+  onLog?.(
+    log(
+      `Reusing existing mail database port ${n} — ${MAIL_DB_HOST_DATA_DIR} already holds ` +
+        `an initialised cluster.`,
+    ),
+  );
+  return n;
+}
+
+/**
+ * Resolve an available host loopback port for the mail database sidecar.
+ * If the preferred port is free, returns it. If the default 5432 is occupied and
+ * the port was not explicitly specified, scans up to MAIL_DB_PORT_RANGE_MAX (5460)
+ * for the first available port.
+ */
+export async function findAvailableMailDbPort(
+  executor: CommandExecutor,
+  preferredPort: number,
+  isExplicit: boolean,
+  onLog: SystemLogCallback,
+): Promise<number> {
+  resolveMailDbPort(preferredPort);
+  const probe = await probePortListeningOnce(executor, preferredPort);
+  if (probe !== true) {
+    if (probe === null)
+      onLog(
+        log(
+          `Could not probe mail database port ${preferredPort}; Docker will validate the binding.`,
+          "warn",
+        ),
+      );
+    return preferredPort;
+  }
+
+  // If the user explicitly configured this port, do not auto-switch ports
+  if (isExplicit) {
+    throw new Error(
+      `Configured mail database port ${preferredPort} is already in use. Choose a free OPENSHIP_MAIL_DB_PORT.`,
+    );
+  }
+
+  // Auto-discovery: default port is occupied; scan candidate range 5433..5460
+  for (let port = MAIL_DB_FALLBACK_PORT; port <= MAIL_DB_PORT_RANGE_MAX; port++) {
+    const candidate = await probePortListeningOnce(executor, port);
+    if (candidate === false) {
+      onLog(
+        log(
+          `Default PostgreSQL port ${preferredPort} is in use on this host. ` +
+            `Automatically selected available port ${port} for the mail database ` +
+            `(can be overridden via OPENSHIP_MAIL_DB_PORT).`,
+          "warn",
+        ),
+      );
+      return port;
+    }
+  }
+
+  throw new Error(
+    `No free mail database port was found in ${preferredPort}, ${MAIL_DB_FALLBACK_PORT}-${MAIL_DB_PORT_RANGE_MAX}. Set OPENSHIP_MAIL_DB_PORT to a free port.`,
+  );
+}
+
+/** Inspect the existing sidecar without changing it or reading root-only files. */
+async function containerDbPort(
+  executor: CommandExecutor,
+  container: string,
+): Promise<number | null> {
+  const raw = await executor
+    .exec(`docker inspect -f '{{json .HostConfig.PortBindings}}' ${sq(container)} 2>/dev/null`)
+    .catch(() => "");
+  if (!raw.trim()) return null;
+  let bindings: Record<string, Array<{ HostIp?: string; HostPort?: string }>>;
+  try {
+    bindings = JSON.parse(raw);
+  } catch {
+    throw new Error("Could not read the mail database container's port bindings.");
+  }
+  const binding = bindings?.[`${MAIL_DB_INTERNAL_PORT}/tcp`];
+  if (binding?.length !== 1 || binding[0].HostIp !== MAIL_DB_HOST_BIND || !binding[0].HostPort) {
+    throw new Error(
+      "The mail database container must publish one PostgreSQL port on host loopback.",
+    );
+  }
+  return resolveMailDbPort(binding[0].HostPort);
+}
+
 /** `docker run` argv for the Postgres sidecar (loopback-published, bind-mounted data). */
-function buildDbRunCommand(container: string): string {
+export function buildDbRunCommand(container: string, dbPort: number = resolveMailDbPort()): string {
+  resolveMailDbPort(dbPort);
   return [
     "docker run -d",
     `--name ${sq(container)}`,
     "--restart unless-stopped",
+    ...DEFAULT_CONTAINER_LOG_ARGS,
     `--env-file ${sq(DB_ENV_FILE)}`,
     `-e ${sq(`PGDATA=${MAIL_DB_PGDATA}`)}`,
-    `-p ${sq(`${MAIL_DB_HOST_BIND}:${MAIL_DB_PORT}:${MAIL_DB_PORT}`)}`,
+    `-p ${sq(`${MAIL_DB_HOST_BIND}:${dbPort}:${MAIL_DB_INTERNAL_PORT}`)}`,
     `-v ${sq(`${MAIL_DB_HOST_DATA_DIR}:${MAIL_DB_CONTAINER_DATA_DIR}:z`)}`,
     sq(MAIL_DB_IMAGE),
   ].join(" ");
@@ -402,6 +522,7 @@ export function buildMailRunCommand(container: string, image: string, hostname?:
     "--network host",
     hostname ? `--hostname ${sq(hostname)}` : "",
     "--restart unless-stopped",
+    ...DEFAULT_CONTAINER_LOG_ARGS,
     "--cap-add NET_ADMIN",
     `--env-file ${sq(ENGINE_ENV_FILE)}`,
     mounts,
@@ -416,11 +537,15 @@ async function startDb(
   executor: CommandExecutor,
   container: string,
   onLog: SystemLogCallback,
+  dbPort: number = resolveMailDbPort(),
 ): Promise<boolean> {
   await executor.exec(`docker rm -f ${sq(container)} 2>/dev/null || true`).catch(() => {});
-  const run = await executor.streamExec(buildDbRunCommand(container), onLog as (l: LogEntry) => void);
+  const run = await executor.streamExec(
+    buildDbRunCommand(container, dbPort),
+    onLog as (l: LogEntry) => void,
+  );
   if (run.code !== 0) return false;
-  const listening = await waitForPortListening(executor, MAIL_DB_PORT, { timeoutMs: 60_000 });
+  const listening = await waitForPortListening(executor, dbPort, { timeoutMs: 60_000 });
   // checked:false = inconclusive probe; don't fail the DB on a missing /proc read.
   return !(listening.checked && !listening.listening);
 }
@@ -614,7 +739,13 @@ export async function ensureContainerMail(
   const retainedRoot = await retainedDbPassword(hostState, onLog);
   const dbRootPassword =
     retainedRoot ?? opts.secrets.PGSQL_ROOT_PASSWD ?? opts.secrets.VMAIL_DB_ADMIN_PASSWD ?? "";
-
+  const isExplicitPort =
+    opts.dbPort !== undefined || Boolean(process.env.OPENSHIP_MAIL_DB_PORT?.trim());
+  const preferredPort = resolveMailDbPort(opts.dbPort);
+  const retainedPort =
+    (await retainedDbPort(hostState, onLog)) ?? (await containerDbPort(executor, dbContainer));
+  const dbPort =
+    retainedPort ?? (await findAvailableMailDbPort(executor, preferredPort, isExplicitPort, onLog));
   await writeEnvFile(hostState, DB_ENV_FILE, {
     POSTGRES_USER: "postgres",
     POSTGRES_DB: MAIL_DB_NAME,
@@ -622,12 +753,12 @@ export async function ensureContainerMail(
   });
   await handOverEnvFile(executor, DB_ENV_FILE, onLog);
   await writeEnvFile(hostState, ENGINE_ENV_FILE, {
+    ...opts.secrets,
     FIRST_DOMAIN: opts.domain,
     OPENSHIP_MAIL_DB_HOST: MAIL_DB_HOST_BIND,
-    OPENSHIP_MAIL_DB_PORT: String(MAIL_DB_PORT),
+    OPENSHIP_MAIL_DB_PORT: String(dbPort),
     OPENSHIP_MAIL_DB_NAME: MAIL_DB_NAME,
     OPENSHIP_MAIL_DB_USER: MAIL_DB_USER,
-    ...opts.secrets,
     // Spread LAST so the retained value wins: the engine's first-boot bootstrap connects
     // as the superuser, and it has to use the password the cluster actually has, not the
     // one this deploy generated.
@@ -638,7 +769,7 @@ export async function ensureContainerMail(
   try {
     // 4. DB sidecar first — the engine's entrypoint blocks on it.
     onLog(log("Starting the mail database (postgres sidecar)..."));
-    if (!(await startDb(executor, dbContainer, onLog))) {
+    if (!(await startDb(executor, dbContainer, onLog, dbPort))) {
       throw new Error("the mail database container failed to become ready");
     }
 
@@ -711,6 +842,10 @@ export async function startContainerMail(
     };
   }
 
+  const dbPort = await containerDbPort(executor, dbContainer);
+  if (dbPort === null)
+    return { started: false, reason: "Could not determine the existing mail database port." };
+
   // DB sidecar first: the engine's entrypoint blocks on it.
   onLog(log("Starting the mail database (postgres sidecar)..."));
   const db = await executor.streamExec(
@@ -720,10 +855,10 @@ export async function startContainerMail(
   if (db.code !== 0) {
     return { started: false, reason: "the mail database container did not start" };
   }
-  const dbListening = await waitForPortListening(executor, MAIL_DB_PORT, { timeoutMs: 60_000 });
+  const dbListening = await waitForPortListening(executor, dbPort, { timeoutMs: 60_000 });
   // checked:false = inconclusive probe; don't fail on a missing /proc read.
   if (dbListening.checked && !dbListening.listening) {
-    return { started: false, reason: `the mail database is not listening on :${MAIL_DB_PORT}` };
+    return { started: false, reason: `the mail database is not listening on :${dbPort}` };
   }
 
   onLog(log("Starting the mail engine container..."));

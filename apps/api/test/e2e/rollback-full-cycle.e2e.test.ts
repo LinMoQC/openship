@@ -33,14 +33,14 @@ import { join } from "node:path";
 import { createServer } from "node:net";
 import { DockerRuntime, NoopInfraProvider, createHostExecutor } from "@repo/adapters";
 import { repos } from "@repo/db";
-import { encrypt } from "../../src/lib/encryption";
-import { LOCAL_HOST_PORT_TARGET } from "../../src/lib/host-port-target";
+import { encrypt } from "@repo/platform/engine/lib/encryption";
+import { LOCAL_HOST_PORT_TARGET } from "@repo/platform/engine/lib/host-port-target";
 import { describeDockerE2E, requireDocker } from "../helpers/docker-e2e";
 import { seedOrg, seedProject, seedDeployment, setActive } from "../helpers/seed";
 
 const BASE_IMAGE = "busybox:latest";
-const TAG_V1 = "openship/e2e-cycle:v1";
-const TAG_V2 = "openship/e2e-cycle:v2";
+const TAG_V1 = "openship/e2e-cycle:bld_v1";
+const TAG_V2 = "openship/e2e-cycle:bld_v2";
 const APP_PORT = 80;
 
 async function freePort(): Promise<number> {
@@ -212,7 +212,7 @@ describeDockerE2E("full rollback cycle through the real entry point", () => {
       // the physical bind namespace, not by a nullable server-row id.
       hostPortTarget: LOCAL_HOST_PORT_TARGET,
     };
-    vi.doMock("../../src/lib/deployment-runtime", async (importOriginal) => {
+    vi.doMock("@repo/platform/engine/lib/deployment-runtime", async (importOriginal) => {
       const actual = (await importOriginal()) as Record<string, unknown>;
       return {
         ...actual,
@@ -227,7 +227,7 @@ describeDockerE2E("full rollback cycle through the real entry point", () => {
         }),
       };
     });
-    vi.doMock("../../src/lib/controller-helpers", async (importOriginal) => {
+    vi.doMock("@repo/platform/engine/lib/platform-config", async (importOriginal) => {
       const actual = (await importOriginal()) as Record<string, unknown>;
       return {
         ...actual,
@@ -249,7 +249,7 @@ describeDockerE2E("full rollback cycle through the real entry point", () => {
     });
     // 3. GitHub check runs: there's no installation in a test org.
     // Keep everything real except the GitHub calls (no installation in a test org).
-    vi.doMock("../../src/modules/deployments/service-checks", async (importOriginal) => {
+    vi.doMock("@repo/platform/engine/modules/deployments/service-checks", async (importOriginal) => {
       const actual = (await importOriginal()) as Record<string, unknown>;
       return {
         ...actual,
@@ -260,7 +260,7 @@ describeDockerE2E("full rollback cycle through the real entry point", () => {
       };
     });
 
-    rollbackMod = await import("../../src/modules/deployments/rollback");
+    rollbackMod = await import("@repo/platform/engine/modules/deployments/rollback/index");
     ready = true;
   }, 300_000);
 

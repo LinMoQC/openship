@@ -6,22 +6,9 @@
  */
 
 import type { Context, Next } from "hono";
-import { withAdvisoryLock } from "@repo/db";
 import { isValidInvitationId } from "@repo/core";
-import { withKeyedMutex } from "./provision-lock";
-
-function lifecycleLockKey(invitationId: string): string {
-  return `invitation-lifecycle:${invitationId}`;
-}
-
-/** Serialize in-process and across API replicas sharing Postgres. */
-export function withInvitationLifecycleLock<T>(
-  invitationId: string,
-  run: () => Promise<T>,
-): Promise<T> {
-  const key = lifecycleLockKey(invitationId);
-  return withKeyedMutex(key, () => withAdvisoryLock(key, run));
-}
+import { withInvitationLifecycleLock } from "@repo/platform/engine/lib/invitation-lifecycle-lock";
+export { withInvitationLifecycleLock } from "@repo/platform/engine/lib/invitation-lifecycle-lock";
 
 /**
  * Wrap Better Auth's accept/reject/cancel handlers. Invalid request bodies are

@@ -16,10 +16,12 @@ import type {
   ReleaseSource,
   ProjectObjectStorage,
   OpenshipReadiness,
+  ClusterWorkloadConfig,
 } from "@repo/core";
 import { organization } from "./organization";
 import { service } from "./service";
 import { servers } from "./servers";
+import { computeCluster } from "./compute-cluster";
 
 // ─── Project apps ────────────────────────────────────────────────────────────
 
@@ -181,6 +183,21 @@ export const project = pgTable(
     composePath: text("compose_path"),
     /** Start command for production runtime */
     startCommand: text("start_command"),
+    /**
+     * Commands run ONCE per deploy, between a successful build and the cutover
+     * to the new version — `php artisan migrate --force`, `rails db:migrate`.
+     * A non-zero exit fails the deploy, so the previous version
+     * keeps serving.
+     *
+     * A LIST rather than one `&&`-chained string (the shape `startCommand` and
+     * `workspacePrepareCommand` take): each entry is logged and attributed
+     * separately, and a framework's release set is several independent steps.
+     * NULL = no release phase, which is the default for every project and is
+     * byte-identical to the behaviour before this column existed. Seeded from
+     * `openship.json`'s `releaseCommands`; snapshotted onto each deployment so a
+     * redeploy of an old release replays the commands as they were.
+     */
+    releaseCommands: jsonb("release_commands").$type<string[] | null>(),
     /** Docker image for build environment (e.g. node:22, oven/bun:latest) */
     buildImage: text("build_image"),
     /** Production mode: host, static, standalone */
@@ -291,27 +308,20 @@ export const project = pgTable(
     workloadType: text("workload_type"),
     /**
      * How many past releases stay restorable. Explicit operator override;
-     * NULL = AUTO — use `rollbackWindowComputed` (sized from the deploy
-     * host's free disk), falling back to
-     * `instance_settings.default_rollback_window`. Resolved in exactly one
+     * NULL inherits `instance_settings.default_rollback_window` (default 5).
+     * Active and pinned releases are excluded from the count. Resolved in one
      * place: `resolveRollbackWindow` (modules/deployments/release-retention.ts).
      */
     rollbackWindow: integer("rollback_window"),
     /**
-     * The auto-sized window, recomputed once per successful deploy from
-     * `snapshotSizeBytes` + the host's free disk (see computeAutoRollbackWindow
-     * in @repo/core). Persisted so retention prune, the image GC and the deploy
-     * wizard's label all read it with zero I/O. Null = never measured.
+     * Legacy automatic window. Kept for database compatibility, but ignored:
+     * measured disk capacity must never override the configured retention limit.
      */
     rollbackWindowComputed: integer("rollback_window_computed"),
-    /** Mean on-disk size of ONE retained release for this project, in bytes
-     *  (measured from the project's own built images). Null = never measured. */
+    /** Mean size of this project's built images in bytes, including shared
+     *  layers. Informational, not a total release size. Null = never measured. */
     snapshotSizeBytes: bigint("snapshot_size_bytes", { mode: "number" }),
-    /** When the auto window was last sized — i.e. the last time BOTH the
-     *  snapshot size and the host's free disk were readable. A deploy whose disk
-     *  probe failed still refreshes `snapshotSizeBytes` and leaves this (and
-     *  `rollbackWindowComputed`) alone, so "auto" is never claimed on a figure we
-     *  didn't measure. */
+    /** Last successful image-size measurement. */
     capacityMeasuredAt: timestamp("capacity_measured_at"),
     /**
      * Retention preference for this project's rollback artifacts:
@@ -425,6 +435,9 @@ export const project = pgTable(
      * server unbinds its projects rather than cascade-deleting them.
      */
     serverId: text("server_id").references(() => servers.id, { onDelete: "set null" }),
+    /** Kubernetes deployment binding; independent from the Edge/build host. */
+    clusterId: text("cluster_id").references(() => computeCluster.id, { onDelete: "restrict" }),
+    clusterConfig: jsonb("cluster_config").$type<ClusterWorkloadConfig | null>(),
 
     /**
      * User-chosen internal DNS alias for a single-app native project. Resolves
@@ -497,6 +510,7 @@ export const project = pgTable(
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
   },
   (table) => [
+    index("project_cluster_idx").on(table.clusterId).where(sql`${table.clusterId} IS NOT NULL`),
     uniqueIndex("uq_project_app_environment_slug_active")
       .on(table.groupId, table.environmentSlug)
       .where(sql`${table.deletedAt} IS NULL`),

@@ -7,7 +7,6 @@
     "monthsFree": 2
   },
   "oblien": {
-    "buildWorkspaceHeadroom": 2,
     "buildResources": {
       "cpuCores": 4,
       "memoryMb": 8192,
@@ -35,10 +34,10 @@
         ],
         "services": false,
         "runningServices": 0,
-        "maxProjects": 3,
+        "maxProjects": 0,
         "maxResourceTier": "low",
         "computeMinutesPerMonth": 0,
-        "buildMinutesPerMonth": 500,
+        "buildMinutesPerMonth": 0,
         "freeSubdomains": 10,
         "customDomains": null,
         "seats": null
@@ -49,7 +48,20 @@
         "projects",
         "freeSubdomains",
         "communitySupport"
-      ]
+      ],
+      "billing": {
+        "creditsPerCycle": 0,
+        "yearlyCreditsPerCycle": null,
+        "overdraft": 0,
+        "suspendThreshold": 0,
+        "onOverdraftAction": "stop_workspaces",
+        "resourceLimits": {
+          "max_workspaces": 2,
+          "max_vcpus": null,
+          "max_ram_mb": null,
+          "max_disk_gb": null
+        }
+      }
     },
     {
       "id": "starter",
@@ -75,7 +87,7 @@
         "runningServices": 3,
         "maxProjects": 10,
         "maxResourceTier": "medium",
-        "computeMinutesPerMonth": 150000,
+        "computeMinutesPerMonth": null,
         "buildMinutesPerMonth": 3000,
         "freeSubdomains": 25,
         "customDomains": null,
@@ -85,12 +97,24 @@
         "everythingIn",
         "anyWorkload",
         "runningServices",
-        "computeMinutes",
         "buildMinutes",
         "power",
         "projects",
         "emailSupport"
-      ]
+      ],
+      "billing": {
+        "creditsPerCycle": 1200,
+        "yearlyCreditsPerCycle": null,
+        "overdraft": 0,
+        "suspendThreshold": 0,
+        "onOverdraftAction": "stop_workspaces",
+        "resourceLimits": {
+          "max_workspaces": 5,
+          "max_vcpus": null,
+          "max_ram_mb": null,
+          "max_disk_gb": null
+        }
+      }
     },
     {
       "id": "pro",
@@ -116,7 +140,7 @@
         "runningServices": 10,
         "maxProjects": 50,
         "maxResourceTier": "high",
-        "computeMinutesPerMonth": 600000,
+        "computeMinutesPerMonth": null,
         "buildMinutesPerMonth": 12000,
         "freeSubdomains": 100,
         "customDomains": null,
@@ -125,12 +149,24 @@
       "features": [
         "everythingIn",
         "runningServices",
-        "computeMinutes",
         "buildMinutes",
         "power",
         "projects",
         "prioritySupport"
-      ]
+      ],
+      "billing": {
+        "creditsPerCycle": 3000,
+        "yearlyCreditsPerCycle": null,
+        "overdraft": 0,
+        "suspendThreshold": 0,
+        "onOverdraftAction": "stop_workspaces",
+        "resourceLimits": {
+          "max_workspaces": 12,
+          "max_vcpus": null,
+          "max_ram_mb": null,
+          "max_disk_gb": null
+        }
+      }
     },
     {
       "id": "team",
@@ -156,7 +192,7 @@
         "runningServices": 50,
         "maxProjects": null,
         "maxResourceTier": "xlarge",
-        "computeMinutesPerMonth": 2200000,
+        "computeMinutesPerMonth": null,
         "buildMinutesPerMonth": 36000,
         "freeSubdomains": null,
         "customDomains": null,
@@ -165,13 +201,25 @@
       "features": [
         "everythingIn",
         "runningServices",
-        "computeMinutes",
         "buildMinutes",
         "power",
         "projectsUnlimited",
         "freeSubdomainsUnlimited",
         "prioritySupport"
-      ]
+      ],
+      "billing": {
+        "creditsPerCycle": 15000,
+        "yearlyCreditsPerCycle": null,
+        "overdraft": 0,
+        "suspendThreshold": 0,
+        "onOverdraftAction": "stop_workspaces",
+        "resourceLimits": {
+          "max_workspaces": 52,
+          "max_vcpus": null,
+          "max_ram_mb": null,
+          "max_disk_gb": null
+        }
+      }
     },
     {
       "id": "enterprise",
@@ -210,7 +258,20 @@
         "dedicatedInfra",
         "onboarding",
         "dedicatedSupport"
-      ]
+      ],
+      "billing": {
+        "creditsPerCycle": null,
+        "yearlyCreditsPerCycle": null,
+        "overdraft": 0,
+        "suspendThreshold": 0,
+        "onOverdraftAction": "stop_workspaces",
+        "resourceLimits": {
+          "max_workspaces": null,
+          "max_vcpus": null,
+          "max_ram_mb": null,
+          "max_disk_gb": null
+        }
+      }
     }
   ],
   "creditPacks": [

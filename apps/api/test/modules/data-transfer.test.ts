@@ -11,12 +11,12 @@ import { db, eq, schema } from "@repo/db";
 
 // Skip the full zod-validated env (which refuses to load outside desktop mode
 // without INTERNAL_TOKEN); the crypto helpers only need BETTER_AUTH_SECRET.
-vi.mock("../../src/config/env", () => ({
-  env: { BETTER_AUTH_SECRET: "test-secret-for-data-transfer-unit-tests", CLOUD_MODE: false },
+vi.mock("@repo/platform/engine/config/env", async () => ({
+  env: { BETTER_AUTH_SECRET: process.env.BETTER_AUTH_SECRET ?? (await import("@repo/db/encryption")).DEFAULT_ENCRYPTION_SECRET, CLOUD_MODE: false },
 }));
 
-import { decrypt, encrypt, encryptBytesWithKey, encryptWithKey } from "../../src/lib/encryption";
-import { encryptSecretField, decryptSecretField } from "../../src/lib/credential-encryption";
+import { decrypt, encrypt, encryptBytesWithKey, encryptWithKey } from "@repo/platform/engine/lib/encryption";
+import { encryptSecretField, decryptSecretField } from "@repo/platform/engine/lib/credential-encryption";
 import {
   sealSecretBundle,
   openSecretBundle,
@@ -136,7 +136,7 @@ describe("passphrase-crypto", () => {
     expect(() => openSecretBundle(sealed, "wrong")).toThrow(WrongPassphraseError);
   });
 
-  it("requires a transfer secret whenever the export contains credentials", () => {
+  it("requires a password when the export contains sealed credentials", () => {
     const sealed = sealSecretBundle(bundle, "correct horse");
     expect(() => openTransferSecrets(sealed)).toThrow(WrongPassphraseError);
     expect(openTransferSecrets(null)).toBeNull();
@@ -225,6 +225,18 @@ describe("one-time direct instance transfer", () => {
     await expect(sendDirectTransfer({ code: differentWorkerCode })).rejects.toThrow(
       "same instance",
     );
+  });
+
+  it("rejects project direct transfers before contacting the destination", async () => {
+    const fetchImpl = vi.fn();
+    await expect(
+      sendDirectTransfer({
+        code: "unused",
+        selection: { scope: "projects", projectIds: ["project_1"], history: [] },
+        fetchImpl,
+      }),
+    ).rejects.toThrow("download an export file");
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it("uses bounded chunks and safely retries an ambiguous finalization", async () => {
@@ -566,7 +578,7 @@ describe("one-time direct instance transfer", () => {
     const file = {
       kind: "openship-instance-export",
       envelopeVersion: 1,
-      dump: { scope: { kind: "instance" }, tables: {} },
+      dump: { formatVersion: 1, scope: { kind: "instance" }, tables: {} },
     } as unknown as DataTransferFile;
     await expect(
       importPreparedInstance({
@@ -601,6 +613,15 @@ describe("one-time direct instance transfer", () => {
 });
 
 describe("secret-codec round-trips (extract → seal → decrypt)", () => {
+  it.each(["secretEncrypted", "envValueEncrypted"])("transfers cluster database %s with the same cipher as its writer", (column) => {
+    const registered = SECRET_COLUMNS.find((entry) => entry.sqlName === "cluster_database" && entry.column === column)!;
+    expect(registered.scheme).toBe("scalar");
+    const plaintext = column === "secretEncrypted" ? "database-password" : "postgresql://app:password@database.private/app";
+    const entry = extractPlaintext(registered, "database", encrypt(plaintext));
+    expect(entry?.value).toBe(plaintext);
+    expect(decrypt(sealForInstance(registered, entry!) as string)).toBe(plaintext);
+  });
+
   it("scalar", () => {
     const stored = encrypt("db-url");
     const entry = extractPlaintext(spec("scalar", "value"), "id1", stored);

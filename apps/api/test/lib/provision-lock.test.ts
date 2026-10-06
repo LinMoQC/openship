@@ -6,7 +6,7 @@ vi.mock("@repo/db", () => ({
   withAdvisoryLock: <T>(_scopeKey: string, fn: () => Promise<T>) => fn(),
 }));
 
-import { createProvisionLock } from "../../src/lib/provision-lock";
+import { createProvisionLock } from "@repo/platform/engine/lib/provision-lock";
 
 describe("createProvisionLock", () => {
   it("serializes concurrent run() for the same scope (no overlap)", async () => {

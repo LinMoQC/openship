@@ -54,8 +54,6 @@ Setup** form. If you already run **several** mail servers, you'll see a list of 
 server** to start another. (With a single existing server, Openship opens it straight to its admin panel; use
 the **Add mail server** button there to set up another.)
 
-<Callout title="Screenshot">The **Emails** page showing the "Mail Server Setup" form (server picker, Domain field, Admin Password field). *(screenshot pending)*</Callout>
-
 </Step>
 
 <Step>
@@ -101,8 +99,6 @@ record (things like MX, SPF, DKIM, and DMARC) — each with a **Copy value** but
 Go to wherever your domain's DNS is managed, add each record, and come back. Then click **I've set the records
 - continue**.
 
-<Callout title="Screenshot">The DNS hold banner on the Emails page: the "Publish DNS records" heading with a card per record and copy buttons. *(screenshot pending)*</Callout>
-
 <Callout title="Why this matters" type="info">
 Email delivery breaks without these records — they're how Gmail and Outlook decide your mail is real and not
 spam. If you host DNS at a supported provider, the banner also offers **Auto-configure DNS**, which pushes the
@@ -120,8 +116,6 @@ your **VPS provider's panel** (Hostinger, DigitalOcean, AWS, and so on), **not**
 
 The banner shows your server's IP address and the value to point it at (`mail.yourdomain`). Set it there, wait
 a few minutes for it to take effect, then click **I've set the PTRs - continue**.
-
-<Callout title="Screenshot">The PTR hold banner showing the server IP, the target `mail.<domain>` value, and the "I've set the PTRs - continue" button. *(screenshot pending)*</Callout>
 
 <Callout title="Reverse DNS in one line" type="info">
 Normal DNS turns a name into an IP address; reverse DNS (a **PTR** record) turns the IP back into a name. Big
@@ -170,8 +164,6 @@ server. It's organized into tabs:
 - **Advanced** — the IMAP/SMTP connection settings for wiring up a mail app by hand, plus power-user actions
   like restarting the stack or re-running the wizard.
 
-<Callout title="Screenshot">The mail admin panel on the Emails page: the tab bar (Overview, Domains, Mailboxes, Aliases, Notifications, Sending, DNS, Health, Backup, Advanced) with the Overview tab open. *(screenshot pending)*</Callout>
-
 <Callout title="Adding a second domain" type="info">
 When you add a domain under the **Domains** tab, Openship generates its DNS records (including a fresh DKIM
 key). Publish those at your DNS provider — the **DNS** tab shows them and can verify them — before you rely on
@@ -208,8 +200,6 @@ Two choices:
 
 The summary panel on the right restates your target and domain.
 
-<Callout title="Screenshot">The "Deploy webmail" screen: the "Deploy to" option cards, the Domain field, and the summary panel with the "Deploy webmail" button. *(screenshot pending)*</Callout>
-
 </Step>
 
 <Step>
@@ -231,7 +221,7 @@ before the button does anything: the old webmail's project, container and sign-i
 domains and every message stay on the mail server, untouched — everyone just signs in to the new inbox again.
 </Callout>
 
-## Prefer the terminal?
+## CLI
 
 The provisioning flow works from the CLI too (webmail deploy is dashboard-only for now). Every `mail` command
 is self-hosted only.
@@ -261,7 +251,7 @@ When the install pauses, the CLI prints the exact `--start-step` number to resum
 `mail setup` command and it picks up right where it left off.
 </Callout>
 
-## If something goes wrong
+## Troubleshooting
 
 <Callout title="I don't see an “Emails” item in the sidebar" type="warn">
 Email is self-hosted only. It appears when Openship is running on your own infrastructure. On a managed/cloud
@@ -298,7 +288,7 @@ DNS changes can take a few minutes (sometimes longer) to spread. Give it time, t
 tab. Double-check you pasted the value exactly and added it to the right domain.
 </Callout>
 
-## What next?
+## Related guides
 
 <Cards>
   <Card title="Custom domains" href="/docs/guides/custom-domains" description="How DNS and automatic HTTPS work for your apps — useful background for the mail DNS steps." />

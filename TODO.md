@@ -106,7 +106,7 @@ email + password.
 
 What's already there:
 
-- better-auth with the org plugin in `apps/api/src/lib/auth.ts`. The installed
+- better-auth with the org plugin in `packages/platform/src/engine/lib/auth.ts`. The installed
   plugin set includes **`generic-oauth`** — arbitrary OIDC/OAuth2 issuers, no new
   dependency. That's the cheap path.
 - Not `better-auth/plugins/oidc-provider` — that makes Openship *an* IdP, the
@@ -118,15 +118,12 @@ What's already there:
 
 The prerequisite nobody expects:
 
-- [ ] **The button can't just be added.** Social login is hidden on self-hosted
-      outright today — `{!selfHosted && <OAuthButtons/>}` at
-      `apps/dashboard/src/app/(auth)/login/page.tsx:312` and
-      `register/page.tsx` — because an operator with no `GITHUB_CLIENT_ID`
-      would get buttons that fail, and **nothing tells the dashboard which
-      providers are configured**. `OAuthButtons` hardcodes github+google. SSO
-      needs a server-advertised provider list (public, read-only, alongside the
-      `authMode`/`selfHosted` values `useAuthContext` already serves). That
-      endpoint doesn't exist yet and is the real first task.
+- [x] **Advertise configured login providers.** Shared system info and
+      `GET /health/env` expose `authProviders` (IDs and kinds only). The engine's
+      `auth-providers.ts` supplies the same credential predicate to Better Auth;
+      login and registration render only supported, advertised providers.
+      This completes discovery for existing GitHub/Google login. OIDC/SAML
+      integration and its account policies remain separate work.
 
 Decisions to settle before coding:
 
@@ -227,9 +224,9 @@ What actually hardcodes GitHub — each is a decision, not a rename:
       already covers the generic case; GitLab releases would be a third mode.
 - [ ] **Dashboard speaks GitHub throughout**: `ServerGitHubConnect`,
       `GithubPermissionModal`, `DeployCredentialModal`, the deploy wizard's
-      import step, `ResourcePicker`. Needs a server-advertised provider list —
-      the SAME missing primitive as the SSO item above (`OAuthButtons` hardcodes
-      github+google). Build that endpoint once and both features use it.
+      import step, `ResourcePicker`. Git-provider capabilities still need a
+      server-advertised list; the existing `authProviders` field covers login
+      providers only and must not be used as a list of repository integrations.
 - [ ] **`gh` CLI as an ambient identity** (`sources/gh-cli-source.ts`,
       `github.local-auth.ts` parses `oauth_token` under `github.com:` in
       hosts.yml) has no equivalent worth matching. `glab` exists; decide
@@ -417,23 +414,26 @@ the JS asset stage also landed; the storage section below has what's left of tho
 ### A generic release phase
 
 Commands that run ONCE per deploy, after build and before cutover, failing the
-deploy on error. `queue:work`, `schedule:run`, `migrate --force`, `optimize` and
-`storage:link` appear nowhere in the tree today, so migrations, scheduled tasks
-and queued jobs silently never run.
+deploy on error.
 
-- [ ] Add release commands to the project + `openship.json`, snapshot them onto
-      the deployment, and run them from the deploy pipeline between build and
-      activate (`apps/api/src/modules/deployments/build-pipeline.ts` — the same
-      seam `deployConfig` is assembled in).
-- [ ] Laravel's set for 13.x: `migrate --force`, `optimize` (config/events/routes/
-      views), `storage:link`, and `reload` (13's umbrella for cycling long-running
-      services — supersedes `queue:restart` for deploys, also covers Reverb and
-      Octane).
-- [ ] Not the same thing as `#206` deploy hooks: those are an inbound trigger that
-      STARTS a deploy; this runs DURING one.
-- [ ] Until this exists, a stock SQLite Laravel app still needs its migrations run
-      by hand (the service terminal can do it) — a persistent volume stops data
-      LOSS, it doesn't bootstrap a schema.
+**Implemented (v1).** Optional ordered `releaseCommands` are stored on the project,
+frozen on deployment snapshots, and run by the shared engine after the candidate build
+and before activation. Configure them in the existing build wizard, `openship.json`, or
+API/SDK. Nothing is injected per framework.
+
+Docker uses temporary containers with the candidate image, shared runtime env/mount helpers,
+and connected-service networks. Bare links persistent paths before executing against the
+staged artifact. Failure, cancellation, or timeout prevents activation. Commands run
+outside the server's port-allocation lock, under the project's execution lease. Code
+rollbacks skip them and do not undo database changes; commands must be idempotent and
+compatible with the previous app.
+
+- [x] Shared configuration through source scans, native/HTTP SDK, and dashboard.
+- [x] Runtime and pipeline behavior tests, including failure/cancellation cleanup.
+- [x] Real Docker release tests in the release-gated E2E suite.
+- [x] Unsupported runtimes and full multi-service/static deployments fail before activation.
+- [ ] Per-service release commands for Compose/monorepo deployments.
+- [ ] Worker/scheduler roles remain separate from one-off release commands.
 
 ### Multi-role stacks
 

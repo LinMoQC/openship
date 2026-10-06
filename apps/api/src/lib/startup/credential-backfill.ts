@@ -18,10 +18,10 @@
  */
 
 import { repos, type DnsCredential } from "@repo/db";
-import { registerStartupHook } from "./index";
+import { registerStartupHook } from "@repo/platform/engine/lib/startup/index";
 import { safeErrorMessage } from "@repo/core";
 
-import { decryptSecretField, encryptSecretField } from "../credential-encryption";
+import { decryptSecretField, encryptSecretField } from "@repo/platform/engine/lib/credential-encryption";
 
 /** What the DNS provider entry calls its secret field, per CREDENTIAL_PROVIDERS. */
 const CLOUDFLARE_SECRET_FIELD = "apiToken";

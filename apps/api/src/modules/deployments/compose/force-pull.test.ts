@@ -4,7 +4,7 @@ import {
   deploymentForcesImagePull,
   isPreparedLocalImage,
   isStaticHostArtifact,
-} from "./deploy.service";
+} from "@repo/platform/engine/modules/deployments/compose/deploy.service";
 
 const project = { id: "project-1", slug: "demo" };
 const service = {

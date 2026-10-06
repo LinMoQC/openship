@@ -7,7 +7,7 @@
  */
 
 import { PRICING } from "@repo/core";
-import type { BuildStrategy, ProxySettings } from "@repo/core";
+import type { BuildStrategy, ProxySettings, BuildStep, LogEntry } from "@repo/core";
 import type { Readable, Duplex } from "node:stream";
 export type { BuildStrategy } from "@repo/core";
 
@@ -112,6 +112,9 @@ export interface BuildConfig {
   commitSha?: string;
   /** Absolute path to a local project directory (used instead of repoUrl for local projects) */
   localPath?: string;
+  /** Inline catalog source, written inside a Cloud Docker workspace without
+   * reading a path on the API host. Paths are relative to the shared build root. */
+  inlineSourceFiles?: Array<{ path: string; content: string }>;
   /** Where the build runs: "server" (clone/copy to workspace) or "local" (build on host, transfer dist) */
   buildStrategy?: BuildStrategy;
   /**
@@ -448,43 +451,7 @@ export interface DeploymentResult {
   status: ContainerStatus;
 }
 
-/**
- * Pipeline step identifiers for stepper UI.
- *
- * "prepare" is one-time server provisioning (toolchain install, source
- * transfer) that runs BEFORE the build timer starts — so it's shown as its own
- * phase and excluded from the reported build duration.
- */
-export type BuildStep = "prepare" | "clone" | "install" | "build" | "deploy";
-
-export const BUILD_STEPS: readonly BuildStep[] = [
-  "prepare",
-  "clone",
-  "install",
-  "build",
-  "deploy",
-] as const;
-
-export interface LogEntry {
-  timestamp: string;
-  message: string;
-  level: "info" | "warn" | "error";
-  /** When present, this entry is a step event for the stepper UI */
-  step?: BuildStep;
-  /** Step lifecycle status */
-  stepStatus?: "running" | "completed" | "failed" | "skipped";
-  /** Compose service name when this log belongs to one service. */
-  serviceName?: string;
-  /** Stable id of the service this log belongs to (compose deployments). Routes
-   *  the line to its per-service tab without fragile name matching. */
-  serviceId?: string;
-  /** Pre-encoded base64 data - passed through to SSE without re-encoding. */
-  rawData?: string;
-  /** Monotonic sequence assigned by the session manager at append time, used as
-   *  the SSE event id / client dedup cursor. Decoupled from the ring-buffer
-   *  index so it never plateaus when the buffer trims. */
-  seq?: number;
-}
+export { BUILD_STEPS, type BuildStep, type LogEntry } from "@repo/core";
 
 /**
  * A serialization gate for server/workspace-scoped provisioning. The API injects
@@ -522,6 +489,9 @@ export interface ContainerInfo {
   uptimeSeconds?: number;
   /** Current resource consumption */
   usage?: ResourceUsage;
+  /** Applied limits, independent of usage or the next deployment's settings.
+   * Zero means unlimited; undefined means the runtime could not report them. */
+  resources?: { cpuCores: number; memoryMb: number };
 }
 
 export interface ResourceUsage {
@@ -753,6 +723,13 @@ export interface SslResult {
 
 export type LogCallback = (entry: LogEntry) => void;
 
+export interface RuntimeLogStreamOptions {
+  tail?: number;
+  /** Called once when the source closes without an explicit cleanup.
+   * An error means the transport failed; consumers may reconnect. */
+  onEnd?: (error?: Error) => void;
+}
+
 // ─── SSH configuration ──────────────────────────────────────────────────────
 
 /**
@@ -790,7 +767,9 @@ export interface SshConfig {
   useSystemSsh?: boolean;
   /** Optional jump/bastion host (`ssh -J`). Honored by the system-ssh path. */
   sshJumpHost?: string;
-  /** Extra raw `ssh` CLI arguments. Honored by the system-ssh path. */
+  /** Fixed SSH transport; executable paths and arbitrary proxy commands are never request inputs. */
+  sshTransport?: "direct" | "cloudflare";
+  /** Allowlisted `ssh` connection tuning arguments. Honored by the system-ssh path. */
   sshArgs?: string;
   /**
    * How long to wait for the SSH handshake. Left unset, ssh2's 20s default applies —
@@ -930,6 +909,13 @@ export interface CommandExecutor extends ExecOnly {
 
   /** Clean up connections / resources. */
   dispose(): Promise<void>;
+
+  /**
+   * False when each operation opens its own connection (Windows OpenSSH).
+   * A completed command then proves only past reachability; connection caches
+   * must probe again. Omitted by existing persistent/local executors.
+   */
+  readonly persistentConnection?: boolean;
 
   /**
    * Subscribe to transport-level disconnects (socket close/end/error, or a

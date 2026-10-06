@@ -1,42 +1,33 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { Icon as UiIcon, type IconName } from "@repo/ui/icons";
+
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import {
-  AlertTriangle,
-  CheckCircle2,
-  ChevronDown,
-  ExternalLink,
-  Globe,
-  Info,
-  Link2,
-  Loader2,
-  MonitorSmartphone,
-  Pencil,
-  Plus,
-  RefreshCw,
-  ShieldAlert,
-  ShieldCheck,
-  Star,
-  Trash2,
-} from "lucide-react";
 import { useProjectSettings } from "@/context/ProjectSettingsContext";
 import { RoutingConfigCard } from "./RoutingConfigCard";
 import { RouteRules } from "./RouteRules";
 import { RoutingUnsyncedCallout } from "./RoutingUnsyncedCallout";
 import { invalidateProjectCaches } from "@/hooks/useProjectEndpoints";
-import { getApiErrorMessage, projectsApi, deployApi, domainsApi, serviceKind, servicesApi, type Service, type ServiceInput } from "@/lib/api";
+import { getApiErrorMessage, projectsApi, deployApi, domainsApi, servicesApi, type Service, type ServiceInput } from "@/lib/api";
 import { useToast } from "@/context/ToastContext";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 import type { Dictionary } from "@/i18n";
+import type { DomainDiagnostics } from "@repo/contracts";
 import { usePlatform } from "@/context/PlatformContext";
 import { useCloud } from "@/context/CloudContext";
-import { serviceDisplayHost } from "@/utils/route-display";
 import PublicEndpointsCard from "@/components/routing/PublicEndpointsCard";
 import DnsRecordCard from "@/components/domains/DnsRecordCard";
+import DnsChallengePanel from "@/components/domains/DnsChallengePanel";
 import { AutoDnsPanel } from "@/components/shared/AutoDnsPanel";
 import { RoutingSettingsCard } from "@/components/routing/RoutingSettingsCard";
-import { useEdgeModal, useVerifyModal } from "@/hooks/useSystemPrepareModal";
+import {
+  PrepareStreamContent,
+  useEdgeModal,
+  useVerifyModal,
+  useRoutingRetryModal,
+  type SystemPrepareOptions,
+} from "@/hooks/useSystemPrepareModal";
 import { useLocalhostForward } from "@/hooks/useLocalhostForward";
 import DropdownMenu, { type MenuAction } from "@/components/ui/DropdownMenu";
 import {
@@ -51,6 +42,7 @@ import {
   validatedPublicEndpointPayload,
 } from "@/lib/public-endpoint-payload";
 import { buildOptimisticDomainRow, findLoadedDomainRow } from "./optimistic-domain-row";
+import { configuredServiceEndpoints, serviceEndpointsPatch, servicePortTargets, type ServiceEndpoint } from "@/lib/service-endpoints";
 
 interface DnsRecord {
   type: "CNAME" | "A" | "TXT";
@@ -124,7 +116,15 @@ interface DomainSummaryItem {
    * the operator could see that something broke but never what. Present = the
    * pills become pressable and open the diagnosis.
    */
-  diagnosis?: { message: string | null; attempts: number };
+  diagnosis?: DomainDiagnosis;
+}
+
+interface DomainDiagnosis extends Omit<DomainDiagnostics, "reason" | "retryAction"> {
+  reason: DomainDiagnostics["reason"] | "route_missing";
+  retryAction: DomainDiagnostics["retryAction"] | "retry_routing";
+  message: string | null;
+  attempts: number;
+  lastCheckedAt: string | null;
 }
 
 function toEditablePublicEndpoint(endpoint: any): PublicEndpoint {
@@ -194,22 +194,39 @@ const buildPublicEndpointPayload = validatedPublicEndpointPayload;
 /** Shared with the routing card so both resolve a hostname the same way. */
 const resolveProjectEndpointHostname = resolvePublicEndpointHostname;
 
-function resolveDomainStatus(domain: any, t: Dictionary): { label: string; tone: DomainTone } {
+function describeDomainStatus(
+  domain: any,
+  project: any,
+  t: Dictionary,
+  serviceEnabled = true,
+): Pick<DomainSummaryItem, "status" | "diagnosis"> {
   const s = t.projectSettings.domains.status;
-  if (domain?.verified) {
-    return { label: s.verified, tone: "success" };
-  }
-
-  switch (domain?.status) {
-    case "active":
-      return { label: s.active, tone: "success" };
-    case "failed":
-      return { label: s.failed, tone: "danger" };
-    case "removing":
-      return { label: s.removing, tone: "neutral" };
-    default:
-      return { label: s.pending, tone: "warning" };
-  }
+  const diagnosis = resolveDomainDiagnosis(domain, project);
+  if (!serviceEnabled)
+    return {
+      status: { label: t.projectDetail.services.detail.networking.paused, tone: "neutral" },
+      diagnosis: {
+        message: null,
+        attempts: 0,
+        lastCheckedAt: null,
+        state: "waiting",
+        reason: "disabled",
+        retryAction: null,
+        nextRetryAt: null,
+        automaticRetry: "not_applicable",
+      },
+    };
+  let status: DomainSummaryItem["status"];
+  if (domain?.status === "removing") status = { label: s.removing, tone: "neutral" };
+  else if (!domain?.verified && diagnosis?.state === "failed")
+    status = { label: s.failed, tone: "danger" };
+  else if (!domain?.verified && diagnosis?.state === "waiting")
+    status = { label: s.waiting, tone: "neutral" };
+  else if (domain?.verified) status = { label: s.verified, tone: "success" };
+  else if (diagnosis?.state === "pending") status = { label: s.pending, tone: "warning" };
+  else if (domain?.status === "active") status = { label: s.active, tone: "success" };
+  else status = { label: s.pending, tone: "warning" };
+  return { status, diagnosis };
 }
 
 /**
@@ -218,24 +235,53 @@ function resolveDomainStatus(domain: any, t: Dictionary): { label: string; tone:
  * Only returned for a row that is actually in a bad/incomplete state — a healthy
  * domain's pills stay plain text so a pressable pill always means "there's a
  * reason in here". `message` may be null when the row is merely awaiting its
- * first check (nothing has failed yet); the modal then explains the next step
+ * first check (nothing has failed yet); the details then explain the next step
  * instead of a failure.
  */
-function resolveDomainDiagnosis(
-  domain: any,
-): { message: string | null; attempts: number } | undefined {
-  if (!domain) return undefined;
+function resolveDomainDiagnosis(domain: any, project: any): DomainDiagnosis | undefined {
+  const metadata = {
+    message: typeof domain?.lastVerifyError === "string" ? domain.lastVerifyError : null,
+    attempts: typeof domain?.verifyAttempts === "number" ? domain.verifyAttempts : 0,
+    lastCheckedAt: typeof domain?.lastCheckedAt === "string" ? domain.lastCheckedAt : null,
+  };
+  if (!domain) {
+    const waiting = !project.activeDeploymentId || project.awaitingDecision;
+    return {
+      ...metadata,
+      state: waiting ? "waiting" : "failed",
+      reason: waiting ? "deployment" : "route_missing",
+      retryAction: waiting ? null : "retry_routing",
+      nextRetryAt: null,
+      automaticRetry: "not_applicable",
+    };
+  }
+  if (domain.diagnostics !== undefined)
+    return domain.diagnostics ? { ...domain.diagnostics, ...metadata } : undefined;
+  // Older servers do not expose their scheduler. Retain manual recovery without
+  // inventing a scheduled retry during a dashboard/server upgrade.
   const unhealthy =
     domain.verified === false ||
     domain.status === "pending" ||
     domain.status === "failed" ||
     domain.sslStatus === "error" ||
     domain.sslStatus === "expired" ||
-    domain.sslStatus === "provisioning";
+    domain.sslStatus === "provisioning" ||
+    (domain.verified && domain.sslStatus === "none");
   if (!unhealthy) return undefined;
   return {
-    message: typeof domain.lastVerifyError === "string" ? domain.lastVerifyError : null,
-    attempts: typeof domain.verifyAttempts === "number" ? domain.verifyAttempts : 0,
+    ...metadata,
+    state:
+      metadata.message ||
+      metadata.attempts > 0 ||
+      domain.status === "failed" ||
+      domain.sslStatus === "error" ||
+      domain.sslStatus === "expired"
+        ? "failed"
+        : "waiting",
+    reason: domain.verified ? "certificate" : "verification",
+    retryAction: domain.manualSsl ? "verify_ssl" : "verify",
+    nextRetryAt: null,
+    automaticRetry: "unavailable",
   };
 }
 
@@ -245,6 +291,9 @@ function resolveDomainSsl(hostname: string, domain: any, baseDomain: string, t: 
     return { label: s.includedByHost, tone: "success" };
   }
 
+  if (domain?.sslExpiresAt && new Date(domain.sslExpiresAt).getTime() <= Date.now()) {
+    return { label: s.expired, tone: "danger" };
+  }
   switch (domain?.sslStatus) {
     case "active":
       // Operator-supplied cert (BYO / Origin CA) — flag it so the user knows
@@ -263,7 +312,13 @@ function resolveDomainSsl(hostname: string, domain: any, baseDomain: string, t: 
   }
 }
 
-export const DomainSettings = () => {
+interface DomainSettingsProps {
+  /** Keep domain management inside a service, with an optional port selected. */
+  serviceScope?: { serviceId: string; port?: number; add?: boolean };
+  onRoutesChanged?: () => void | Promise<void>;
+}
+
+export const DomainSettings = ({ serviceScope, onRoutesChanged }: DomainSettingsProps = {}) => {
   const {
     domainsData,
     updateDomains,
@@ -297,7 +352,105 @@ export const DomainSettings = () => {
   // capability (copy from the shared registry).
   const freeNeedsCloud = () => requireCloud("managed-project-domain", { domain: baseDomain });
   const openEdgeModal = useEdgeModal();
-  const openVerifyModal = useVerifyModal();
+  const [routingOperation, setRoutingOperation] = useState<{
+    id: number;
+    opts: SystemPrepareOptions;
+    running: boolean;
+  } | null>(null);
+  const routingOperationRef = useRef<{ id: number; running: boolean } | null>(null);
+  const routingSequence = useRef(0);
+  const routingLogRef = useRef<HTMLElement>(null);
+  const presentRoutingRetry = useCallback((opts: SystemPrepareOptions) => {
+    // Every domain's Retry opens the same project operation. Repeated clicks
+    // keep its live stream and logs instead of queuing another repair.
+    if (!routingOperationRef.current?.running) {
+      const operation = { id: ++routingSequence.current, running: true };
+      let activeStreams = 0;
+      routingOperationRef.current = operation;
+      setRoutingOperation({
+        id: operation.id,
+        running: true,
+        opts: {
+          ...opts,
+          onStart: () => {
+            activeStreams++;
+            operation.running = true;
+            setRoutingOperation((current) =>
+              current?.id === operation.id ? { ...current, running: true } : current,
+            );
+            opts.onStart?.();
+          },
+          onSettled: () => {
+            // StrictMode may finish an aborted stream after starting its
+            // replacement. Only the last settlement makes this operation idle.
+            operation.running = --activeStreams > 0;
+            setRoutingOperation((current) =>
+              current?.id === operation.id ? { ...current, running: operation.running } : current,
+            );
+            opts.onSettled?.();
+          },
+        },
+      });
+    }
+    routingLogRef.current?.scrollIntoView?.({ behavior: "smooth", block: "nearest" });
+    return "project-routing-retry";
+  }, []);
+  const closeRoutingLog = useCallback(() => {
+    routingOperationRef.current = null;
+    setRoutingOperation(null);
+  }, []);
+  useEffect(closeRoutingLog, [id, closeRoutingLog]);
+  useEffect(() => {
+    if (routingOperation)
+      routingLogRef.current?.scrollIntoView?.({ behavior: "smooth", block: "nearest" });
+  }, [routingOperation]);
+  const openRoutingRetry = useRoutingRetryModal(presentRoutingRetry);
+  const openVerifyModal = useVerifyModal(presentRoutingRetry);
+  const retryRouting = () =>
+    openRoutingRetry(String(id), {
+      onDone: () =>
+        setProjectData((current) =>
+          current.id === id && current.activeDeploymentId === projectData.activeDeploymentId
+            ? { ...current, routingUnsynced: false, routingWarning: undefined }
+            : current,
+        ),
+    });
+
+  const automaticChecksPending = domainsData.domains.some(
+    (domain) => domain.diagnostics?.nextRetryAt,
+  );
+  useEffect(() => {
+    if (!automaticChecksPending) return;
+    let cancelled = false;
+    let reading = false;
+    const refresh = async () => {
+      if (reading || document.visibilityState === "hidden") return;
+      reading = true;
+      try {
+        const result = await domainsApi.list(String(id));
+        if (!cancelled)
+          updateDomains(
+            result.data.map((domain) => ({
+              ...domain,
+              domain: domain.hostname,
+              primary: domain.isPrimary,
+            })),
+          );
+      } catch {
+        // A failed status read preserves the last known state; it is not a
+        // failed verification and must not change the domain's status.
+      } finally {
+        reading = false;
+      }
+    };
+    const timer = setInterval(() => void refresh(), 30_000);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [id, automaticChecksPending, updateDomains]);
 
   // Live edge health for the server (read-only probe). Drives the button state:
   // "Edge ready" when OpenResty already owns 80/443, else "Set up edge".
@@ -340,6 +493,17 @@ export const DomainSettings = () => {
   );
 
   const [newDomain, setNewDomain] = useState("");
+  const [dnsSetup, setDnsSetup] = useState<{ domainId: string; hostname: string; renew?: boolean } | null>(null);
+  useEffect(() => setDnsSetup(null), [id, serviceScope?.serviceId]);
+  const dnsSetupAnchor = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (dnsSetup) dnsSetupAnchor.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [dnsSetup]);
+  const usesDnsSetup = (hostname: string) => {
+    const row = domainsData.domains.find((item: any) => (item.hostname ?? item.domain) === hostname);
+    return selfHosted && !isCloudProject && !row?.externalIngress && !row?.manualSsl &&
+      (hostname.startsWith("*.") || row?.sslChallenge === "dns-01");
+  };
   // Unified "add domain" = add a route: pick free/custom + the port it maps to.
   // Same model services use; single-app just gets a lighter form.
   const [newDomainType, setNewDomainType] = useState<"free" | "custom">("custom");
@@ -390,27 +554,28 @@ export const DomainSettings = () => {
   const [pendingVerifyDomains, setPendingVerifyDomains] = useState<
     Array<{ id: string; hostname: string }>
   >([]);
-  const [editingRouteServiceId, setEditingRouteServiceId] = useState<string | null>(null);
+  const [editingRouteTarget, setEditingRouteTarget] = useState<DomainSummaryItem | null>(null);
+  const editingRouteServiceId = editingRouteTarget?.serviceId ?? null;
   const [routeSavingServiceId, setRouteSavingServiceId] = useState<string | null>(null);
   // Local draft for the "Edit route" modal — the card edits this in memory; the
   // API is hit ONCE on Save (not on every toggle/keystroke).
   const [routeDraft, setRouteDraft] = useState<{
-    exposed: boolean;
     domainType: "free" | "custom";
     domain: string;
     customDomain: string;
     exposedPort: string;
   } | null>(null);
-  // "Add route" form (services projects): a generic domain → port entry. The
-  // port is matched to the service that owns it; that service is then exposed.
-  const [showAddRoute, setShowAddRoute] = useState(false);
+  // "Add route" form: bind a domain and container port to the selected service.
+  const [showAddRoute, setShowAddRoute] = useState(serviceScope?.add ?? false);
+  const [portFilter, setPortFilter] = useState(serviceScope?.port);
+  const [addRouteServiceId, setAddRouteServiceId] = useState(serviceScope?.serviceId ?? "");
   // A free *.<baseDomain> subdomain only routes through the Openship Cloud edge,
   // so it's a usable default only on a cloud-connected (or SaaS) instance.
   const freeDomainsAvailable = !selfHosted || cloudConnected;
   const emptyAddRouteDraft = {
     domainType: (freeDomainsAvailable ? "free" : "custom") as "free" | "custom",
     domain: "",
-    port: "",
+    port: serviceScope?.port ? String(serviceScope.port) : "",
   };
   const [addRouteDraft, setAddRouteDraft] = useState<{
     domainType: "free" | "custom";
@@ -444,6 +609,11 @@ export const DomainSettings = () => {
   const [outputChecks, setOutputChecks] = useState<OutputCheckUI[]>([]);
   const services = servicesData.services;
   const servicesLoading = servicesData.isLoading;
+  const scopedService = serviceScope ? services.find((service) => service.id === serviceScope.serviceId) : null;
+  const scopedEndpointCount = scopedService ? configuredServiceEndpoints(scopedService).length : null;
+  useEffect(() => {
+    if (serviceScope && scopedEndpointCount === 0) setShowAddRoute(true);
+  }, [serviceScope?.serviceId, scopedEndpointCount]);
   const hasProjectServer = projectData.options?.hasServer ?? buildData.hasServer ?? true;
 
   const projectRuntimePort = String(
@@ -460,8 +630,8 @@ export const DomainSettings = () => {
   const projectHasServices =
     Number(projectData.serviceCount ?? 0) > 0 || services.length > 0;
   const hasProjectLevelRouting =
-    (Array.isArray(projectData.publicEndpoints) && projectData.publicEndpoints.length > 0) ||
-    !projectHasServices;
+    !serviceScope && ((Array.isArray(projectData.publicEndpoints) && projectData.publicEndpoints.length > 0) ||
+    !projectHasServices);
   const draftPublicEndpoints = useMemo(
     () =>
       createProjectEndpointDrafts(
@@ -530,9 +700,8 @@ export const DomainSettings = () => {
           liveUrl: `https://${hostname}`,
           isPrimary: index === 0,
           needsVerify,
-          status: resolveDomainStatus(domain, t),
+          ...describeDomainStatus(domain, projectData, t),
           ssl: resolveDomainSsl(hostname, domain, baseDomain, t),
-          diagnosis: resolveDomainDiagnosis(domain),
           // Read from the persisted ROW: a redirecting host still verifies and
           // certs like any other, so the card must say why it serves no content.
           redirectTo: typeof domain?.redirectTo === "string" ? domain.redirectTo : undefined,
@@ -541,7 +710,17 @@ export const DomainSettings = () => {
         };
       })
       .filter((domain): domain is DomainSummaryItem => domain !== null);
-  }, [projectData.publicEndpoints, publicEndpoints, domainsData.domains, baseDomain, hasProjectServer, projectRuntimePort, t]);
+  }, [
+    projectData.publicEndpoints,
+    projectData.activeDeploymentId,
+    projectData.awaitingDecision,
+    publicEndpoints,
+    domainsData.domains,
+    baseDomain,
+    hasProjectServer,
+    projectRuntimePort,
+    t,
+  ]);
 
   const primaryProjectDomain = domainSummaries[0] ?? null;
 
@@ -577,7 +756,7 @@ export const DomainSettings = () => {
       return (
         <ActionButton
           label={t.projectSettings.domains.edge.checking}
-          icon={Loader2}
+          icon={"spinner"}
           spinning
           disabled
         />
@@ -587,7 +766,7 @@ export const DomainSettings = () => {
       return (
         <span className="inline-flex items-center gap-2">
           <span className="inline-flex min-h-10 items-center gap-1.5 rounded-xl bg-success-bg px-3 py-2 text-[13px] font-medium text-success">
-            <ShieldCheck className="size-3.5" />
+            <UiIcon name="shield-check" className="size-3.5" />
             {t.projectSettings.domains.edge.ready}
           </span>
           <button
@@ -604,7 +783,7 @@ export const DomainSettings = () => {
       <span className="inline-flex items-center gap-2">
         <ActionButton
           label={t.projectSettings.domains.edge.setUp}
-          icon={ShieldCheck}
+          icon={"shield-check"}
           onClick={openEdge}
         />
         {(edge.classification === "known" || edge.classification === "unknown") && (
@@ -700,27 +879,28 @@ export const DomainSettings = () => {
   useEffect(() => {
     if (!editingRouteServiceId) return;
     if (!services.some((service) => service.id === editingRouteServiceId)) {
-      setEditingRouteServiceId(null);
+      setEditingRouteTarget(null);
     }
   }, [editingRouteServiceId, services]);
 
-  // Seed the edit-route draft once per open (keyed on the service id, NOT on
-  // `services` — a background refresh must not clobber in-progress edits).
+  // Seed the selected endpoint, not the service's primary. Background refreshes
+  // must not clobber an in-progress draft.
   useEffect(() => {
     const svc = services.find((s) => s.id === editingRouteServiceId);
-    if (!svc) {
+    const endpoint = svc && configuredServiceEndpoints(svc).find((route) =>
+      resolvePublicEndpointHostname(route, baseDomain) === editingRouteTarget?.hostname.toLowerCase());
+    if (!endpoint) {
       setRouteDraft(null);
       return;
     }
     setRouteDraft({
-      exposed: svc.exposed,
-      domainType: svc.domainType === "custom" ? "custom" : "free",
-      domain: svc.domain ?? "",
-      customDomain: svc.customDomain ?? "",
-      exposedPort: svc.exposedPort || firstContainerPort(svc.ports),
+      domainType: endpoint.domainType,
+      domain: endpoint.domain ?? "",
+      customDomain: endpoint.customDomain ?? "",
+      exposedPort: String(endpoint.port),
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editingRouteServiceId]);
+  }, [editingRouteTarget]);
 
   // Live-preview DNS records as the user types — self-hosted only.
   //
@@ -764,7 +944,7 @@ export const DomainSettings = () => {
     let cancelled = false;
     const timer = setTimeout(async () => {
       try {
-        const result = await domainsApi.previewRecords(trimmed, includeWww);
+        const result = await domainsApi.previewRecords(trimmed, effectiveIncludeWww);
         if (cancelled) return;
         if (result?.data?.records) {
           setPreviewedRecords(result.data.records);
@@ -786,7 +966,7 @@ export const DomainSettings = () => {
     // `includeWww` is a real dependency: toggling it changes WHICH records the
     // user has to add, so the panel must re-fetch instead of showing the apex
     // record alone while the toggle says www is included.
-  }, [newDomain, newDomainType, selfHosted, showCustomDomainSection, baseDomain, includeWww]);
+  }, [newDomain, newDomainType, selfHosted, showCustomDomainSection, baseDomain, effectiveIncludeWww]);
 
   // Add a domain = add a ROUTE (the same model services use): pick free/custom,
   // the host, and the port (server) / path (static) it maps to. It lands in the
@@ -820,6 +1000,7 @@ export const DomainSettings = () => {
 
     setIsSubmitting(true);
     try {
+      let newDnsSetup: { domainId: string; hostname: string } | null = null;
       // Custom: create the pending row + get its DNS records + real verify id
       // up front. persist (below) then attaches the port and lists it; the
       // backend keeps it pending until /verify.
@@ -839,6 +1020,9 @@ export const DomainSettings = () => {
           return;
         }
         if (result.records?.records) setDnsRecords(result.records.records);
+        if (result.domain?.id && selfHosted && !isCloudProject && !externalIngress && effectiveSslChallenge === "dns-01") {
+          newDnsSetup = { domainId: result.domain.id, hostname: host };
+        }
         // Track EVERY row the connect created. `result.www` is the sibling's own
         // row (its own verify, its own cert); `wwwError` means it couldn't be
         // claimed at all — say so instead of leaving the toggle looking successful.
@@ -872,7 +1056,7 @@ export const DomainSettings = () => {
       // already set it on the row: an OMITTED redirect clears one, so leaving it out
       // would wipe the 301 a request later and quietly serve the app on both hosts.
       const wwwEndpoint =
-        isCustom && includeWww && !host.startsWith("www.")
+        isCustom && effectiveIncludeWww && !host.startsWith("www.")
           ? createPublicEndpoint({
               domainType: newDomainType,
               customDomain: `www.${host}`,
@@ -889,6 +1073,13 @@ export const DomainSettings = () => {
           : interpolate(t.projectSettings.domains.toast.addedFree, { label }),
       );
       if (!ok) return;
+
+      if (newDnsSetup) {
+        setDnsSetup(newDnsSetup);
+        setShowCustomDomainSection(false);
+        setDnsRecords([]);
+        setPendingVerifyDomains([]);
+      }
 
       // Reset the form. Keep the panel open for custom (DNS records + Verify);
       // free has nothing to verify, so collapse it.
@@ -925,18 +1116,7 @@ export const DomainSettings = () => {
       const result = await domainsApi.verify(domainId);
 
       if (result.verified) {
-        // Optimistically flip the local row so the Pending pill becomes
-        // Verified without waiting for the next /info refetch. The next
-        // invalidateProjectCaches below catches the canonical state
-        // (including sslStatus transitions from the background provision).
-        const updatedDomains = domainsData.domains.map((d) =>
-          d.id === domainId
-            ? { ...d, verified: true, status: "active", sslStatus: result.sslStatus ?? d.sslStatus }
-            : d,
-        );
-        updateDomains(updatedDomains);
         setVerifyFailure((f) => (f?.domainId === domainId ? null : f));
-        invalidateProjectCaches(id);
         showToast(
           result.message || interpolate(t.projectSettings.domains.toast.verifiedSuccess, { hostname }),
           "success",
@@ -966,6 +1146,7 @@ export const DomainSettings = () => {
       );
     } finally {
       setVerifyingDomainId(null);
+      invalidateProjectCaches(id);
     }
   };
 
@@ -974,11 +1155,19 @@ export const DomainSettings = () => {
   // stays on the request/response path (Oblien CNAME check, no certbot to stream,
   // and it needs the cloud proxy).
   const startVerify = (domainId: string, hostname: string) => {
-    if (selfHosted) {
+    if (usesDnsSetup(hostname)) {
+      setDnsSetup({ domainId, hostname });
+      return;
+    }
+    if (selfHosted && !isCloudProject) {
       openVerifyModal(domainId, {
         hostname,
+        onStart: () => setVerifyingDomainId(domainId),
         onDone: () => {
           setVerifyFailure((f) => (f?.domainId === domainId ? null : f));
+        },
+        onSettled: () => {
+          setVerifyingDomainId(null);
           invalidateProjectCaches(id);
         },
       });
@@ -1028,7 +1217,7 @@ export const DomainSettings = () => {
       (c) =>
         c.checked &&
         !c.listening &&
-        (serviceId ? c.serviceId === serviceId : c.serviceId == null && c.port === mappedPort),
+        (serviceId ? c.serviceId === serviceId && c.port === mappedPort : c.serviceId == null && c.port === mappedPort),
     );
     return match ? { port: match.port, serviceName: match.serviceName } : null;
   };
@@ -1058,11 +1247,11 @@ export const DomainSettings = () => {
   // form once the domains data has loaded, then clear the one-shot intent so it
   // doesn't reopen on a later visit. Mirrors handleToggleCustomDomain's open.
   useEffect(() => {
-    if (pendingDomainAction !== "add" || domainsData.isLoading) return;
+    if (serviceScope || pendingDomainAction !== "add" || domainsData.isLoading) return;
     setNewDomainPort(projectRuntimePort);
     setShowCustomDomainSection(true);
     setPendingDomainAction(null);
-  }, [pendingDomainAction, domainsData.isLoading, projectRuntimePort, setPendingDomainAction]);
+  }, [pendingDomainAction, domainsData.isLoading, projectRuntimePort, setPendingDomainAction, serviceScope]);
 
   /**
    * Match a static-output finding to a card by routed path, and say WHICH failure
@@ -1097,9 +1286,6 @@ export const DomainSettings = () => {
 
       if (result.success) {
         showToast(interpolate(t.projectSettings.domains.toast.sslRenewed, { hostname }), "success");
-        // Pull the canonical sslExpiresAt off the DB row by re-fetching
-        // project info. The status pill flips on the next render.
-        invalidateProjectCaches(id);
       } else {
         showToast(
           result.message || result.error || interpolate(t.projectSettings.domains.toast.sslRenewFailed, { hostname }),
@@ -1119,6 +1305,7 @@ export const DomainSettings = () => {
       );
     } finally {
       setRenewingHostname(null);
+      invalidateProjectCaches(id);
     }
   };
 
@@ -1131,21 +1318,21 @@ export const DomainSettings = () => {
     try {
       const res = await domainsApi.verifySsl(domainId);
       const status = res?.data?.sslStatus;
-      if (status === "active") {
+      if (status === "active" && res.data.verified) {
         showToast(interpolate(t.projectSettings.domains.toast.sslVerified, { hostname }), "success", t.projectSettings.domains.toast.sslTitle);
       } else {
         showToast(
-          interpolate(t.projectSettings.domains.toast.sslNoCert, { hostname }),
+          res.data.message || interpolate(t.projectSettings.domains.toast.sslNoCert, { hostname }),
           "error",
           t.projectSettings.domains.toast.sslTitle,
         );
       }
-      invalidateProjectCaches(id);
     } catch (error) {
       console.error("Failed to recheck SSL:", error);
       showToast(getApiErrorMessage(error, interpolate(t.projectSettings.domains.toast.sslRecheckFailed, { hostname })), "error", t.projectSettings.domains.toast.sslTitle);
     } finally {
       setRecheckingDomainId(null);
+      invalidateProjectCaches(id);
     }
   };
 
@@ -1192,6 +1379,7 @@ export const DomainSettings = () => {
   // (no redeploy). Self-hosted only — cloud routes via the cloud edge.
   const isEdgeless = () =>
     selfHosted &&
+    !isCloudProject &&
     !!projectData.activeDeploymentId &&
     domainSummaries.length === 0 &&
     !services.some((s) => s.enabled && s.exposed);
@@ -1356,14 +1544,24 @@ export const DomainSettings = () => {
         // Persisted domain row → force-delete it (backend removeDomain always
         // drops the row + best-effort tears down the edge, atomically now).
         await domainsApi.remove(summary.domainId);
+        if (dnsSetup?.domainId === summary.domainId) setDnsSetup(null);
         updateDomains(
           (Array.isArray(domainsData.domains) ? domainsData.domains : []).filter(
             (d: any) => d?.id !== summary.domainId,
           ),
         );
+        await refreshServices();
+        await Promise.resolve().then(() => onRoutesChanged?.()).catch(() => {});
         if (id) invalidateProjectCaches(id);
         showToast("Route removed.", "success", t.projectSettings.domains.toast.domainsTitle);
         setRemoveTarget(null);
+      } else if (summary.serviceId) {
+        const result = await servicesApi.get(id, summary.serviceId);
+        if (!result.success) throw new Error(t.projectSettings.domains.toast.routeUpdateFailed);
+        const remaining = configuredServiceEndpoints(result.service).filter((endpoint) =>
+          resolvePublicEndpointHostname(endpoint, baseDomain) !== summary.hostname.toLowerCase());
+        const ok = await handleServiceRouteUpdate(summary.serviceId, serviceEndpointsPatch(remaining, result.service.exposed));
+        if (ok) setRemoveTarget(null);
       } else {
         // PENDING / endpoint-only route (no domain row) — drop it from the
         // project's publicEndpoints and persist. Reuses persistPublicEndpoints
@@ -1390,49 +1588,6 @@ export const DomainSettings = () => {
 
   const projectLabel = projectData.slug || projectData.name || "project";
 
-  // Null when the service has no persisted route: the derived
-  // `<project>-<service>` host this used to compose was never created, so the
-  // route card linked to a dead name.
-  const resolveServiceHostname = (service: Service) =>
-    serviceDisplayHost(service, {
-      projectLabel,
-      baseDomain,
-      kind: serviceKind(service),
-    });
-
-  const getServiceRouteSummary = (service: Service) => {
-    const host = service.exposed ? resolveServiceHostname(service) : null;
-    const liveUrl = host ? `https://${host}` : null;
-
-    if (!service.enabled) {
-      return {
-        connected: false,
-        statusLabel: t.projectSettings.domains.route.disabled,
-        statusClass: "bg-warning-bg text-warning",
-        detail: service.exposed ? t.projectSettings.domains.route.routePaused : t.projectSettings.domains.route.serviceDisabled,
-        liveUrl,
-      };
-    }
-
-    if (!service.exposed) {
-      return {
-        connected: false,
-        statusLabel: t.projectSettings.domains.route.internal,
-        statusClass: "bg-muted/60 text-muted-foreground/70",
-        detail: t.projectSettings.domains.route.notExposed,
-        liveUrl: null as string | null,
-      };
-    }
-
-    return {
-      connected: true,
-      statusLabel: t.projectSettings.domains.route.public,
-      statusClass: "bg-success-bg text-success",
-      detail: service.domainType === "custom" ? t.projectSettings.domains.typeCustom : t.projectSettings.domains.typeFree,
-      liveUrl,
-    };
-  };
-
   const handleServiceRouteUpdate = async (
     serviceId: string,
     patch: Partial<ServiceInput>,
@@ -1445,38 +1600,28 @@ export const DomainSettings = () => {
         throw new Error("Failed to update service route");
       }
       await refreshServices();
+      invalidateProjectCaches(id);
+      await Promise.resolve().then(() => onRoutesChanged?.()).catch(() => {});
+      showToast(t.projectSettings.domains.toast.routingUpdated, "success", t.projectSettings.domains.toast.domainsTitle);
       // First exposed route on an edge-less project → deploy to install
       // OpenResty + show the takeover modal (navigates to the build screen).
       if (wasEdgeless && patch.exposed) await publishFirstRoute();
       return true;
     } catch (error) {
       console.error("Failed to update service route:", error);
-      showToast(t.projectSettings.domains.toast.routeUpdateFailed, "error");
+      showToast(getApiErrorMessage(error, t.projectSettings.domains.toast.routeUpdateFailed), "error");
       return false;
     } finally {
       setRouteSavingServiceId(null);
     }
   };
 
-  // Match a free-form port to the enabled service that publishes it. Services
-  // route per-service, so a "domain → port" route card attaches to whichever
-  // service owns that port.
+  // A port alone is ambiguous when multiple containers listen on the same
+  // number. The service page always supplies its identity explicitly.
   const findServiceByPort = (port: string): Service | null => {
-    const p = port.trim();
-    if (!p) return null;
-    return (
-      services.find(
-        (s) =>
-          s.enabled &&
-          (String(s.exposedPort ?? "") === p ||
-            (s.ports ?? []).some((spec) => {
-              const parts = spec.split(":");
-              const container = (parts[parts.length - 1] ?? "").split("/")[0];
-              const host = (parts[parts.length - 2] ?? "").split("/")[0];
-              return container === p || host === p;
-            })),
-      ) ?? null
-    );
+    const matches = services.filter((service) => servicePortTargets(service, baseDomain)
+      .some((target) => target.port === Number(port) && target.protocol === "tcp"));
+    return matches.length === 1 ? matches[0] : null;
   };
 
   const handleAddRoute = async () => {
@@ -1488,13 +1633,16 @@ export const DomainSettings = () => {
     // returns false when not connected, so the free route is never persisted.
     if (domainType === "free" && !(await freeNeedsCloud())) return;
     const cleanPort = port.trim();
-    if (!cleanPort) {
-      setAddRouteError(t.projectSettings.domains.toast.enterPortShort);
+    if (!/^\d+$/.test(cleanPort) || Number(cleanPort) < 1 || Number(cleanPort) > 65535) {
+      setAddRouteError(t.projectSettings.domains.toast.enterPort);
       return;
     }
-    const target = findServiceByPort(cleanPort);
+    const selectedServiceId = serviceScope?.serviceId || addRouteServiceId;
+    const target = selectedServiceId
+      ? services.find((service) => service.id === selectedServiceId)
+      : findServiceByPort(cleanPort);
     if (!target) {
-      setAddRouteError(interpolate(t.projectSettings.domains.toast.noServicePort, { port: cleanPort }));
+      setAddRouteError(t.projectDetail.services.detail.networking.selectService);
       return;
     }
     const domainValue = domain.trim();
@@ -1504,16 +1652,47 @@ export const DomainSettings = () => {
     }
     setAddRouteSaving(true);
     try {
-      await handleServiceRouteUpdate(target.id, {
-        exposed: true,
-        exposedPort: cleanPort,
-        domainType,
-        ...(domainType === "custom"
-          ? { customDomain: domainValue.toLowerCase() }
-          : { domain: domainValue.toLowerCase() }),
-      });
-      setShowAddRoute(false);
-      setAddRouteDraft(emptyAddRouteDraft);
+      const endpoint = validatedPublicEndpointPayload(createPublicEndpoint({
+        port: cleanPort, domainType,
+        domain: domainType === "free" ? domainValue : "",
+        customDomain: domainType === "custom" ? domainValue : "",
+      }), true);
+      if (!endpoint?.port) {
+        setAddRouteError(t.projectSettings.domains.toast.completeEndpoints);
+        return;
+      }
+      const current = await servicesApi.get(id, target.id);
+      if (!current.success) throw new Error(t.projectSettings.domains.toast.routeUpdateFailed);
+      const saved = configuredServiceEndpoints(current.service);
+      const hostname = resolvePublicEndpointHostname(endpoint, baseDomain);
+      if (saved.some((route) => resolvePublicEndpointHostname(route, baseDomain) === hostname)) {
+        setAddRouteError(t.projectSettings.domains.add.noWww);
+        return;
+      }
+      // Explicitly append: a scalar route patch replaces the first route on
+      // that port, which would silently remove an existing domain.
+      const next: ServiceEndpoint = { ...endpoint, port: endpoint.port };
+      const ok = await handleServiceRouteUpdate(target.id, serviceEndpointsPatch([...saved, next]));
+      if (ok) {
+        setShowAddRoute(false);
+        setAddRouteDraft({ ...emptyAddRouteDraft, port: portFilter ? String(portFilter) : "" });
+        if (selfHosted && !isCloudProject && hostname?.startsWith("*.")) {
+          // The service save owns domain creation. Read its actual row before
+          // opening certificate setup; never invent a domain id from the host.
+          try {
+            const { data } = await domainsApi.list(id);
+            const savedDomain = data.find((row) => row.hostname === hostname && row.serviceId === target.id);
+            updateDomains(data.map((row) => ({ ...row, domain: row.hostname, primary: row.isPrimary })));
+            if (savedDomain && !savedDomain.externalIngress && !savedDomain.manualSsl) {
+              setDnsSetup({ domainId: savedDomain.id, hostname: savedDomain.hostname });
+            }
+          } catch (error) {
+            showToast(getApiErrorMessage(error, t.projectSettings.domains.wildcard.loadFailed), "error");
+          }
+        }
+      }
+    } catch (error) {
+      setAddRouteError(getApiErrorMessage(error, t.projectSettings.domains.toast.routeUpdateFailed));
     } finally {
       setAddRouteSaving(false);
     }
@@ -1529,40 +1708,42 @@ export const DomainSettings = () => {
     );
   })();
 
-  // Every enabled + exposed service is a generic domain → port route card —
-  // the SAME card a single-app project's endpoints render as. No project-vs-
-  // service split in the UI; internal (non-exposed) services produce no card.
+  // Every configured endpoint gets its own card, including additional domains
+  // on the same port and paused services that still need management.
   const serviceRouteCards: Array<{ service: Service; summary: DomainSummaryItem }> = (() => {
-    const domainByHostname = domainRowsByHostname;
-    return services
-      .filter((s) => s.enabled && s.exposed)
-      // A service with no persisted route has no hostname to title a route card
-      // with — it is reachable on its port. Inventing one is what put dead
-      // `<project>-<service>` hosts on this page; use "Add route" to give it one.
-      .map((service) => ({ service, hostname: resolveServiceHostname(service) }))
-      .filter((entry): entry is { service: Service; hostname: string } => !!entry.hostname)
-      .map(({ service, hostname }) => {
-        const domain = domainByHostname.get(hostname.toLowerCase()) ?? null;
-        return {
-          service,
-          summary: {
-            id: service.id,
-            domainId: typeof domain?.id === "string" ? domain.id : undefined,
-            title: service.name,
-            hostname,
-            typeLabel: service.domainType === "custom" ? t.projectSettings.domains.typeCustom : t.projectSettings.domains.typeFree,
-            mappedLabel: interpolate(t.projectSettings.domains.portLabel, { port: String(service.exposedPort || firstContainerPort(service.ports) || "auto") }),
-            mappedPort: Number(service.exposedPort || firstContainerPort(service.ports)) || undefined,
-            serviceId: service.id,
-            liveUrl: `https://${hostname}`,
-            isPrimary: domain?.isPrimary ?? false,
-            needsVerify: !!domain && domain.verified === false,
-            externalIngress: domain?.externalIngress === true,
-            status: resolveDomainStatus(domain, t),
-            ssl: resolveDomainSsl(hostname, domain, baseDomain, t),
+    return services.flatMap((service) => configuredServiceEndpoints(service).flatMap((endpoint) => {
+        const hostname = resolvePublicEndpointHostname(endpoint, baseDomain);
+        if (!hostname) return [];
+        const candidate = domainRowsByHostname.get(hostname.toLowerCase());
+        const domain =
+          candidate?.serviceId && candidate.serviceId !== service.id ? null : candidate;
+        return [
+          {
+            service,
+            summary: {
+              id: `${service.id}:${hostname}`,
+              domainId: typeof domain?.id === "string" ? domain.id : undefined,
+              title: service.name,
+              hostname,
+              typeLabel:
+                endpoint.domainType === "custom"
+                  ? t.projectSettings.domains.typeCustom
+                  : t.projectSettings.domains.typeFree,
+              mappedLabel: interpolate(t.projectSettings.domains.portLabel, {
+                port: String(endpoint.port),
+              }),
+              mappedPort: endpoint.port,
+              serviceId: service.id,
+              liveUrl: `https://${hostname}`,
+              isPrimary: domain?.isPrimary ?? false,
+              needsVerify: !!domain && domain.verified === false,
+              externalIngress: domain?.externalIngress === true,
+              ...describeDomainStatus(domain, projectData, t, service.enabled && service.exposed),
+              ssl: resolveDomainSsl(hostname, domain, baseDomain, t),
+            },
           },
-        };
-      });
+        ];
+      }));
   })();
 
   /**
@@ -1580,12 +1761,7 @@ export const DomainSettings = () => {
    * be listed by the page that owns domains, whether or not a service claims it.
    */
   const orphanDomainCards: DomainSummaryItem[] = (() => {
-    const claimed = new Set(
-      services
-        .filter((s) => s.enabled && s.exposed)
-        .map((s) => resolveServiceHostname(s)?.toLowerCase())
-        .filter((hostname): hostname is string => !!hostname),
-    );
+    const claimed = new Set(serviceRouteCards.map(({ summary }) => summary.hostname.toLowerCase()));
     return [...domainRowsByHostname.entries()]
       .filter(([hostname]) => !claimed.has(hostname))
       .map(([hostname, domain]) => ({
@@ -1597,20 +1773,25 @@ export const DomainSettings = () => {
           domain?.domainType === "custom"
             ? t.projectSettings.domains.typeCustom
             : t.projectSettings.domains.typeFree,
-        // No service backs this row, so there's no port to name. `mappedLabel` is
-        // the card's subtitle, so leave it empty rather than invent "port auto".
-        mappedLabel: "",
+        mappedLabel: domain.port ? interpolate(t.projectSettings.domains.portLabel, { port: String(domain.port) }) : "",
+        mappedPort: Number(domain.port) || undefined,
+        serviceId: typeof domain.serviceId === "string" ? domain.serviceId : undefined,
         liveUrl: `https://${domain?.hostname ?? hostname}`,
         isPrimary: domain?.isPrimary ?? false,
         needsVerify: domain?.verified === false,
         externalIngress: domain?.externalIngress === true,
-        status: resolveDomainStatus(domain, t),
+        ...describeDomainStatus(domain, projectData, t),
         ssl: resolveDomainSsl(hostname, domain, baseDomain, t),
       }));
   })();
 
   /** Cards actually rendered — gates "Set as primary", which needs a choice. */
   const totalRouteCards = serviceRouteCards.length + orphanDomainCards.length;
+  const inServiceScope = (summary: DomainSummaryItem) => !serviceScope || (
+    summary.serviceId === serviceScope.serviceId && (!portFilter || summary.mappedPort === portFilter)
+  );
+  const visibleServiceRoutes = serviceRouteCards.filter(({ summary }) => inServiceScope(summary));
+  const visibleOrphanRoutes = orphanDomainCards.filter(inServiceScope);
 
   // Build the ⋯ menu items for a domain card. Shared by the single-app and
   // service route cards so both collapse the same way. Visit is NOT here — it's
@@ -1628,13 +1809,13 @@ export const DomainSettings = () => {
     const m = t.projectSettings.domains.menu;
     const items: MenuAction[] = [];
     if (onEditRoute) {
-      items.push({ id: "edit", label: m.editRoute, icon: <Pencil className="size-4" />, onClick: onEditRoute });
+      items.push({ id: "edit", label: m.editRoute, icon: <UiIcon name="edit" className="size-4" />, onClick: onEditRoute });
     }
-    if (onSetPrimary) {
+    if (onSetPrimary && !domain.hostname.startsWith("*.")) {
       items.push({
         id: "set-primary",
         label: isSettingPrimary ? m.settingPrimary : m.setPrimary,
-        icon: <Star className={isSettingPrimary ? "size-4 animate-pulse" : "size-4"} />,
+        icon: <UiIcon name="star" className={isSettingPrimary ? "size-4 animate-pulse" : "size-4"} />,
         onClick: onSetPrimary,
         disabled: isSettingPrimary,
       });
@@ -1661,12 +1842,21 @@ export const DomainSettings = () => {
     //     would silently do nothing. Uploading an Origin-CA cert IS still the right
     //     action there (that's what secures the origin hop), so only renew goes.
     const canRenew = certbotOwned && !domain.externalIngress;
+    if (domain.domainId && usesDnsSetup(domain.hostname)) {
+      items.push({
+        id: "dns-https", label: t.projectSettings.domains.wildcard.title,
+        icon: <UiIcon name="shield-check" className="size-4" />,
+        onClick: () => setDnsSetup({ domainId: domain.domainId!, hostname: domain.hostname }),
+      });
+    }
     if (sslActionable && canRenew) {
       items.push({
         id: "renew",
         label: isRenewing ? m.renewing : m.renewSsl,
-        icon: <ShieldAlert className={isRenewing ? "size-4 animate-spin" : "size-4"} />,
-        onClick: () => void handleRenewDomainSsl(domain.hostname),
+        icon: <UiIcon name="shield-alert" className={isRenewing ? "size-4 animate-spin" : "size-4"} />,
+        onClick: () => usesDnsSetup(domain.hostname)
+          ? setDnsSetup({ domainId: domain.domainId!, hostname: domain.hostname, renew: true })
+          : void handleRenewDomainSsl(domain.hostname),
         disabled: isRenewing,
       });
     }
@@ -1674,7 +1864,7 @@ export const DomainSettings = () => {
       items.push({
         id: "recheck",
         label: isRechecking ? m.rechecking : m.recheckSsl,
-        icon: <RefreshCw className={isRechecking ? "size-4 animate-spin" : "size-4"} />,
+        icon: <UiIcon name="refresh" className={isRechecking ? "size-4 animate-spin" : "size-4"} />,
         onClick: () => void handleRecheckSsl(domain.domainId!, domain.hostname),
         disabled: isRechecking,
       });
@@ -1683,7 +1873,7 @@ export const DomainSettings = () => {
       items.push({
         id: "upload-cert",
         label: m.uploadCert,
-        icon: <ShieldCheck className="size-4" />,
+        icon: <UiIcon name="shield-check" className="size-4" />,
         onClick: () => setCertUploadDomain({ domainId: domain.domainId!, hostname: domain.hostname }),
       });
     }
@@ -1695,7 +1885,7 @@ export const DomainSettings = () => {
     items.push({
       id: "delete",
       label: "Remove route",
-      icon: <Trash2 className="size-4" />,
+      icon: <UiIcon name="trash" className="size-4" />,
       variant: "danger",
       onClick: () => void handleDeleteDomain(domain),
     });
@@ -1714,7 +1904,8 @@ export const DomainSettings = () => {
     // doesn't exist. Everything else on the card still applies.
     opts: { onEdit?: () => void; onSetPrimary?: () => void },
   ): React.ReactNode => {
-    const canVerify = item.needsVerify && !!item.domainId;
+    const canVerify =
+      item.needsVerify && !!item.domainId && item.diagnosis?.retryAction === "verify";
     // An SSL action (renew / recheck) lives in the ⋯ menu, but the menu closes the
     // instant it's clicked — so its spinner-label never gets a chance to show and
     // the operator sees nothing happen for the several seconds certbot takes. Mirror
@@ -1730,18 +1921,45 @@ export const DomainSettings = () => {
       onSetPrimary: opts.onSetPrimary,
       isSettingPrimary: settingPrimaryId === item.id,
     });
+    if (projectData.activeDeploymentId && !projectData.awaitingDecision) {
+      menuActions.push({
+        id: "retry-routing",
+        label: t.projects.routingRetry.retry,
+        icon: <UiIcon name="refresh" className="size-4" />,
+        onClick: retryRouting,
+        disabled: !!routingOperation?.running,
+      });
+    }
     return (
       <DomainOverviewCard
         key={item.id}
         domain={item}
         menuActions={menuActions}
         sslActionBusy={isRenewing || isRechecking}
-        sslActionLabel={isRenewing ? t.projectSettings.domains.menu.renewing : t.projectSettings.domains.menu.rechecking}
+        sslActionLabel={
+          isRenewing
+            ? t.projectSettings.domains.menu.renewing
+            : t.projectSettings.domains.menu.rechecking
+        }
         onVerify={canVerify ? () => startVerify(item.domainId!, item.hostname) : undefined}
+        verifyLabel={usesDnsSetup(item.hostname) ? t.projectSettings.domains.wildcard.title : undefined}
+        onRetryDiagnosis={
+          item.diagnosis?.retryAction === "retry_routing"
+            ? retryRouting
+            : item.domainId && item.diagnosis?.retryAction === "verify"
+              ? () => startVerify(item.domainId!, item.hostname)
+              : item.domainId && item.diagnosis?.retryAction === "verify_ssl"
+                ? () => void handleRecheckSsl(item.domainId!, item.hostname)
+                : undefined
+        }
+        retryBusy={!!routingOperation?.running || !!verifyingDomainId || isRenewing || isRechecking}
+        onRetryRouting={
+          item.diagnosis?.retryAction === "retry_routing" ? retryRouting : undefined
+        }
         verifying={!!verifyingDomainId && verifyingDomainId === item.domainId}
         verifyHint={verifyHintFor(item.domainId)}
         autoOpenRecords={!!item.domainId && verifyFailure?.domainId === item.domainId}
-        loadRecords={canVerify ? () => domainsApi.records(item.domainId!).then((r) => r.data.records) : undefined}
+        loadRecords={canVerify && !usesDnsSetup(item.hostname) ? () => domainsApi.records(item.domainId!).then((r) => r.data.records) : undefined}
         onCopy={handleCopy}
         portHint={portHintFor(item.mappedPort, item.serviceId)}
         outputHint={outputHintFor(item.targetPath)}
@@ -1751,41 +1969,50 @@ export const DomainSettings = () => {
 
   const editingRouteService =
     services.find((service) => service.id === editingRouteServiceId) ?? null;
-  const editingRoute = editingRouteService ? getServiceRouteSummary(editingRouteService) : null;
-
-  // Diff the edit-route draft against the service to enable Save + build the patch.
-  const routeOriginalPort = editingRouteService
-    ? editingRouteService.exposedPort || firstContainerPort(editingRouteService.ports)
-    : "";
+  const editingEndpoint = editingRouteService && configuredServiceEndpoints(editingRouteService).find((endpoint) =>
+    resolvePublicEndpointHostname(endpoint, baseDomain) === editingRouteTarget?.hostname.toLowerCase());
   const routeDirty = Boolean(
-    editingRouteService &&
+    editingEndpoint &&
       routeDraft &&
-      (routeDraft.exposed !== editingRouteService.exposed ||
-        routeDraft.domainType !== (editingRouteService.domainType === "custom" ? "custom" : "free") ||
-        routeDraft.domain !== (editingRouteService.domain ?? "") ||
-        routeDraft.customDomain !== (editingRouteService.customDomain ?? "") ||
-        routeDraft.exposedPort !== routeOriginalPort),
+      (routeDraft.domainType !== editingEndpoint.domainType ||
+        routeDraft.domain !== (editingEndpoint.domain ?? "") ||
+        routeDraft.customDomain !== (editingEndpoint.customDomain ?? "") ||
+        routeDraft.exposedPort !== String(editingEndpoint.port)),
   );
   const routeSaving = editingRouteService ? routeSavingServiceId === editingRouteService.id : false;
 
   const handleSaveRoute = async () => {
-    if (!editingRouteService || !routeDraft) return;
+    if (!editingRouteService || !editingRouteTarget || !routeDraft || routeSaving) return;
     // A free route rides the cloud edge — gate the save behind connect-cloud.
     if (routeDraft.domainType === "free" && !(await freeNeedsCloud())) return;
-    const patch: Partial<ServiceInput> = {};
-    if (routeDraft.exposed !== editingRouteService.exposed) patch.exposed = routeDraft.exposed;
-    if (routeDraft.domainType !== (editingRouteService.domainType === "custom" ? "custom" : "free"))
-      patch.domainType = routeDraft.domainType;
-    if (routeDraft.domain !== (editingRouteService.domain ?? "")) patch.domain = routeDraft.domain;
-    if (routeDraft.customDomain !== (editingRouteService.customDomain ?? ""))
-      patch.customDomain = routeDraft.customDomain;
-    if (routeDraft.exposedPort !== routeOriginalPort) patch.exposedPort = routeDraft.exposedPort;
-    if (Object.keys(patch).length === 0) {
-      setEditingRouteServiceId(null);
+    const payload = validatedPublicEndpointPayload(createPublicEndpoint({
+      ...routeDraft, port: routeDraft.exposedPort,
+    }), true);
+    if (!payload?.port || !Number.isInteger(payload.port)) {
+      showToast(t.projectSettings.domains.toast.completeEndpoints, "error");
       return;
     }
-    const ok = await handleServiceRouteUpdate(editingRouteService.id, patch);
-    if (ok) setEditingRouteServiceId(null);
+    setRouteSavingServiceId(editingRouteService.id);
+    try {
+      const current = await servicesApi.get(id, editingRouteService.id);
+      if (!current.success) throw new Error(t.projectSettings.domains.toast.routeUpdateFailed);
+      const endpoints = configuredServiceEndpoints(current.service);
+      const index = endpoints.findIndex((endpoint) =>
+        resolvePublicEndpointHostname(endpoint, baseDomain) === editingRouteTarget.hostname.toLowerCase());
+      if (index < 0) throw new Error(t.projectDetail.services.detail.networking.routeChanged);
+      const next: ServiceEndpoint = { ...payload, port: payload.port };
+      const hostname = resolvePublicEndpointHostname(next, baseDomain);
+      if (endpoints.some((endpoint, i) => i !== index && resolvePublicEndpointHostname(endpoint, baseDomain) === hostname)) {
+        throw new Error(t.projectSettings.domains.add.noWww);
+      }
+      endpoints[index] = next;
+      const ok = await handleServiceRouteUpdate(editingRouteService.id, serviceEndpointsPatch(endpoints, current.service.exposed));
+      if (ok) setEditingRouteTarget(null);
+    } catch (error) {
+      showToast(getApiErrorMessage(error, t.projectSettings.domains.toast.routeUpdateFailed), "error");
+    } finally {
+      setRouteSavingServiceId(null);
+    }
   };
 
   const hasMultipleProjectDomains = domainSummaries.length > 1;
@@ -1815,23 +2042,23 @@ export const DomainSettings = () => {
   const singleDomainActions = (
     <div className="flex flex-wrap items-center gap-2 sm:justify-end">
       {currentHref !== "#" ? (
-        <ActionButton href={currentHref} label={t.projectSettings.domains.actions.visit} icon={ExternalLink} />
+        <ActionButton href={currentHref} label={t.projectSettings.domains.actions.visit} icon={"arrow-up-right"} />
       ) : null}
       {canOpenLocal ? (
         <ActionButton
           label={t.projects.connections.openLocalhost}
-          icon={openingLocal ? Loader2 : MonitorSmartphone}
+          icon={openingLocal ? "spinner" : "devices"}
           spinning={openingLocal}
           disabled={openingLocal}
           onClick={openOnLocalhost}
         />
       ) : null}
       {hasProjectLevelRouting ? (
-        <ActionButton label={t.projectSettings.domains.actions.editDomains} icon={Pencil} onClick={handleStartEditingDomains} />
+        <ActionButton label={t.projectSettings.domains.actions.editDomains} icon={"edit"} onClick={handleStartEditingDomains} />
       ) : null}
       <ActionButton
         label={showCustomDomainSection ? t.projectSettings.domains.actions.hideSetup : t.projectSettings.domains.actions.addDomain}
-        icon={Plus}
+        icon={"plus"}
         onClick={handleToggleCustomDomain}
       />
     </div>
@@ -1858,8 +2085,69 @@ export const DomainSettings = () => {
 
   return (
     <div className="space-y-5">
+      {dnsSetup && (
+        <div ref={dnsSetupAnchor} className="scroll-mt-6">
+          <DnsChallengePanel
+            key={`${dnsSetup.domainId}:${dnsSetup.renew ?? false}`}
+            {...dnsSetup}
+            mode={domainsData.domains.find((row: any) => row.id === dnsSetup.domainId)?.sslDnsMode === "manual" ? "manual" : "automatic"}
+            onChanged={() => { invalidateProjectCaches(id); router.refresh(); }}
+            onClose={() => setDnsSetup(null)}
+          />
+        </div>
+      )}
+      {serviceScope && (
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-semibold text-foreground">{t.projectDetail.services.detail.tabs.domains}</h3>
+            <p className="mt-1 text-xs text-muted-foreground">{t.projectDetail.services.detail.networking.domainsDescription}</p>
+          </div>
+          <select aria-label={t.projectDetail.services.detail.networking.filterPort}
+            value={portFilter ?? ""} disabled={addRouteSaving || servicesLoading}
+            onChange={(event) => {
+              const port = Number(event.target.value) || undefined;
+              setPortFilter(port);
+              setAddRouteDraft((draft) => ({ ...draft, port: port ? String(port) : "" }));
+            }}
+            className="h-9 rounded-xl border border-border/50 bg-card px-3 text-sm text-foreground outline-none focus:border-primary/40">
+            <option value="">{t.projectDetail.services.detail.networking.allPorts}</option>
+            {scopedService && servicePortTargets(scopedService, baseDomain).filter((target) => target.port && target.protocol === "tcp").map((target) => (
+              <option key={target.key} value={target.port!}>{interpolate(t.projectSettings.domains.portLabel, { port: target.label })}</option>
+            ))}
+          </select>
+        </div>
+      )}
+      {serviceScope && (domainsData.error || servicesData.error) && (
+        <p role="alert" className="text-sm text-danger">{domainsData.error || servicesData.error}</p>
+      )}
+      {serviceScope && !servicesLoading && !servicesData.error && !scopedService && (
+        <p role="alert" className="text-sm text-muted-foreground">{t.projectDetail.services.detail.networking.serviceUnavailable}</p>
+      )}
+      {scopedService && !scopedService.exposed && Boolean(scopedEndpointCount) && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border/50 bg-muted/20 px-4 py-3">
+          <span className="text-sm text-muted-foreground">{t.projectDetail.services.detail.networking.paused}</span>
+          <ActionButton label={t.projectDetail.services.detail.networking.enableRouting} icon={"globe"}
+            disabled={routeSavingServiceId === scopedService.id}
+            onClick={() => void handleServiceRouteUpdate(scopedService.id, { exposed: true })} />
+        </div>
+      )}
       {/* Routes are live-but-unsynced — first, above the domains it's about. */}
-      <RoutingUnsyncedCallout />
+      <RoutingUnsyncedCallout onRetry={retryRouting} retrying={!!routingOperation?.running} />
+      {routingOperation && (
+        <section
+          ref={routingLogRef}
+          aria-label="Routing log"
+          className="rounded-2xl border border-border/50 bg-card"
+        >
+          <PrepareStreamContent
+            key={routingOperation.id}
+            opts={routingOperation.opts}
+            inline
+            onClose={closeRoutingLog}
+            closeDisabled={routingOperation.running}
+          />
+        </section>
+      )}
       {domainsData.isLoading ? (
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
           {[0, 1].map((i) => (
@@ -1885,7 +2173,7 @@ export const DomainSettings = () => {
           <SectionCard
             title={t.projectSettings.domains.add.title}
             description={t.projectSettings.domains.add.description}
-            icon={Plus}
+            icon={"plus"}
             iconTone="blue"
           >
             <div className="space-y-4">
@@ -1965,6 +2253,7 @@ export const DomainSettings = () => {
                   </div>
                   <button
                     onClick={() => setIncludeWww((value) => !value)}
+                    aria-label={t.projectSettings.domains.add.includeWww}
                     disabled={wildcardDomain}
                     className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${effectiveIncludeWww ? "bg-primary" : "bg-muted"}`}
                   >
@@ -1988,6 +2277,7 @@ export const DomainSettings = () => {
                   <button
                     type="button"
                     onClick={() => setSslChallenge((value) => (value === "dns-01" ? "http-01" : "dns-01"))}
+                    aria-label={t.projectSettings.domains.add.dnsChallenge}
                     disabled={wildcardDomain}
                     aria-pressed={effectiveSslChallenge === "dns-01"}
                     className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${effectiveSslChallenge === "dns-01" ? "bg-primary" : "bg-muted"}`}
@@ -2030,9 +2320,9 @@ export const DomainSettings = () => {
                   className="inline-flex items-center gap-2 rounded-xl bg-foreground px-4 py-2.5 text-[13px] font-medium text-background transition-colors hover:bg-foreground/90 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {isSubmitting ? (
-                    <Loader2 className="size-4 animate-spin" />
+                    <UiIcon name="spinner" className="size-4 animate-spin" />
                   ) : (
-                    <Plus className="size-4" />
+                    <UiIcon name="plus" className="size-4" />
                   )}
                   {isSubmitting ? t.projectSettings.domains.add.adding : t.projectSettings.domains.add.submit}
                 </button>
@@ -2048,7 +2338,7 @@ export const DomainSettings = () => {
                   ? t.projectSettings.domains.dns.descPreview
                   : t.projectSettings.domains.dns.descApply
               }
-              icon={Link2}
+              icon={"link"}
               iconTone="orange"
             >
               <div className="space-y-3">
@@ -2080,7 +2370,7 @@ export const DomainSettings = () => {
                           ? t.projectSettings.domains.dns.verifying
                           : interpolate(t.projectSettings.domains.dns.verify, { hostname: pending.hostname })
                       }
-                      icon={verifyingDomainId === pending.id ? Loader2 : RefreshCw}
+                      icon={verifyingDomainId === pending.id ? "spinner" : "refresh"}
                       onClick={() => startVerify(pending.id, pending.hostname)}
                       disabled={verifyingDomainId === pending.id}
                     />
@@ -2106,7 +2396,7 @@ export const DomainSettings = () => {
         <SectionCard
           title={domainMeta.title}
           description={domainMeta.subtitle}
-          icon={Globe}
+          icon={"globe"}
           iconTone="primary"
           actions={singleDomainActions}
         >
@@ -2142,7 +2432,7 @@ export const DomainSettings = () => {
             {renderEdgeControl()}
             <ActionButton
               label={showCustomDomainSection ? t.projectSettings.domains.actions.hideSetup : t.projectSettings.domains.actions.addDomain}
-              icon={Plus}
+              icon={"plus"}
               onClick={handleToggleCustomDomain}
             />
           </div>
@@ -2218,9 +2508,9 @@ export const DomainSettings = () => {
                 className="inline-flex items-center justify-center gap-2 rounded-xl bg-foreground px-4 py-2.5 text-[13px] font-medium text-background transition-colors hover:bg-foreground/90 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {isSavingPublicEndpoints ? (
-                  <Loader2 className="size-4 animate-spin" />
+                  <UiIcon name="spinner" className="size-4 animate-spin" />
                 ) : (
-                  <CheckCircle2 className="size-4" />
+                  <UiIcon name="check-circle" className="size-4" />
                 )}
                 {isSavingPublicEndpoints ? t.projectSettings.domains.edit.saving : t.projectSettings.domains.edit.save}
               </button>
@@ -2229,7 +2519,7 @@ export const DomainSettings = () => {
         </div>
       ) : null}
 
-      {!hasProjectLevelRouting && (servicesLoading || services.length > 0) && (
+      {!hasProjectLevelRouting && (servicesLoading || (serviceScope ? !!scopedService : services.length > 0)) && (
         <div className="space-y-3">
           <div className="flex flex-wrap items-center justify-end gap-2">
             {/* Migrated/edgeless stacks: routes may be recorded but the server's
@@ -2239,8 +2529,9 @@ export const DomainSettings = () => {
                 surfacing the takeover consent if a foreign proxy holds 80/443). */}
             {renderEdgeControl()}
             <ActionButton
-              label={showAddRoute ? t.projectSettings.domains.addRoute.cancel : t.projectSettings.domains.addRoute.add}
-              icon={Plus}
+              label={showAddRoute ? t.projectSettings.domains.addRoute.cancel : t.projectSettings.domains.actions.addDomain}
+              icon={"plus"}
+              disabled={addRouteSaving || servicesLoading || !!servicesData.error}
               onClick={() => {
                 setAddRouteError(null);
                 setShowAddRoute((v) => !v);
@@ -2248,12 +2539,27 @@ export const DomainSettings = () => {
             />
           </div>
           {showAddRoute && (
-            <div className="mb-4 space-y-3 rounded-xl border border-border/50 bg-muted/20 p-4">
+            <form onSubmit={(event) => { event.preventDefault(); void handleAddRoute(); }} className="mb-4 space-y-3 rounded-xl border border-border/50 bg-muted/20 p-4">
+              {!serviceScope && (
+                <select aria-label={t.projectDetail.services.detail.networking.service}
+                  value={addRouteServiceId} disabled={addRouteSaving || servicesLoading}
+                  onChange={(event) => {
+                    const service = services.find((item) => item.id === event.target.value);
+                    setAddRouteServiceId(event.target.value);
+                    const port = service && servicePortTargets(service, baseDomain).find((target) => target.protocol === "tcp" && target.port)?.port;
+                    setAddRouteDraft((draft) => ({ ...draft, port: port ? String(port) : "" }));
+                  }}
+                  className="h-10 w-full rounded-xl border border-border/50 bg-background px-3 text-sm text-foreground outline-none focus:border-primary/40">
+                  <option value="">{t.projectDetail.services.detail.networking.selectService}</option>
+                  {services.map((service) => <option key={service.id} value={service.id}>{service.name}</option>)}
+                </select>
+              )}
               <div className="flex items-center gap-2">
                 {(["free", "custom"] as const).map((type) => (
                   <button
                     key={type}
                     type="button"
+                    disabled={addRouteSaving}
                     onClick={async () => {
                       if (type === "free" && !(await freeNeedsCloud())) return;
                       setAddRouteDraft((d) => ({ ...d, domainType: type }));
@@ -2272,9 +2578,11 @@ export const DomainSettings = () => {
                 <div className="flex flex-1 items-center overflow-hidden rounded-xl border border-border/50 bg-background">
                   <input
                     value={addRouteDraft.domain}
+                    disabled={addRouteSaving}
+                    aria-label={t.projectSettings.domains.add.domainName}
                     onChange={(e) => setAddRouteDraft((d) => ({ ...d, domain: e.target.value }))}
                     placeholder={addRouteDraft.domainType === "custom" ? t.projectSettings.domains.addRoute.customPlaceholder : projectLabel || t.projectSettings.domains.addRoute.defaultServiceName}
-                    className="flex-1 bg-transparent px-3 py-2.5 text-sm text-foreground outline-none placeholder:text-muted-foreground/50"
+                    className="min-w-0 flex-1 bg-transparent px-3 py-2.5 text-sm text-foreground outline-none placeholder:text-muted-foreground/50"
                   />
                   {addRouteDraft.domainType === "free" && (
                     <span className="shrink-0 pe-3 text-sm text-muted-foreground">.{baseDomain}</span>
@@ -2284,37 +2592,39 @@ export const DomainSettings = () => {
                   <span className="text-[13px] text-muted-foreground">{t.projectSettings.domains.addRoute.port}</span>
                   <input
                     value={addRouteDraft.port}
+                    aria-label={t.projectDetail.services.detail.networking.containerPort}
+                    disabled={addRouteSaving}
+                    readOnly={!!serviceScope && !!portFilter}
                     onChange={(e) => setAddRouteDraft((d) => ({ ...d, port: e.target.value }))}
                     placeholder={t.projectSettings.domains.addRoute.portPlaceholder}
                     inputMode="numeric"
                     className="w-24 rounded-xl border border-border/50 bg-background px-3 py-2.5 text-sm text-foreground outline-none"
                   />
                   <button
-                    type="button"
-                    onClick={() => void handleAddRoute()}
-                    disabled={addRouteSaving}
+                    type="submit"
+                    disabled={addRouteSaving || servicesLoading || !!servicesData.error}
                     className="inline-flex items-center gap-1.5 rounded-xl bg-foreground px-4 py-2.5 text-[13px] font-medium text-background transition-colors hover:bg-foreground/90 disabled:opacity-50"
                   >
-                    {addRouteSaving ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
+                    {addRouteSaving ? <UiIcon name="spinner" className="size-4 animate-spin" /> : <UiIcon name="plus" className="size-4" />}
                     {t.projectSettings.domains.addRoute.submit}
                   </button>
                 </div>
               </div>
               {addRouteError && <p className="text-[12px] text-destructive">{addRouteError}</p>}
-            </div>
+            </form>
           )}
 
           {servicesLoading ? (
             <div className="py-8 text-center text-sm text-muted-foreground">{t.projectSettings.domains.addRoute.loading}</div>
-          ) : serviceRouteCards.length === 0 && orphanDomainCards.length === 0 ? (
+          ) : visibleServiceRoutes.length === 0 && visibleOrphanRoutes.length === 0 && !showAddRoute ? (
             <div className="py-8 text-center text-sm text-muted-foreground">
               {t.projectSettings.domains.addRoute.emptyPrefix}<span className="font-medium text-foreground">{t.projectSettings.domains.addRoute.emptyAction}</span>{t.projectSettings.domains.addRoute.emptySuffix}
             </div>
           ) : (
             <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-              {serviceRouteCards.map(({ service, summary }) =>
+              {visibleServiceRoutes.map(({ summary }) =>
                 renderRouteCard(summary, {
-                  onEdit: () => setEditingRouteServiceId(service.id),
+                  onEdit: () => setEditingRouteTarget(summary),
                   // Choosing a canonical domain only makes sense with >1 route.
                   onSetPrimary:
                     totalRouteCards > 1 && summary.domainId && !summary.isPrimary
@@ -2326,7 +2636,7 @@ export const DomainSettings = () => {
                   own hostname, a domain whose service was removed). No service to
                   edit, so no Edit route action — but verify / recheck SSL / renew /
                   delete all still apply, which is the point of listing them. */}
-              {orphanDomainCards.map((summary) =>
+              {visibleOrphanRoutes.map((summary) =>
                 renderRouteCard(summary, {
                   onSetPrimary:
                     totalRouteCards > 1 && summary.domainId && !summary.isPrimary
@@ -2341,11 +2651,11 @@ export const DomainSettings = () => {
 
       {/* Routing (rewrites/redirects/headers) — advanced, sits AFTER the
           domain/route cards so the primary domain list leads the page. */}
-      <RoutingConfigCard
+      {!serviceScope && <RoutingConfigCard
         id={id}
         initial={projectData.routingConfig}
         onSaved={(cfg) => setProjectData((prev) => ({ ...prev, routingConfig: cfg }))}
-      />
+      />}
 
       {/* Edge security rules (rate-limit / ban / geo / hotlink) — a distinct
           feature from the routing config above, but the same kind of edge
@@ -2353,12 +2663,12 @@ export const DomainSettings = () => {
           Advanced tab. */}
       {/* Route rules are a self-hosted-edge feature (local-only endpoints); a
           cloud-owned project uses the Oblien edge, so hide them for cloud. */}
-      {!isCloudProject && <RouteRules />}
+      {!serviceScope && !isCloudProject && <RouteRules />}
 
-      {editingRouteService && editingRoute && routeDraft && (
+      {editingRouteService && editingRouteTarget && routeDraft && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 p-4 backdrop-blur-sm"
-          onClick={() => setEditingRouteServiceId(null)}
+          onClick={() => !routeSaving && setEditingRouteTarget(null)}
         >
           <div
             className="w-full max-w-2xl overflow-hidden rounded-2xl border border-border/60 bg-card shadow-xl"
@@ -2369,14 +2679,13 @@ export const DomainSettings = () => {
                 <h3 className="text-[14px] font-semibold text-foreground">{t.projectSettings.domains.editRoute.title}</h3>
                 <p className="mt-0.5 truncate text-[12px] text-muted-foreground">
                   {editingRouteService.name}
-                  {editingRoute.liveUrl
-                    ? ` · ${editingRoute.liveUrl.replace("https://", "")}`
-                    : ` · ${t.projectSettings.domains.editRoute.internalOnly}`}
+                  {` · ${editingRouteTarget.hostname}`}
                 </p>
               </div>
               <button
                 type="button"
-                onClick={() => setEditingRouteServiceId(null)}
+                disabled={routeSaving}
+                onClick={() => setEditingRouteTarget(null)}
                 className="inline-flex min-h-9 items-center rounded-xl bg-foreground/[0.06] px-3 text-[12px] font-medium text-foreground transition-colors hover:bg-foreground/[0.1]"
               >
                 {t.projectSettings.domains.editRoute.close}
@@ -2389,15 +2698,14 @@ export const DomainSettings = () => {
                 domain={routeDraft.domain}
                 customDomain={routeDraft.customDomain}
                 domainType={routeDraft.domainType}
-                exposed={routeDraft.exposed}
-                ports={editingRouteService.ports}
+                ports={servicePortTargets(editingRouteService, baseDomain).filter((target) => target.port && target.protocol === "tcp").map((target) => String(target.port))}
                 exposedPort={routeDraft.exposedPort}
                 disabled={routeSaving}
-                liveUrl={editingRoute.connected ? editingRoute.liveUrl : null}
+                liveUrl={editingRouteTarget.liveUrl}
+                portInline
                 // The card edits the in-memory draft only — the API is hit ONCE
                 // on Save. saveMode="change" reports each edit straight to state
                 // (no per-keystroke/per-toggle request, no inline pill).
-                onExposedChange={(value) => setRouteDraft((prev) => (prev ? { ...prev, exposed: value } : prev))}
                 onDomainTypeChange={async (value) => {
                   if (value === "free" && !(await freeNeedsCloud())) return;
                   setRouteDraft((prev) => (prev ? { ...prev, domainType: value } : prev));
@@ -2407,7 +2715,7 @@ export const DomainSettings = () => {
                 onExposedPortChange={(value) => setRouteDraft((prev) => (prev ? { ...prev, exposedPort: value } : prev))}
                 saveMode="change"
               />
-              {!editingRouteService.enabled && routeDraft.exposed && (
+              {!editingRouteService.enabled && (
                 <p className="mt-3 text-xs text-warning">
                   {t.projectSettings.domains.editRoute.disabledWarning}
                 </p>
@@ -2421,7 +2729,7 @@ export const DomainSettings = () => {
                 disabled={!routeDirty || routeSaving}
                 className="inline-flex min-h-9 items-center gap-1.5 rounded-xl bg-primary px-4 text-[12px] font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                {routeSaving && <Loader2 className="size-3.5 animate-spin" />}
+                {routeSaving && <UiIcon name="spinner" className="size-3.5 animate-spin" />}
                 {t.projectSettings.domains.editRoute.save}
               </button>
             </div>
@@ -2484,7 +2792,7 @@ export const DomainSettings = () => {
                   disabled={isUploadingCert || !certPem.trim() || !keyPem.trim()}
                   className="inline-flex min-h-9 items-center gap-2 rounded-xl bg-primary px-4 text-[12px] font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
                 >
-                  {isUploadingCert && <Loader2 className="size-4 animate-spin" />}
+                  {isUploadingCert && <UiIcon name="spinner" className="size-4 animate-spin" />}
                   {isUploadingCert ? t.projectSettings.domains.certUpload.submitting : t.projectSettings.domains.certUpload.submit}
                 </button>
               </div>
@@ -2504,7 +2812,7 @@ export const DomainSettings = () => {
           >
             <div className="flex items-start gap-3 px-5 pt-5">
               <span className="mt-0.5 inline-flex size-9 shrink-0 items-center justify-center rounded-xl bg-danger-bg text-danger">
-                <Trash2 className="size-4" />
+                <UiIcon name="trash" className="size-4" />
               </span>
               <div className="min-w-0">
                 <h3 className="text-[14px] font-semibold text-foreground">Remove route</h3>
@@ -2529,7 +2837,7 @@ export const DomainSettings = () => {
                 disabled={removing}
                 className="inline-flex min-h-9 items-center gap-2 rounded-xl bg-danger-solid px-4 text-[12px] font-medium text-white transition-colors hover:bg-danger-solid/90 disabled:opacity-50"
               >
-                {removing && <Loader2 className="size-4 animate-spin" />}
+                {removing && <UiIcon name="spinner" className="size-4 animate-spin" />}
                 {removing ? "Removing…" : "Remove route"}
               </button>
             </div>
@@ -2558,7 +2866,7 @@ function SectionCard({
 }: {
   title: string;
   description: string;
-  icon: React.ComponentType<{ className?: string }>;
+  icon: IconName;
   iconTone?: keyof typeof ICON_TONES;
   headerBadge?: React.ReactNode;
   actions?: React.ReactNode;
@@ -2571,7 +2879,7 @@ function SectionCard({
           <div
             className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${ICON_TONES[iconTone]}`}
           >
-            <Icon className="size-4" />
+            <UiIcon name={Icon} className="size-4" />
           </div>
           <div className="min-w-0 flex-1">
             <h3 className="text-[14px] font-semibold text-foreground">{title}</h3>
@@ -2630,8 +2938,8 @@ function StatusPill({
     <span
       className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-semibold ${styles}`}
     >
-      {tone === "success" ? <CheckCircle2 className="size-3" /> : null}
-      {tone === "warning" || tone === "danger" ? <ShieldAlert className="size-3" /> : null}
+      {tone === "success" ? <UiIcon name="check-circle" className="size-3" /> : null}
+      {tone === "warning" || tone === "danger" ? <UiIcon name="shield-alert" className="size-3" /> : null}
       {children}
     </span>
   );
@@ -2646,7 +2954,7 @@ function ActionButton({
   spinning,
 }: {
   label: string;
-  icon: React.ComponentType<{ className?: string }>;
+  icon: IconName;
   href?: string;
   onClick?: () => void;
   disabled?: boolean;
@@ -2660,7 +2968,7 @@ function ActionButton({
   if (href) {
     return (
       <a href={href} target="_blank" rel="noopener noreferrer" className={className}>
-        <Icon className={iconClassName} />
+        <UiIcon name={Icon} className={iconClassName} />
         {label}
       </a>
     );
@@ -2668,7 +2976,7 @@ function ActionButton({
 
   return (
     <button onClick={onClick} disabled={disabled} className={className}>
-      <Icon className={iconClassName} />
+      <UiIcon name={Icon} className={iconClassName} />
       {label}
     </button>
   );
@@ -2677,13 +2985,6 @@ function ActionButton({
 /** Container port from the first compose `ports` mapping: "8080:80" → "80",
  *  "80" → "80", "80/tcp" → "80". Mirrors RoutingSettingsCard's portOptions so
  *  the edit-route field pre-fills the same value the datalist suggests. */
-function firstContainerPort(ports?: string[] | null): string {
-  const first = (ports ?? [])[0];
-  if (!first) return "";
-  const parts = first.split(":");
-  return (parts.length === 2 ? parts[1] : parts[0]).split("/")[0];
-}
-
 /**
  * A status pill that becomes a BUTTON when there's a reason behind it.
  *
@@ -2702,7 +3003,7 @@ function DiagnosablePill({
 }: {
   tone: DomainTone;
   label: string;
-  diagnosis?: { message: string | null; attempts: number };
+  diagnosis?: DomainDiagnosis;
   open: boolean;
   onToggle: () => void;
   t: Dictionary;
@@ -2719,7 +3020,7 @@ function DiagnosablePill({
       className="inline-flex items-center gap-1 rounded-full transition-opacity hover:opacity-80 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
     >
       <StatusPill tone={tone}>{label}</StatusPill>
-      <Info className="size-3.5 text-muted-foreground" />
+      <UiIcon name="info" className="size-3.5 text-muted-foreground" />
     </button>
   );
 }
@@ -2730,6 +3031,10 @@ function DomainOverviewCard({
   sslActionBusy = false,
   sslActionLabel,
   onVerify,
+  verifyLabel,
+  onRetryRouting,
+  onRetryDiagnosis,
+  retryBusy = false,
   verifying = false,
   verifyHint,
   loadRecords,
@@ -2748,6 +3053,10 @@ function DomainOverviewCard({
   /** Label for the in-flight SSL action ("Renewing…" / "Rechecking…"). */
   sslActionLabel?: string;
   onVerify?: () => void;
+  verifyLabel?: string;
+  onRetryRouting?: () => void;
+  onRetryDiagnosis?: () => void;
+  retryBusy?: boolean;
   verifying?: boolean;
   /** Message naming the DNS record that still isn't resolving after a fail. */
   verifyHint?: string | null;
@@ -2761,9 +3070,9 @@ function DomainOverviewCard({
   /** Live static-output advisory — which of the three static-404 shapes this is. */
   outputHint?: OutputHint | null;
 }) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const d = t.projectSettings.domains;
-  const canVerify = domain.needsVerify && !!domain.domainId;
+  const canVerify = domain.needsVerify && !!domain.domainId && !!onVerify;
   const [diagnosisOpen, setDiagnosisOpen] = useState(false);
   const [recordsOpen, setRecordsOpen] = useState(false);
   const [records, setRecords] = useState<DnsRecord[] | null>(null);
@@ -2822,7 +3131,7 @@ function DomainOverviewCard({
           <p className="mt-1 text-[12px] text-muted-foreground">{domain.typeLabel}</p>
         </div>
         <div className="flex shrink-0 items-center gap-0.5">
-          {domain.liveUrl ? (
+          {domain.liveUrl && !domain.hostname.startsWith("*.") ? (
             <a
               href={domain.liveUrl}
               target="_blank"
@@ -2831,10 +3140,10 @@ function DomainOverviewCard({
               aria-label={d.overview.visit}
               className="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
             >
-              <ExternalLink className="size-4" />
+              <UiIcon name="arrow-up-right" className="size-4" />
             </a>
           ) : null}
-          {menuActions.length > 0 ? <DropdownMenu actions={menuActions} align="right" /> : null}
+          {menuActions.length > 0 ? <DropdownMenu actions={menuActions} align="right" triggerLabel={`${t.projectDetail.services.detail.networking.manage} ${domain.hostname}`} /> : null}
         </div>
       </div>
 
@@ -2886,7 +3195,7 @@ function DomainOverviewCard({
             pill it's acting on; the completion toast still fires as before. */}
         {sslActionBusy ? (
           <div className="flex items-center gap-2 rounded-xl border border-primary/20 bg-primary/5 px-3 py-2.5 text-[12px] text-foreground">
-            <Loader2 className="size-3.5 shrink-0 animate-spin text-primary" />
+            <UiIcon name="spinner" className="size-3.5 shrink-0 animate-spin text-primary" />
             <span>{sslActionLabel}</span>
           </div>
         ) : null}
@@ -2894,13 +3203,45 @@ function DomainOverviewCard({
             sits next to the pill that has the problem and stays open while the
             operator fixes DNS and re-checks. */}
         {diagnosisOpen && domain.diagnosis ? (
-          <div className="rounded-xl border border-danger/20 bg-danger-bg/40 p-3">
-            <p className="text-[12px] font-semibold text-foreground">
-              {d.diagnosis.title}
-            </p>
+          <div
+            className="rounded-xl border border-border/60 bg-muted/30 p-3"
+            role="region"
+            aria-label={`${d.diagnosis.title}: ${domain.hostname}`}
+          >
+            <p className="text-[12px] font-semibold text-foreground">{d.diagnosis.title}</p>
             <p className="mt-1.5 whitespace-pre-wrap break-words text-[12px] leading-relaxed text-muted-foreground">
-              {domain.diagnosis.message?.trim() || d.diagnosis.noneYet}
+              {domain.diagnosis.message?.trim() || d.diagnosis.reasons[domain.diagnosis.reason]}
             </p>
+            {domain.diagnosis.message && domain.diagnosis.reason !== "verification" ? (
+              <p className="mt-2 text-[12px] leading-relaxed text-muted-foreground">
+                {d.diagnosis.reasons[domain.diagnosis.reason]}
+              </p>
+            ) : null}
+            {domain.diagnosis.lastCheckedAt ? (
+              <p className="mt-2 text-[11px] text-muted-foreground">
+                {d.diagnosis.lastChecked}{" "}
+                <time dateTime={domain.diagnosis.lastCheckedAt}>
+                  {new Date(domain.diagnosis.lastCheckedAt).toLocaleString(locale)}
+                </time>
+              </p>
+            ) : null}
+            {domain.diagnosis.nextRetryAt ? (
+              <p className="mt-2 text-[12px] text-muted-foreground">
+                {d.diagnosis.nextCheck}{" "}
+                <time dateTime={domain.diagnosis.nextRetryAt}>
+                  {new Date(domain.diagnosis.nextRetryAt).toLocaleString(locale)}
+                </time>
+                <span className="mt-1 block text-[11px]">{d.diagnosis.scheduleHint}</span>
+              </p>
+            ) : domain.diagnosis.automaticRetry === "disabled" ? (
+              <p className="mt-2 text-[12px] text-muted-foreground">
+                {d.diagnosis.automaticDisabled}
+              </p>
+            ) : domain.diagnosis.automaticRetry === "unavailable" ? (
+              <p className="mt-2 text-[12px] text-muted-foreground">
+                {d.diagnosis.scheduleUnavailable}
+              </p>
+            ) : null}
             {domain.diagnosis.attempts > 0 ? (
               <p className="mt-2 text-[11px] text-muted-foreground/80">
                 {interpolate(d.diagnosis.attempts, {
@@ -2908,12 +3249,31 @@ function DomainOverviewCard({
                 })}
               </p>
             ) : null}
+            {onRetryDiagnosis ? (
+              <button
+                type="button"
+                onClick={onRetryDiagnosis}
+                disabled={retryBusy}
+                className="mt-3 inline-flex min-h-9 items-center gap-1.5 rounded-xl bg-primary px-3.5 text-[13px] font-medium text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {retryBusy ? (
+                  <UiIcon name="spinner" className="size-3.5 animate-spin" />
+                ) : (
+                  <UiIcon name="refresh" className="size-3.5" />
+                )}
+                {retryBusy
+                  ? d.diagnosis.checking
+                  : domain.diagnosis.retryAction === "verify_ssl"
+                    ? d.menu.recheckSsl
+                    : d.diagnosis.retryNow}
+              </button>
+            ) : null}
           </div>
         ) : null}
 
         {portHint ? (
           <div className="flex items-start gap-2 rounded-xl border border-warning-border bg-warning-bg/40 px-3 py-2.5 text-[12px] text-warning">
-            <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+            <UiIcon name="warning" className="mt-0.5 size-3.5 shrink-0" />
             <span>
               {portHint.serviceName
                 ? interpolate(d.portHint.bodyService, { service: portHint.serviceName, port: String(portHint.port) })
@@ -2924,7 +3284,7 @@ function DomainOverviewCard({
 
         {outputHint ? (
           <div className="flex items-start gap-2 rounded-xl border border-warning-border bg-warning-bg/40 px-3 py-2.5 text-[12px] text-warning">
-            <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+            <UiIcon name="warning" className="mt-0.5 size-3.5 shrink-0" />
             <span>
               {outputHint.kind === "notServed"
                 ? interpolate(d.outputHint.notServed, {
@@ -2938,17 +3298,29 @@ function DomainOverviewCard({
           </div>
         ) : null}
 
+        {!domain.domainId && onRetryRouting ? (
+          <button
+            type="button"
+            onClick={onRetryRouting}
+            disabled={retryBusy}
+            className="inline-flex min-h-9 items-center gap-1.5 rounded-xl bg-primary px-3.5 text-[13px] font-medium text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <UiIcon name="refresh" className="size-3.5" />
+            {t.projects.routingRetry.retry}
+          </button>
+        ) : null}
+
         {canVerify ? (
           <div className="space-y-3 border-t border-border/40 pt-3">
             <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
                 onClick={onVerify}
-                disabled={verifying}
+                disabled={verifying || retryBusy}
                 className="inline-flex min-h-9 items-center gap-1.5 rounded-xl bg-primary px-3.5 text-[13px] font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                {verifying ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
-                {verifying ? d.menu.verifying : d.menu.verify}
+                {verifying ? <UiIcon name="spinner" className="size-3.5 animate-spin" /> : <UiIcon name="refresh" className="size-3.5" />}
+                {verifying ? d.menu.verifying : verifyLabel ?? d.menu.verify}
               </button>
               {loadRecords ? (
                 <button
@@ -2956,9 +3328,9 @@ function DomainOverviewCard({
                   onClick={() => (recordsOpen ? setRecordsOpen(false) : void openRecords())}
                   className="inline-flex min-h-9 items-center gap-1.5 rounded-xl bg-foreground/[0.06] px-3.5 text-[13px] font-medium text-foreground transition-colors hover:bg-foreground/[0.1]"
                 >
-                  <Link2 className="size-3.5" />
+                  <UiIcon name="link" className="size-3.5" />
                   {d.records.toggle}
-                  <ChevronDown className={`size-3.5 transition-transform ${recordsOpen ? "rotate-180" : ""}`} />
+                  <UiIcon name="chevron-down" className={`size-3.5 transition-transform ${recordsOpen ? "rotate-180" : ""}`} />
                 </button>
               ) : null}
             </div>
@@ -2977,7 +3349,7 @@ function DomainOverviewCard({
                 <p className="text-[12px] text-muted-foreground">{d.records.hint}</p>
                 {recordsLoading ? (
                   <div className="flex items-center gap-2 py-2 text-[12px] text-muted-foreground">
-                    <Loader2 className="size-3.5 animate-spin" /> {d.records.loading}
+                    <UiIcon name="spinner" className="size-3.5 animate-spin" /> {d.records.loading}
                   </div>
                 ) : recordsError ? (
                   <div className="flex flex-wrap items-center gap-2 py-2 text-[12px] text-warning">

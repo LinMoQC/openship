@@ -140,6 +140,8 @@ export type RequestOptions = Omit<RequestInit, "body"> & {
   body?: unknown;
   /** Per-request timeout in ms (default 15 000). */
   timeout?: number;
+  /** Set false after a mutation to avoid reusing a read started before it. */
+  dedupe?: boolean;
   /** URL search params appended to the path. */
   params?: Record<string, string | number | boolean | undefined>;
 };
@@ -181,7 +183,7 @@ function buildInflightKey(method: string, url: URL): string {
  */
 async function request<T = unknown>(
   path: string,
-  { body, timeout = DEFAULT_TIMEOUT, params, ...init }: RequestOptions = {},
+  { body, timeout = DEFAULT_TIMEOUT, params, dedupe = true, ...init }: RequestOptions = {},
 ): Promise<T> {
   /* --- Build URL -------------------------------------------------- */
   const cleanPath = path.startsWith("/") ? path.slice(1) : path;
@@ -201,17 +203,16 @@ async function request<T = unknown>(
   if (method === "GET") {
     const key = buildInflightKey(method, url);
     const existing = inflightRequests.get(key);
-    if (existing) return existing as Promise<T>;
+    if (dedupe && existing) return existing as Promise<T>;
     // We register the promise BEFORE awaiting it so racing callers in
     // the same tick see it. The wrapping promise drops the entry on
     // settle so the cache is never stale.
-    const promise = doFetch<T>(url, body, timeout, init);
-    inflightRequests.set(key, promise);
-    promise.finally(() => {
+    const promise = doFetch<T>(url, body, timeout, init).finally(() => {
       if (inflightRequests.get(key) === promise) {
         inflightRequests.delete(key);
       }
     });
+    inflightRequests.set(key, promise);
     return promise;
   }
 

@@ -22,38 +22,38 @@ function text(html: string) {
 }
 
 const state = (tier: BillingState["tier"]): BillingState =>
-  ({ tier, status: "active", monthlyCreditLimit: 4_000_000 }) as unknown as BillingState;
+  ({
+    tier, status: "active", monthlyCreditLimit: 1_200_000,
+    plan: tier === "free" ? null : {
+      ...PLANS[tier], monthlyCredits: 1_200_000,
+      name: "Live Cloud plan", price: { monthly: 1700, annual: 17000 },
+      features: ["Support from the live catalog"],
+    },
+  }) as unknown as BillingState;
 
-/**
- * The billing Overview used to state the plan TWICE — the left card carried the
- * name, the status pill and an upgrade button, and the right column repeated the
- * name, the price, the status and a SECOND upgrade button naming a different tier.
- * The itemised entitlements, meanwhile, were a wrapped hedge of pills in the left
- * card. This pins the split: identity + CTA on the left, the list on the right.
- */
-describe("billing sidebar — what's included", () => {
-  it("lists the tier's entitlements instead of restating the plan", () => {
+describe("billing sidebar", () => {
+  it("shows the paid plan's live price, credits and features", () => {
     const out = text(render(<BillingSidebar state={state("starter")} />));
     expect(out).toContain("What's included");
-    // Every catalog bullet for the tier reaches the column.
-    for (const feature of PLANS.starter.features) {
-      expect(out, feature).toContain(feature);
-    }
+    expect(out).toContain("Live Cloud plan");
+    expect(out).toContain("$17");
+    expect(out).toContain("1,200 credits / billing cycle");
+    expect(out).toContain("Support from the live catalog");
+    expect(out).not.toContain("$10");
   });
 
-  it("carries no second upgrade button", () => {
-    // Two panels each offering an upgrade — and naming different tiers — is the
-    // defect this replaced. The CTA now lives once, on the left-hand card.
+  it("keeps the no-plan promotion visible when the provider has no free product", () => {
     const out = render(<BillingSidebar state={state("free")} />);
-    expect(out).not.toMatch(/Upgrade to/i);
-    expect(out).not.toContain("/billing/plans");
+    expect(text(out)).toContain("Launch on Openship Cloud");
+    expect(out).toContain("/billing/plans");
+    expect(text(out)).not.toContain("Unlimited");
   });
 
-  it("names the plan once, as the subtitle of the list", () => {
-    const out = text(render(<BillingSidebar state={state("pro")} />));
-    expect(out).toContain("Pro Plan");
-    // The lead-in resolves as prose, not as a ticked feature (see `inheritedFrom`).
-    expect(out).toContain("Everything in Starter, plus:");
+  it("does not invent a price when the paid plan is absent from the response", () => {
+    const out = text(render(<BillingSidebar state={{ ...state("pro"), plan: null }} />));
+    expect(out).toContain("Compare all plans");
+    expect(out).not.toContain("$39");
+    expect(out).not.toContain("credits / billing cycle");
   });
 });
 

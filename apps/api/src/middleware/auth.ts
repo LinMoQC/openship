@@ -1,12 +1,13 @@
 import type { Context, Next } from "hono";
 import { randomUUID } from "node:crypto";
 import { repos } from "@repo/db";
-import { auth } from "../lib/auth";
-import { env, trustedOrigins } from "../config/env";
+import { SDK_SCOPE_HEADER, ValidationError } from "@repo/contracts";
+import { auth } from "@repo/platform/engine/lib/auth";
+import { env, trustedOrigins } from "@repo/platform/engine/config/env";
 import { ensureLocalUser } from "../lib/local-user";
 import { resolveActiveOrganizationId } from "./active-organization";
 import { zeroAuthAllowed } from "./zero-auth-guard";
-import { hashPatToken } from "../lib/pat";
+import { hashPatToken } from "@repo/platform/engine/lib/pat";
 import { isPatToken, parseBearerToken } from "../lib/bearer";
 import {
   buildRequestContext,
@@ -125,6 +126,7 @@ async function finishBearer(
   boundOrg: string | null,
   patScope: { tokenId: string; scoped: boolean } | undefined,
   principalKind: PrincipalKind,
+  readOnly: boolean,
 ): Promise<Response | typeof PAT_HANDLED> {
   const applied = await applyAuthedRequest(
     c,
@@ -133,6 +135,7 @@ async function finishBearer(
     "bearer",
     patScope,
     principalKind,
+    { organizationId: boundOrg, readOnly },
   );
   if (!applied) {
     return c.json({ error: "Invalid or expired access token", code: "INVALID_TOKEN" }, 401);
@@ -302,6 +305,7 @@ async function tryBearerAuth(
     resolved.organizationId,
     patScope,
     resolved.kind,
+    resolved.readOnly,
   );
 }
 
@@ -410,8 +414,24 @@ async function applyAuthedRequest(
   sessionKind: SessionKind,
   patScope?: { tokenId: string; scoped: boolean },
   principalKind?: PrincipalKind,
+  credential?: { organizationId: string | null; readOnly: boolean },
 ): Promise<boolean> {
-  const orgId = await resolveActiveOrganizationId(user.id, session?.activeOrganizationId ?? null);
+  const scopeHeader = c.req.header(SDK_SCOPE_HEADER)?.trim().toLowerCase();
+  if (scopeHeader !== undefined && scopeHeader !== "fixed") {
+    throw new ValidationError(`${SDK_SCOPE_HEADER} must be 'fixed' when provided`);
+  }
+  const fixedScope = scopeHeader === "fixed";
+  const requestedOrg = c.req.header("X-Organization-Id")?.trim();
+  if (fixedScope && !requestedOrg) {
+    throw new ValidationError("X-Organization-Id is required for fixed organization scope");
+  }
+  // A credential binding is not a UX default. If that membership disappeared,
+  // fail authentication instead of falling back to another organization.
+  const orgId =
+    credential?.organizationId ??
+    (fixedScope && requestedOrg
+      ? requestedOrg
+      : await resolveActiveOrganizationId(user.id, session?.activeOrganizationId ?? null));
   if (!orgId) return false;
 
   const membership = await repos.member.find(orgId, user.id);
@@ -450,6 +470,8 @@ async function applyAuthedRequest(
       sessionKind,
       principalKind: principalKind ?? null,
       tokenScope: patScope?.scoped ? { tokenId: patScope.tokenId } : null,
+      credential: credential ?? null,
+      scopeMode: fixedScope ? "fixed" : "resource",
       clientIp,
       userAgent,
       traceId: randomUUID(),

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
@@ -7,6 +7,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { drizzle } from "drizzle-orm/pglite";
 import { migrate } from "drizzle-orm/pglite/migrator";
 import * as schema from "./schema";
+import { createProjectConnectionRepo } from "./repos/project-connection.repo";
 
 // Does the migration chain actually APPLY to a database that already exists and
 // already holds rows?
@@ -243,6 +244,53 @@ describe("migration chain applies to an existing, populated database", () => {
     await migrate(db, { migrationsFolder: MIGRATIONS_DIR });
     expect(await appliedMigrations(client)).toBe(total);
   });
+
+  for (const missingNetworkFlag of [true, false]) {
+    test(`upgrades shared connections with the network flag ${missingNetworkFlag ? "missing" : "already present"}`, async () => {
+      const sharedMigration = "0128_shared_service_connections";
+      const cutoff = journal.entries.findIndex((entry) => entry.tag === sharedMigration) + 1;
+      expect(cutoff).toBeGreaterThan(0);
+      const legacy = migrationsPrefix(cutoff);
+      const { client, db } = await freshDb();
+      try {
+        if (missingNetworkFlag) {
+          // Early installs recorded 0128 before this column was added to its SQL.
+          // Editing that applied migration cannot repair those databases.
+          const path = join(legacy, `${sharedMigration}.sql`);
+          const statements = readFileSync(path, "utf8").split("--> statement-breakpoint");
+          writeFileSync(path, statements
+            .filter((statement) => !statement.includes("uses_private_network"))
+            .join("--> statement-breakpoint"));
+        }
+        await migrate(db, { migrationsFolder: legacy });
+        await client.exec("SET session_replication_role = replica;");
+        await seedRow(client, "project_connection", "existing-connection");
+        await client.exec(`UPDATE project_connection SET source_service_id = 'existing-service', mode = 'internal'`);
+        const repo = createProjectConnectionRepo(db);
+        if (missingNetworkFlag) {
+          await expect(repo.listByTarget("seed")).rejects.toThrow(/uses_private_network/);
+        } else {
+          await client.exec("UPDATE project_connection SET uses_private_network = false");
+        }
+
+        await migrate(db, { migrationsFolder: MIGRATIONS_DIR });
+        expect(await appliedMigrations(client)).toBe(total);
+        expect(await repo.listByTarget("seed")).toMatchObject([{
+          id: "existing-connection",
+          sourceServiceId: "existing-service",
+          envKey: "seed",
+          mode: "internal",
+          usesPrivateNetwork: missingNetworkFlag,
+        }]);
+        const links = await repo.listByTarget("seed");
+        await migrate(db, { migrationsFolder: MIGRATIONS_DIR });
+        expect(await repo.listByTarget("seed")).toEqual(links);
+      } finally {
+        await client.close();
+        rmSync(legacy, { recursive: true, force: true });
+      }
+    });
+  }
 
   // Without this, the two cases below are unfalsifiable: they'd pass just as happily if
   // the seeding silently stopped working or drizzle swallowed migration errors.

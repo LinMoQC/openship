@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildDomainFanoutRegistrations } from "./composite-route";
+import { buildDomainFanoutRegistrations } from "@repo/platform/engine/modules/deployments/compose/composite-route";
 import type { ProjectCompositeRoute } from "@repo/core";
 
 const onvo: ProjectCompositeRoute = {
@@ -53,14 +53,12 @@ describe("buildDomainFanoutRegistrations", () => {
     expect(regs).toEqual([]);
   });
 
-  it("drops only the unresolvable path location, keeps the domain on its root", () => {
+  it("keeps the previous domain route when a path upstream cannot resolve", () => {
     const regs = buildDomainFanoutRegistrations({
       routes: [onvo],
       resolveTargetUrl: (id) => (id === "svc-api" ? null : upstreams[id]),
     });
-    expect(regs).toEqual([
-      { hostname: "api.onvo.me", isCustomDomain: true, targetUrl: "http://10.0.0.1:1010" },
-    ]);
+    expect(regs).toEqual([]);
   });
 
   it("is a no-op for null / empty routes", () => {

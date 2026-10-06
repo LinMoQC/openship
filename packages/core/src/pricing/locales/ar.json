@@ -26,7 +26,6 @@
     "staticOnly": "المواقع الثابتة فقط — SSG وSPA وHTML عادي",
     "anyWorkload": "شغّل أي شيء — حاويات وCompose وعمليات خلفية وPostgres وRedis",
     "runningServices": "{runningServices} تطبيق أو قاعدة بيانات أو عملية خلفية قيد التشغيل",
-    "computeMinutes": "{computeMinutes} دقيقة حوسبة شهريًا",
     "buildMinutes": "{buildMinutes} دقيقة بناء شهريًا",
     "power": "حتى {powerCpu} vCPU و{powerRamGb} GB RAM لكل تطبيق",
     "projects": "{maxProjects} مشروع",
@@ -60,9 +59,9 @@
     "cta": "ابدأ الاستضافة الذاتية"
   },
   "creditPacks": {
-    "pack_5k": "{computeMinutes} دقيقة حوسبة",
-    "pack_25k": "{computeMinutes} دقيقة حوسبة",
-    "pack_100k": "{computeMinutes} دقيقة حوسبة"
+    "pack_5k": "{credits} رصيد",
+    "pack_25k": "{credits} رصيد",
+    "pack_100k": "{credits} رصيد"
   },
   "ui": {
     "perMonth": "/شهر",
@@ -80,6 +79,6 @@
     "campaignEnds": "ينتهي العرض في {date}",
     "wasPrice": "سابقًا {price}",
     "standardTitle": "في كل الخطط",
-    "creditPackNote": "≈ {appHours} ساعة لتطبيق صغير، أو {buildMinutes} دقيقة بناء"
+    "creditPackNote": "يُستخدم لاستهلاك السحابة المقاس؛ وتعتمد المدة على عبء العمل."
   }
 }

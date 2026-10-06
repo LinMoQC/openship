@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { composeDeployResultStatus } from "./deploy-result-status";
+import { composeDeployResultStatus } from "@repo/platform/engine/modules/deployments/compose/deploy-result-status";
 
 describe("composeDeployResultStatus", () => {
   it("does not publish a release when every selected live service failed", () => {

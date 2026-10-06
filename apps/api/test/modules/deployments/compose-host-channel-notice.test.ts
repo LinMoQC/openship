@@ -37,7 +37,7 @@ const h = vi.hoisted(() => ({
   updateServiceDeployment: vi.fn(),
   services: [] as Array<Record<string, unknown>>,
   previousServiceRows: [] as Array<Record<string, unknown>>,
-  previousDeployment: { id: "d-old", containerId: "compose", createdAt: null } as Record<
+  previousDeployment: { id: "d-old", projectId: "p1", organizationId: "org1", containerId: "compose", createdAt: null } as Record<
     string,
     unknown
   >,
@@ -92,16 +92,16 @@ vi.mock("@repo/db", () => ({
 
 // The row IS this box. Keyed off the flag so the test doesn't depend on loopback
 // resolution or on which org owns the box.
-vi.mock("../../../src/lib/box-org", () => ({
+vi.mock("@repo/platform/engine/lib/box-org", () => ({
   isLocalHostRow: async (row: { isLocal?: boolean }) => Boolean(row?.isLocal),
   boxOwningOrgId: async () => "org1",
 }));
 
-vi.mock("../../../src/lib/provision-lock", () => ({
+vi.mock("@repo/platform/engine/lib/provision-lock", () => ({
   createProvisionLock: () => ({ run: (f: () => unknown) => f() }),
 }));
 
-vi.mock("../../../src/modules/deployments/pinned-host-ports", () => ({
+vi.mock("@repo/platform/engine/modules/deployments/pinned-host-ports", () => ({
   withHostPortTargetLock: (_target: unknown, fn: () => unknown) => fn(),
   prepareTargetPinnedHostPorts: (...args: unknown[]) => h.prepareTargetPinnedHostPorts(...args),
   convergeTargetHostPortClaims: (...args: unknown[]) => h.convergeTargetHostPortClaims(...args),
@@ -112,13 +112,13 @@ vi.mock("../../../src/modules/deployments/pinned-host-ports", () => ({
   releaseNewPinnedHostPortClaims: (...args: unknown[]) => h.releaseNewPinnedHostPortClaims(...args),
 }));
 
-vi.mock("../../../src/modules/deployments/observed-host-port-claims", () => ({
+vi.mock("@repo/platform/engine/modules/deployments/observed-host-port-claims", () => ({
   reserveResolvedLoopbackRoutes: (...args: unknown[]) => h.reserveResolvedLoopbackRoutes(...args),
 }));
 
-const { resolveServerExecutor } = await import("../../../src/lib/deployment-runtime");
+const { resolveServerExecutor } = await import("@repo/platform/engine/lib/deployment-runtime");
 const { deployComposeServices, externalNetworkForServices } =
-  await import("../../../src/modules/deployments/compose/deploy.service");
+  await import("@repo/platform/engine/modules/deployments/compose/deploy.service");
 
 describe("externalNetworkForServices", () => {
   it("requires one external network on every networked service", () => {
@@ -199,6 +199,75 @@ function startingRuntime() {
     getContainerIp: vi.fn(async () => "172.18.0.3"),
   } as unknown as MultiServiceRuntimeAdapter;
 }
+
+it("deploys Cloud Compose endpoints, internal paths, generated files and container identities through one workspace", async () => {
+  const { CloudDockerRuntime } = await import("@repo/adapters");
+  const configurations: Array<Record<string, any>> = [];
+  const publishRoute = vi.fn(async () => undefined);
+  const pullImage = vi.fn(async () => undefined);
+  const runtime = Object.assign(Object.create(CloudDockerRuntime.prototype), {
+    name: "cloud", workspaceId: "shared-vm", projectId: "p1", unsupportedComposeKeys: new Set(),
+    supports: (cap: string) => cap === "dockerHost",
+    ensureServiceGroup: vi.fn(async () => ({ id: "shared-network", kind: "docker-network" })),
+    deployServiceWorkload: vi.fn(async (_group: unknown, config: Record<string, any>) => {
+      configurations.push(config);
+      const hostPortByContainerPort = config.serviceName === "web" ? { 8080: 30001, 9090: 30002 } : { 8080: 30003 };
+      return { status: "running", containerId: `${config.serviceName}-container`, hostPortByContainerPort };
+    }),
+    resolveRoutingTarget: vi.fn(async (id: string, port: number) => ({ workspace: "shared-vm",
+      port: id === "web-container" ? (port === 8080 ? 30001 : 30002) : 30003 })),
+    getContainerIp: vi.fn(async () => "172.18.0.2"), listAllContainers: vi.fn(async () => []),
+    destroy: vi.fn(async () => undefined), publishRoute, pullImage,
+  }) as CloudDockerRuntime;
+  const executor = {
+    exec: vi.fn(async () => ""), mkdir: vi.fn(async () => undefined), rm: vi.fn(async () => undefined),
+    rename: vi.fn(async () => undefined), writeFile: vi.fn(async () => undefined),
+  } as unknown as CommandExecutor;
+  h.services = [{ id: "svc-web", name: "web", projectId: "p1", kind: "compose", enabled: true, exposed: true,
+    ports: ["8080", "9090"], image: "web:v1", dependsOn: [], environment: {}, volumes: ["data:/data"],
+    exposedPort: "8080", domainType: "free", domain: "app", advanced: null,
+    publicEndpoints: [{ port: 8080, domain: "app", domainType: "free" }, { port: 9090, domain: "console", domainType: "free" }] },
+  { id: "svc-api", name: "api", projectId: "p1", kind: "compose", enabled: true, exposed: false,
+    ports: ["8080"], image: "api:v1", dependsOn: [], environment: {}, volumes: [],
+    advanced: { resources: { cpuCores: 2, memoryMb: 2048 }, files: [{ path: "/etc/app.yml", content: "enabled: true" }] } }];
+  h.previousServiceRows = [];
+  h.upsertServiceDeployment.mockImplementation(async row => {
+    h.previousServiceRows.push(row);
+    return row;
+  });
+  const { logger } = recordingLogger();
+  const result = await deployComposeServices({ ...project, cloudWorkspaceId: "shared-vm", routeStrategy: "auto",
+    compositeRoutes: [{ hostname: "app.opsh.io", isCustomDomain: false, rootServiceId: "svc-web",
+      locations: [{ pathPrefix: "/api/", serviceId: "svc-api" }] }] } as Project,
+  { ...dep, projectId: "p1", meta: { deployTarget: "cloud", runtimeMode: "docker", cloudDockerWorkspace: { projectId: "p1", workspaceId: "shared-vm" } } },
+  runtime, logger, { executor, localHost: false, usesManagedRouting: false, forcePullImages: true,
+    resources: { cpuCores: 1, memoryMb: 1024, diskMb: 8192 },
+    routing: { removeRoute: vi.fn(), registerRoute: vi.fn() } as never, ssl: { provisionCert: vi.fn(), verifyCert: vi.fn() } as never });
+  expect(result.status).toBe("ready");
+  expect(result.routeWarnings ?? []).toEqual([]);
+  expect(configurations.find(config => config.serviceName === "web")?.cloudEndpoints).toEqual([
+    { hostname: "app.opsh.io", port: 8080, custom: false }, { hostname: "console.opsh.io", port: 9090, custom: false },
+  ]);
+  const api = configurations.find(config => config.serviceName === "api")!;
+  expect(api.cloudEndpoints).toEqual([]);
+  expect(api.cloudProxyPorts).toEqual([8080]);
+  expect(api.volumes.some((volume: string) => volume.endsWith(":/etc/app.yml:ro"))).toBe(true);
+  expect(executor.writeFile).toHaveBeenCalledWith(expect.any(String), "enabled: true", expect.any(Object));
+  expect(pullImage).toHaveBeenCalledWith("web:v1", { force: true });
+  expect(pullImage).toHaveBeenCalledWith("api:v1", { force: true });
+  expect(h.upsertServiceDeployment).toHaveBeenCalledWith(expect.objectContaining({
+    serviceId: "svc-web", containerId: "web-container", hostPorts: { 8080: 30001, 9090: 30002 },
+    allocatedResources: { containerId: "web-container", cpuCores: 1, memoryMb: 1024 },
+  }));
+  expect(api.resources).toMatchObject({ cpuCores: 2, memoryMb: 2048 });
+  expect(h.upsertServiceDeployment).toHaveBeenCalledWith(expect.objectContaining({
+    serviceId: "svc-api", allocatedResources: { containerId: "api-container", cpuCores: 2, memoryMb: 2048 },
+  }));
+  expect(publishRoute).toHaveBeenCalledWith("app.opsh.io", 30001, false, expect.objectContaining({ routes: [
+    { match: { path: "/api/", type: "prefix" }, action: { kind: "proxy", workspace: "shared-vm", port: 30003 } },
+    { match: { path: "/", type: "prefix" }, action: { kind: "proxy", workspace: "shared-vm", port: 30001 } },
+  ] }));
+});
 
 function conditionedRuntime(
   events: string[],
@@ -282,7 +351,7 @@ beforeEach(() => {
       hostPorts: { 8080: 30_000 },
     },
   ];
-  h.previousDeployment = { id: "d-old", containerId: "compose", createdAt: null };
+  h.previousDeployment = { id: "d-old", projectId: "p1", organizationId: "org1", containerId: "compose", createdAt: null };
   h.prepareTargetPinnedHostPorts.mockResolvedValue([]);
   h.allocateAndReservePinnedHostPort.mockImplementation(async (input) => ({
     port: 30_000,
@@ -334,6 +403,23 @@ function addDisabledPreviousService() {
 }
 
 describe("compose deploy — host channel unavailable", () => {
+  it.each([false, true])("preserves a carried container's allocation rather than its unapplied settings (live inspect: %s)", async inspect => {
+    const runtime = carriedRuntime();
+    const allocatedResources = { containerId: "container-old", cpuCores: 2, memoryMb: 2048 };
+    h.previousServiceRows[0]!.allocatedResources = allocatedResources;
+    h.services[0]!.advanced = { resources: { cpuCores: 32, memoryMb: 32768 } };
+    if (inspect) vi.mocked(runtime.getContainerInfo).mockResolvedValue({ containerId: "container-old", status: "running",
+      resources: { cpuCores: 1, memoryMb: 1024 }, ip: "172.18.0.2" });
+    const { logger } = recordingLogger();
+    const result = await deployComposeServices({ ...project, activeDeploymentId: "d-old", routeStrategy: "container-ip" },
+      dep, runtime, logger, { targetServiceIds: new Set(), hostPortTarget: localHostPortTarget,
+        executor: { exec: vi.fn(async () => "") } as never });
+    expect(result.status).toBe("ready");
+    expect(h.upsertServiceDeployment).toHaveBeenCalledWith(expect.objectContaining({
+      serviceId: "svc-web", containerId: "container-old",
+      allocatedResources: inspect ? { containerId: "container-old", cpuCores: 1, memoryMb: 1024 } : allocatedResources,
+    }));
+  });
   it("does not prepare Edge when every service is private", async () => {
     h.services = [
       {
@@ -2113,3 +2199,5 @@ describe("compose deploy — host channel unavailable", () => {
     expect(h.convergeTargetHostPortClaimsUnlocked).not.toHaveBeenCalled();
   });
 });
+
+vi.mock("@repo/platform/engine/lib/platform-config", () => ({ platform: () => ({ target: "selfhosted" }) }));

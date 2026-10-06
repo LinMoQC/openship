@@ -4,7 +4,7 @@ on:
   push:
     tags:
       - 'v*.*.*'
-  # Manual run publishes ONLY the CLI to npm (current version, no tag / installers).
+  # Manual run publishes ONLY the SDK/CLI package to npm (current version, no tag / installers).
   workflow_dispatch: {}
 
 concurrency:
@@ -12,6 +12,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
+  actions: read
   contents: write
 
 jobs:
@@ -32,16 +33,29 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Reuse a verified successful job
+        id: resume
+        uses: ./.github/actions/release-resume
+        with:
+          scope: build
+          job-name: Build openship release artifact
+          workflow: .github/workflows/release.yml
+          job-id: build-openship
+          artifact: openship-release
+
       - name: Read bun version
+        if: steps.resume.outputs.reused != 'true'
         id: bun-version
         run: echo "version=$(cat .bun-version)" >> "$GITHUB_OUTPUT"
 
       - name: Setup Bun
+        if: steps.resume.outputs.reused != 'true'
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ steps.bun-version.outputs.version }}
 
       - name: Restore bun cache
+        if: steps.resume.outputs.reused != 'true'
         uses: actions/cache@v6
         with:
           path: ~/.bun/install/cache
@@ -50,12 +64,15 @@ jobs:
             ${{ runner.os }}-bun-
 
       - name: Install dependencies
+        if: steps.resume.outputs.reused != 'true'
         run: bun install --frozen-lockfile
 
       - name: Build openship release
+        if: steps.resume.outputs.reused != 'true'
         run: bun run --cwd apps/api build-release
 
       - name: Package release artifact
+        if: steps.resume.outputs.reused != 'true'
         id: package
         run: |
           set -euo pipefail
@@ -66,6 +83,7 @@ jobs:
           echo "artifact=${ARTIFACT}" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifact
+        if: steps.resume.outputs.reused != 'true'
         uses: actions/upload-artifact@v7
         with:
           name: openship-release
@@ -85,16 +103,29 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Reuse a verified successful job
+        id: resume
+        uses: ./.github/actions/release-resume
+        with:
+          scope: build
+          job-name: Build openship email release artifact
+          workflow: .github/workflows/release.yml
+          job-id: build-email
+          artifact: openship-email-release
+
       - name: Read bun version
+        if: steps.resume.outputs.reused != 'true'
         id: bun-version
         run: echo "version=$(cat .bun-version)" >> "$GITHUB_OUTPUT"
 
       - name: Setup Bun
+        if: steps.resume.outputs.reused != 'true'
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ steps.bun-version.outputs.version }}
 
       - name: Restore bun cache
+        if: steps.resume.outputs.reused != 'true'
         uses: actions/cache@v6
         with:
           path: ~/.bun/install/cache
@@ -103,12 +134,15 @@ jobs:
             ${{ runner.os }}-bun-
 
       - name: Install dependencies
+        if: steps.resume.outputs.reused != 'true'
         run: bun install --frozen-lockfile
 
       - name: Build email release
+        if: steps.resume.outputs.reused != 'true'
         run: bun run --cwd apps/email build
 
       - name: Package release artifact
+        if: steps.resume.outputs.reused != 'true'
         id: package
         run: |
           set -euo pipefail
@@ -122,6 +156,7 @@ jobs:
           echo "artifact=${ARTIFACT}" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifact
+        if: steps.resume.outputs.reused != 'true'
         uses: actions/upload-artifact@v7
         with:
           name: openship-email-release
@@ -141,16 +176,29 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Reuse a verified successful job
+        id: resume
+        uses: ./.github/actions/release-resume
+        with:
+          scope: build
+          job-name: Build dashboard bundle (lazy-downloaded by `openship up`)
+          workflow: .github/workflows/release.yml
+          job-id: build-dashboard
+          artifact: openship-dashboard-release
+
       - name: Read bun version
+        if: steps.resume.outputs.reused != 'true'
         id: bun-version
         run: echo "version=$(cat .bun-version)" >> "$GITHUB_OUTPUT"
 
       - name: Setup Bun
+        if: steps.resume.outputs.reused != 'true'
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ steps.bun-version.outputs.version }}
 
       - name: Restore bun cache
+        if: steps.resume.outputs.reused != 'true'
         uses: actions/cache@v6
         with:
           path: ~/.bun/install/cache
@@ -159,11 +207,13 @@ jobs:
             ${{ runner.os }}-bun-
 
       - name: Install dependencies
+        if: steps.resume.outputs.reused != 'true'
         run: bun install --frozen-lockfile
 
       # Standalone Next build. Force a production, self-hosted (local) build
       # regardless of ambient env — same flags build-release.ts uses.
       - name: Build dashboard (Next standalone)
+        if: steps.resume.outputs.reused != 'true'
         run: bun run --cwd apps/dashboard build
         env:
           NODE_ENV: production
@@ -172,6 +222,7 @@ jobs:
           NEXT_PUBLIC_API_PROXY: "true"
 
       - name: Package dashboard bundle
+        if: steps.resume.outputs.reused != 'true'
         id: package
         run: |
           set -euo pipefail
@@ -193,6 +244,7 @@ jobs:
           echo "artifact=$ARTIFACT" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifact
+        if: steps.resume.outputs.reused != 'true'
         uses: actions/upload-artifact@v7
         with:
           name: openship-dashboard-release
@@ -212,11 +264,23 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Reuse a verified successful job
+        id: resume
+        uses: ./.github/actions/release-resume
+        with:
+          scope: build
+          job-name: Build CLI runtime payload (downloaded by scripts/install.sh)
+          workflow: .github/workflows/release.yml
+          job-id: build-cli-payload
+          artifact: openship-cli-release
+
       - name: Read bun version
+        if: steps.resume.outputs.reused != 'true'
         id: bun-version
         run: echo "version=$(cat .bun-version)" >> "$GITHUB_OUTPUT"
 
       - name: Setup Bun
+        if: steps.resume.outputs.reused != 'true'
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ steps.bun-version.outputs.version }}
@@ -224,11 +288,13 @@ jobs:
       # Node is the SHIPPED runtime: the payload's `npm install` + load canary +
       # `node dist/index.js --version` must run under node, not bun.
       - name: Setup Node
+        if: steps.resume.outputs.reused != 'true'
         uses: actions/setup-node@v6
         with:
           node-version: '24'
 
       - name: Restore bun cache
+        if: steps.resume.outputs.reused != 'true'
         uses: actions/cache@v6
         with:
           path: ~/.bun/install/cache
@@ -237,15 +303,18 @@ jobs:
             ${{ runner.os }}-bun-
 
       - name: Install dependencies
+        if: steps.resume.outputs.reused != 'true'
         run: bun install --frozen-lockfile
 
       # tsup + stage-server (Bun.build) → dist/, then stage-cli-payload stages the
       # arch-independent prod closure and tars openship-cli-<TAG>.tar.gz. The tag
       # is taken from GITHUB_REF_NAME by the staging script.
       - name: Build CLI payload
+        if: steps.resume.outputs.reused != 'true'
         run: bun run --cwd apps/cli build:payload
 
       - name: Upload artifact
+        if: steps.resume.outputs.reused != 'true'
         uses: actions/upload-artifact@v7
         with:
           name: openship-cli-release
@@ -289,22 +358,36 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Reuse a verified successful job
+        id: resume
+        uses: ./.github/actions/release-resume
+        with:
+          scope: build
+          job-name: Build desktop installer (${{ matrix.label }})
+          workflow: .github/workflows/release.yml
+          job-id: build-desktop
+          artifact: desktop-${{ matrix.asset }}
+
       - name: Read bun version
+        if: steps.resume.outputs.reused != 'true'
         id: bun-version
         shell: bash
         run: echo "version=$(cat .bun-version)" >> "$GITHUB_OUTPUT"
 
       - name: Setup Bun
+        if: steps.resume.outputs.reused != 'true'
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ steps.bun-version.outputs.version }}
 
       - name: Setup Node
+        if: steps.resume.outputs.reused != 'true'
         uses: actions/setup-node@v6
         with:
           node-version: '24'
 
       - name: Restore bun cache
+        if: steps.resume.outputs.reused != 'true'
         uses: actions/cache@v6
         with:
           path: ~/.bun/install/cache
@@ -313,19 +396,26 @@ jobs:
             ${{ runner.os }}-bun-
 
       - name: Install dependencies
+        if: steps.resume.outputs.reused != 'true'
         run: bun install --frozen-lockfile
 
+      - name: Download and verify Cloudflare SSH client (Windows)
+        if: steps.resume.outputs.reused != 'true' && (runner.os == 'Windows')
+        run: node apps/desktop/scripts/fetch-cloudflared.mjs
+
       - name: Install AppImage build deps (Linux)
-        if: runner.os == 'Linux'
+        if: steps.resume.outputs.reused != 'true' && (runner.os == 'Linux')
         run: sudo apt-get update && sudo apt-get install -y libfuse2
 
       - name: Build installer
+        if: steps.resume.outputs.reused != 'true'
         shell: bash
         env:
           APPIMAGE_EXTRACT_AND_RUN: '1'
         run: bun run --cwd apps/desktop make
 
       - name: Collect + rename installer
+        if: steps.resume.outputs.reused != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -399,6 +489,7 @@ jobs:
           fi
 
       - name: Upload artifact
+        if: steps.resume.outputs.reused != 'true'
         uses: actions/upload-artifact@v7
         with:
           name: desktop-${{ matrix.asset }}
@@ -428,22 +519,36 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Reuse a verified successful job
+        id: resume
+        uses: ./.github/actions/release-resume
+        with:
+          scope: build
+          job-name: Build desktop installers (macOS arm64 + x64)
+          workflow: .github/workflows/release.yml
+          job-id: build-desktop-macos
+          artifact: desktop-macos
+
       - name: Read bun version
+        if: steps.resume.outputs.reused != 'true'
         id: bun-version
         shell: bash
         run: echo "version=$(cat .bun-version)" >> "$GITHUB_OUTPUT"
 
       - name: Setup Bun
+        if: steps.resume.outputs.reused != 'true'
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: ${{ steps.bun-version.outputs.version }}
 
       - name: Setup Node
+        if: steps.resume.outputs.reused != 'true'
         uses: actions/setup-node@v6
         with:
           node-version: '24'
 
       - name: Restore bun cache
+        if: steps.resume.outputs.reused != 'true'
         uses: actions/cache@v6
         with:
           path: ~/.bun/install/cache
@@ -452,13 +557,14 @@ jobs:
             ${{ runner.os }}-bun-
 
       - name: Install dependencies
+        if: steps.resume.outputs.reused != 'true'
         run: bun install --frozen-lockfile
 
       # Import the Developer ID cert into a throwaway keychain so `electron-forge
       # make` can sign (osxSign in forge.config.js activates when APPLE_IDENTITY
       # is set). Skipped entirely when the secret is absent → unsigned build.
       - name: Import Apple signing certificate
-        if: env.APPLE_IDENTITY != ''
+        if: steps.resume.outputs.reused != 'true' && (env.APPLE_IDENTITY != '')
         run: |
           set -euo pipefail
           KEYCHAIN="$RUNNER_TEMP/openship-signing.keychain-db"
@@ -482,6 +588,7 @@ jobs:
       # cross-compiles the x64 API binary and electron-packager fetches x64
       # Electron, so we don't depend on scarce macos-13 (Intel) runners.
       - name: Build macOS dmgs (arm64 + x64)
+        if: steps.resume.outputs.reused != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -498,7 +605,7 @@ jobs:
       # APPLE_IDENTITY only → signed-but-not-notarized (downloads still warn);
       # add APPLE_ID/PASSWORD/TEAM_ID → clean notarized download.
       - name: Sign, notarize + staple DMGs
-        if: env.APPLE_ID != ''
+        if: steps.resume.outputs.reused != 'true' && (env.APPLE_ID != '')
         run: |
           set -euo pipefail
           for arch in arm64 x64; do
@@ -516,6 +623,7 @@ jobs:
           done
 
       - name: Collect dmgs
+        if: steps.resume.outputs.reused != 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -530,6 +638,7 @@ jobs:
           done
 
       - name: Upload artifact
+        if: steps.resume.outputs.reused != 'true'
         uses: actions/upload-artifact@v7
         with:
           name: desktop-macos
@@ -542,7 +651,7 @@ jobs:
           retention-days: 7
 
   publish-npm:
-    name: Publish CLI to npm
+    name: Publish Openship to npm
     runs-on: ubuntu-24.04
     # npm is the ONE immutable artifact — a published version can never be
     # replaced. So it must publish LAST, only after every other job in the
@@ -603,8 +712,8 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Build CLI
-        run: bun run --cwd apps/cli build
+      - name: Build SDK and CLI package
+        run: bun run --cwd packages/openship build
 
       # Gate: run the ACTUAL built bundle across node/bun/shebang/no-node and
       # boot the real server. This is the last check before the IMMUTABLE npm
@@ -614,8 +723,11 @@ jobs:
       - name: Release smoke — built CLI launches + server boots
         run: SMOKE_SKIP_BUILD=1 bash apps/cli/scripts/release-smoke.sh
 
+      - name: Verify packed SDK outside the workspace
+        run: bun run --cwd packages/openship test:package
+
       - name: Publish to npm (OIDC trusted publishing — no token)
-        working-directory: apps/cli
+        working-directory: packages/openship
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
@@ -630,31 +742,9 @@ jobs:
             echo "::notice::${NAME}@${VERSION} already on npm — skipping publish (re-run of an existing release)."
             exit 0
           fi
-          # tsup bundles the @repo/* workspace packages into dist/, so they must
-          # NOT appear in the published manifest — a `workspace:*` specifier is
-          # uninstallable off the monorepo (bun/npm: "@repo/… failed to resolve").
-          # Strip EVERY workspace dependency generically: hard-coding the list
-          # once shipped a broken 0.4.1 that kept @repo/adapters. This can never
-          # silently miss a newly-added @repo/* again.
-          node -e '
-            const fs = require("fs");
-            const p = JSON.parse(fs.readFileSync("package.json", "utf8"));
-            const stripped = [];
-            for (const k of Object.keys(p.dependencies || {})) {
-              if (String(p.dependencies[k]).startsWith("workspace:")) {
-                delete p.dependencies[k];
-                stripped.push(k);
-              }
-            }
-            fs.writeFileSync("package.json", JSON.stringify(p, null, 2) + "\n");
-            console.log("stripped workspace deps:", stripped.join(", ") || "(none)");
-          '
-          # Fail loudly if any workspace: specifier somehow survives — never ship
-          # an uninstallable package.
-          if grep -q '"workspace:' package.json; then
-            echo "::error::a workspace:* dependency survived the strip — refusing to publish an uninstallable package."
-            exit 1
-          fi
+          # The distribution owns an installable manifest. Never rewrite a
+          # source workspace manifest during publication.
+          bun run check
           # Prereleases (v1.2.3-rc.1) publish to the `next` dist-tag, not `latest`.
           if [[ "${TAG}" == *-* ]]; then
             npm publish --access public --tag next
@@ -704,9 +794,41 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Read bun version
+        id: bun-version
+        run: echo "version=$(cat .bun-version)" >> "$GITHUB_OUTPUT"
+
+      # Only to run scripts/changelog-notes.ts (pure core parser, zero external deps) — this
+      # job deliberately does no `bun install`.
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: ${{ steps.bun-version.outputs.version }}
+
+      # The release body is this version's CHANGELOG.md section, written to a
+      # FILE (never interpolated into the shell — changelog prose is full of
+      # backticks and quotes) and passed to `gh --notes-file`. The extractor
+      # always emits a body, and this step is non-fatal on top of that: missing
+      # notes must never fail a release.
+      - name: Build release notes from CHANGELOG.md
+        id: notes
+        run: |
+          set -uo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          NOTES_FILE="${RUNNER_TEMP}/release-notes.md"
+          if ! bun scripts/changelog-notes.ts "${TAG}" > "${NOTES_FILE}"; then
+            echo "::warning::changelog extraction failed — publishing a generic body."
+            printf 'See [CHANGELOG.md](https://github.com/%s/blob/%s/CHANGELOG.md).\n' \
+              "${GITHUB_REPOSITORY}" "${TAG}" > "${NOTES_FILE}"
+          fi
+          echo "file=${NOTES_FILE}" >> "$GITHUB_OUTPUT"
+          echo "▸ release notes (${TAG}):"
+          head -c 500 "${NOTES_FILE}"
+
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NOTES_FILE: ${{ steps.notes.outputs.file }}
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
@@ -731,13 +853,33 @@ jobs:
           if gh release view "${TAG}" >/dev/null 2>&1; then
             echo "::notice::Release ${TAG} exists — re-uploading core assets (--clobber)."
             gh release upload "${TAG}" "${CORE_ASSETS[@]}" --clobber
+            # Backfill notes ONLY when the existing release has none (a release
+            # cut before this step existed, or a re-run of one that published an
+            # empty body). A body that's already there may have been hand-edited
+            # on the release page — never overwrite it.
+            if EXISTING_BODY="$(gh release view "${TAG}" --json body --jq '.body')"; then
+              if [[ -z "${EXISTING_BODY//[[:space:]]/}" ]]; then
+                if gh release edit "${TAG}" --notes-file "${NOTES_FILE}"; then
+                  echo "::notice::Backfilled empty release notes for ${TAG}."
+                else
+                  echo "::warning::Assets uploaded, but release-note backfill failed for ${TAG}."
+                fi
+              fi
+            else
+              echo "::warning::Could not read existing release notes; preserving them for ${TAG}."
+            fi
           else
             gh release create "${TAG}" \
               --title "Openship ${TAG}" \
-              --notes-from-tag \
+              --notes-file "${NOTES_FILE}" \
               ${PRERELEASE_FLAG} \
               "${CORE_ASSETS[@]}"
           fi
+
+      - name: Sign desktop installers
+        env:
+          OPENSHIP_DESKTOP_SIGNING_KEY: ${{ secrets.OPENSHIP_DESKTOP_SIGNING_KEY }}
+        run: node apps/desktop/scripts/sign-updates.mjs dist
 
       - name: Attach desktop installers
         env:
@@ -749,7 +891,7 @@ jobs:
           # single-OS failure shouldn't block the release).
           for asset in Openship-arm64.dmg Openship-x64.dmg Openship-win32-x64.zip Openship.AppImage Openship-arm64.AppImage Openship.deb Openship.rpm; do
             if [[ -f "dist/${asset}" ]]; then
-              gh release upload "${TAG}" "dist/${asset}" "dist/${asset}.sha256" --clobber
+              gh release upload "${TAG}" "dist/${asset}" "dist/${asset}.sha256" "dist/${asset}.sig" --clobber
             else
               echo "::warning::desktop installer missing: ${asset}"
             fi

@@ -17,7 +17,7 @@
  */
 
 import { describe, expect, it, beforeEach, vi } from "vitest";
-import { readFileSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
 const h = vi.hoisted(() => ({
@@ -39,7 +39,7 @@ vi.mock("@repo/db", () => ({
   },
 }));
 
-vi.mock("../../../src/modules/backups/backup.orchestrator", () => ({
+vi.mock("@repo/platform/engine/modules/backups/backup.orchestrator", () => ({
   backupOrchestrator: {
     enqueue: async (input: { policyId: string; trigger: { source: string; userId: string } }) => {
       if (h.failFor.has(input.policyId)) throw new Error("destination unreachable");
@@ -53,10 +53,13 @@ vi.mock("../../../src/modules/backups/backup.orchestrator", () => ({
   },
 }));
 
-import { firePreDeployBackups } from "../../../src/modules/backups/triggers/pre-deploy";
+import { firePreDeployBackups } from "@repo/platform/engine/modules/backups/triggers/pre-deploy";
 
-const API_SRC = join(__dirname, "../../../src");
-const read = (rel: string): string => readFileSync(join(API_SRC, rel), "utf8");
+const API_SRC = join(__dirname, "../../../../../packages/platform/src/engine");
+const read = (rel: string): string => {
+  const enginePath = join(API_SRC, rel);
+  return readFileSync(existsSync(enginePath) ? enginePath : join(__dirname, "../../../src", rel), "utf8");
+};
 
 beforeEach(() => {
   h.policies = [];

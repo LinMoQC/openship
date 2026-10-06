@@ -72,6 +72,7 @@ vi.mock("@repo/db", () => ({
     deployment: {
       findById: async () => ({
         id: "dep_1",
+        projectId: "proj_1",
         organizationId: "org_1",
         containerId: h.containerId,
         status: "ready",
@@ -107,7 +108,7 @@ const dockerPathIdError = () =>
  * file is about what pause/resume ORCHESTRATE: what gets stopped, in what order
  * relative to the `disabled_at` write, and what happens when the host says no.
  */
-vi.mock("../../lib/deployment-runtime", () => ({
+vi.mock("@repo/platform/engine/lib/deployment-runtime", () => ({
   deploymentContainerIds: async (dep: { containerId: string | null }) => {
     const fromServices = h.serviceRows.map((r) => r.containerId).filter((id): id is string => !!id);
     if (fromServices.length > 0) return fromServices;
@@ -169,7 +170,8 @@ vi.mock("../../lib/deployment-runtime", () => ({
   },
 }));
 
-vi.mock("@repo/adapters", () => ({
+vi.mock("@repo/adapters", async original => ({
+  ...await original<typeof import("@repo/adapters")>(),
   checkEdge: async () => ({ healthy: true, message: "" }),
   edgeProxy: async () => null,
   // Reached via lib/remote-state's `isAbsent`. Faithful to the real predicate's
@@ -180,32 +182,32 @@ vi.mock("@repo/adapters", () => ({
   isRemoteConnectionError: () => false,
 }));
 
-vi.mock("../../lib/managed-edge-proxy", () => ({
+vi.mock("@repo/platform/engine/lib/managed-edge-proxy", () => ({
   syncManagedEdgeRoutes: async () => ({ failures: [] }),
   edgeUnsyncedWarning: () => "",
 }));
-vi.mock("../../lib/edge-reconcile", () => ({
+vi.mock("@repo/platform/engine/lib/edge-reconcile", () => ({
   reconcileServerEdge: async () => ({
     converted: false,
     updated: false,
     edgeDown: false,
   }),
 }));
-vi.mock("../../lib/routing-domains", () => ({
+vi.mock("@repo/platform/engine/lib/routing-domains", () => ({
   resolveManagedHostname: () => ({ isManaged: false }),
 }));
-vi.mock("../../lib/ssh-manager", () => ({
+vi.mock("@repo/platform/engine/lib/ssh-manager", () => ({
   sshManager: {
     withExecutor: async (_serverId: string, fn: (executor: unknown) => Promise<unknown>) =>
       fn({ exec: async () => ({ stdout: "", stderr: "", code: 0 }) }),
   },
 }));
-vi.mock("../domains/routing-apply.service", () => ({ applyProjectRouting: async () => {} }));
-vi.mock("../domains/project-route.service", () => ({
+vi.mock("@repo/platform/engine/modules/domains/routing-apply.service", () => ({ applyProjectRouting: async () => {} }));
+vi.mock("@repo/platform/engine/modules/domains/project-route.service", () => ({
   reapplyProjectLiveRoutes: async (...args: unknown[]) => h.reapplyLiveRoutes(...(args as [])),
 }));
 
-const load = () => import("./project-runtime.service");
+const load = () => import("@repo/platform/engine/modules/projects/project-runtime.service");
 
 /** dockerode's shape for "you asked me to stop a stopped container". */
 const notModified = () =>
@@ -364,7 +366,9 @@ describe("project pause / resume", () => {
     h.reapplyLiveRoutes.mockRejectedValue(new Error("EHOSTUNREACH"));
     const { enableProject } = await load();
 
-    await expect(enableProject("proj_1", "org_1")).rejects.toThrow(/re-apply/i);
+    // Route repair preserves the cause for the operator (#879), including when
+    // reached through resume. A failed re-apply must still leave it paused.
+    await expect(enableProject("proj_1", "org_1")).rejects.toThrow(/EHOSTUNREACH/);
     expect(h.project.disabledAt).toBeInstanceOf(Date);
   });
 

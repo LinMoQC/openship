@@ -9,11 +9,9 @@
  * requires signing). A detached script does the swap because a running app can't
  * overwrite its own bundle.
  *
- * Trust: the release feed and asset host are pinned, and the download must match
- * the release's sha256 sidecar or it is refused. That's integrity only — the
- * sidecar shares the asset's trust domain, so an attacker who can replace the
- * release asset can replace it too. Real code-signature verification is the
- * remaining gap.
+ * Trust: the release feed and every download redirect are pinned. The installer
+ * must match its checksum AND an Ed25519 signature binding its version, name and
+ * digest to the publisher key embedded in this app. Missing proofs fail closed.
  */
 
 import { app, net, shell } from "electron";
@@ -21,44 +19,51 @@ import {
   changelogMarkdownUrl,
   extractChangelogSection,
   resolveDesktopUpdate,
+  RELEASES_LATEST_API,
+  type DesktopUpdateAsset,
+  type DesktopUpdateCheck,
+  type DesktopUpdateSnapshot,
   type GithubReleasePayload,
 } from "@repo/core";
 import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
-  createWriteStream,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { open } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { advisoryManifestUrl, parseManifest, type Advisory, type AdvisoryManifest } from "@repo/core";
+import { advisoryManifestUrl, parseManifest, type AdvisoryManifest } from "@repo/core";
 import { isAllowedUpdateAssetUrl } from "./security";
+import { verifyUpdateSignature } from "./update-signature";
 
-const RELEASES_API = "https://api.github.com/repos/oblien/openship/releases/latest";
+export type UpdateAsset = DesktopUpdateAsset;
+export type UpdateInfo = Extract<DesktopUpdateCheck, { available: true }>;
+export type UpdateCheck = DesktopUpdateSnapshot;
 
-export interface UpdateAsset {
-  name: string;
-  url: string;
-  size: number;
+let cachedCheck: UpdateCheck | null = null;
+let inFlightCheck: Promise<UpdateCheck> | null = null;
+
+/** Startup, renderer navigation and manual checks share one request in flight. */
+export function checkForUpdate(options: { force?: boolean } = {}): Promise<UpdateCheck> {
+  if (inFlightCheck) return inFlightCheck;
+  if (!options.force && cachedCheck) return Promise.resolve(cachedCheck);
+  inFlightCheck = checkForUpdateUncached()
+    .then((result) => {
+      // Offline is not a successful session cache: allow the next caller to retry.
+      cachedCheck = result.latest ? result : null;
+      return result;
+    })
+    .finally(() => {
+      inFlightCheck = null;
+    });
+  return inFlightCheck;
 }
-export interface UpdateInfo {
-  available: true;
-  version: string;
-  notes: string;
-  asset: UpdateAsset;
-  /**
-   * The RELEASE ADVISORY that authorizes interrupting the user at launch, or
-   * null for a routine release: installable from Settings → Updates, but no
-   * modal, no notification. Comes straight from the advisory manifest via
-   * `resolveDesktopUpdate` — this process never decides it for itself.
-   */
-  announcement: Advisory | null;
-}
-export type UpdateCheck = UpdateInfo | { available: false };
 
 /**
  * Ask GitHub for the latest release, then read the changelog and advisory
@@ -71,34 +76,36 @@ export type UpdateCheck = UpdateInfo | { available: false };
  * interrupting the user — lives in @repo/core, unit-tested against synthetic
  * payloads. Nothing here re-checks or re-derives any of it.
  */
-export async function checkForUpdate(): Promise<UpdateCheck> {
+async function checkForUpdateUncached(): Promise<UpdateCheck> {
   try {
-    const res = await net.fetch(RELEASES_API, {
+    const res = await net.fetch(RELEASES_LATEST_API, {
       headers: {
         Accept: "application/vnd.github+json",
         "User-Agent": "Openship-Desktop",
       },
       signal: AbortSignal.timeout(10_000),
     });
-    if (!res.ok) return { available: false };
+    if (!res.ok) return { available: false, latest: null, manifest: null };
     const data = (await res.json()) as GithubReleasePayload;
     const tag = (data?.tag_name ?? "").trim();
+    if (!tag) return { available: false, latest: null, manifest: null };
     // These are independent, fail-soft reads. A missing changelog must never
     // suppress a critical advisory (or the reverse).
-    const [manifest, changelogNotes] = await Promise.all([
-      fetchManifest(tag),
-      fetchChangelog(tag),
-    ]);
-    return resolveDesktopUpdate({
-      releasePayload: data,
-      platform: process.platform,
-      arch: process.arch,
-      currentVersion: app.getVersion(),
+    const [manifest, changelogNotes] = await Promise.all([fetchManifest(tag), fetchChangelog(tag)]);
+    return {
+      ...resolveDesktopUpdate({
+        releasePayload: data,
+        platform: process.platform,
+        arch: process.arch,
+        currentVersion: app.getVersion(),
+        manifest,
+        changelogNotes,
+      }),
+      latest: { version: tag.replace(/^v/, ""), tag, notes: changelogNotes ?? "" },
       manifest,
-      changelogNotes,
-    });
+    };
   } catch {
-    return { available: false };
+    return { available: false, latest: null, manifest: null };
   }
 }
 
@@ -142,28 +149,36 @@ async function fetchManifest(tag: string): Promise<AdvisoryManifest | null> {
 /** Download the asset to a temp file, reporting 0..1 progress. Returns the path. */
 export async function downloadUpdate(
   asset: UpdateAsset,
+  version: string,
   onProgress: (fraction: number) => void,
 ): Promise<string> {
   // The release feed comes from the pinned repo, but the asset URL inside it was
   // previously followed wherever it pointed — so a tampered feed could source the
   // installer from any host. Pin it to GitHub's own release hosts.
-  if (!isAllowedUpdateAssetUrl(asset.url)) {
+  const expectedUrl = `https://github.com/oblien/openship/releases/download/v${encodeURIComponent(version)}/${encodeURIComponent(asset.name)}`;
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(asset.name) || asset.url !== expectedUrl || !isAllowedUpdateAssetUrl(asset.url)) {
     throw new Error(`Refusing to download update from untrusted URL: ${asset.url}`);
   }
 
-  const dir = join(app.getPath("temp"), "openship-update");
-  mkdirSync(dir, { recursive: true });
+  const dir = mkdtempSync(join(app.getPath("temp"), "openship-update-"));
   const dest = join(dir, asset.name);
+  try {
+    await downloadVerifiedInstaller(asset, version, onProgress, dest);
+    return dest;
+  } catch (error) {
+    rmSync(dir, { recursive: true, force: true });
+    throw error;
+  }
+}
 
-  const res = await net.fetch(asset.url, {
-    headers: { "User-Agent": "Openship-Desktop" },
-  });
+async function downloadVerifiedInstaller(asset: UpdateAsset, version: string, onProgress: (fraction: number) => void, dest: string): Promise<void> {
+  const res = await fetchUpdateAsset(asset.url, AbortSignal.timeout(10 * 60_000));
   if (!res.ok || !res.body) {
     throw new Error(`Download failed: HTTP ${res.status}`);
   }
 
   const total = Number(res.headers.get("content-length")) || asset.size || 0;
-  const file = createWriteStream(dest);
+  const file = await open(dest, "wx", 0o600);
   const reader = res.body.getReader();
   const hash = createHash("sha256");
   let received = 0;
@@ -173,19 +188,14 @@ export async function downloadUpdate(
       const { done, value } = await reader.read();
       if (done) break;
       hash.update(value);
-      if (!file.write(Buffer.from(value))) {
-        await new Promise<void>((r) => file.once("drain", r));
-      }
+      await file.writeFile(value);
       received += value.length;
       if (total > 0) onProgress(Math.min(1, received / total));
     }
   } finally {
-    file.end();
+    await file.close();
+    await reader.cancel();
   }
-  await new Promise<void>((r, j) => {
-    file.on("finish", () => r());
-    file.on("error", j);
-  });
 
   // Integrity gate: verify the sha256 sidecar the release publishes, and FAIL
   // CLOSED. A mismatch and a missing sidecar are both refusals — treating absence
@@ -194,19 +204,15 @@ export async function downloadUpdate(
   // for every desktop artifact, and the sidecar is always read from the release
   // we're installing, so failing closed can't strand a real release.
   //
-  // This is integrity, NOT authenticity: the sidecar shares the asset's trust
-  // domain. Genuine signature verification is still missing.
+  // The independent publisher signature below supplies authenticity as well.
   const digest = hash.digest("hex");
   let expected: string | null = null;
   let sidecarError = "unreachable";
   try {
-    const shaRes = await net.fetch(`${asset.url}.sha256`, {
-      headers: { "User-Agent": "Openship-Desktop" },
-      signal: AbortSignal.timeout(10_000),
-    });
+    const shaRes = await fetchUpdateAsset(`${asset.url}.sha256`, AbortSignal.timeout(10_000));
     if (!shaRes.ok) sidecarError = `HTTP ${shaRes.status}`;
     else {
-      const tok = (await shaRes.text()).trim().split(/\s+/)[0]?.toLowerCase();
+      const tok = (await readUpdateProof(shaRes)).trim().split(/\s+/)[0]?.toLowerCase();
       if (tok && /^[0-9a-f]{64}$/.test(tok)) expected = tok;
       else sidecarError = "malformed";
     }
@@ -225,7 +231,45 @@ export async function downloadUpdate(
       `Update checksum mismatch — refusing to install ${asset.name} (expected ${expected}, got ${digest}).`,
     );
   }
-  return dest;
+  try {
+    const signature = await fetchUpdateAsset(`${asset.url}.sig`, AbortSignal.timeout(10_000));
+    if (!signature.ok) throw new Error("No publisher signature");
+    verifyUpdateSignature(JSON.parse(await readUpdateProof(signature)), { version, name: asset.name, sha256: digest });
+  } catch {
+    rmSync(dest, { force: true });
+    throw new Error("Update signature is missing or invalid. Refusing to install this update.");
+  }
+}
+
+/** Validate each redirect before issuing the next request, including sidecars. */
+async function fetchUpdateAsset(input: string, signal: AbortSignal): Promise<Response> {
+  let url = input;
+  for (let redirects = 0; redirects <= 5; redirects++) {
+    if (!isAllowedUpdateAssetUrl(url)) throw new Error("Untrusted update download destination.");
+    const response = await net.fetch(url, { redirect: "manual", signal, headers: { "User-Agent": "Openship-Desktop" } });
+    if (![301, 302, 303, 307, 308].includes(response.status)) return response;
+    await response.body?.cancel();
+    const next = response.headers.get("location");
+    if (!next) throw new Error("Update redirect has no destination.");
+    url = new URL(next, url).href;
+  }
+  throw new Error("Too many update redirects.");
+}
+
+async function readUpdateProof(response: Response): Promise<string> {
+  if (!response.body) throw new Error("Missing update proof.");
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return Buffer.concat(chunks).toString("utf8");
+      size += value.length;
+      if (size > 4096) throw new Error("Invalid update proof size.");
+      chunks.push(value);
+    }
+  } finally { await reader.cancel(); }
 }
 
 /**
@@ -274,11 +318,9 @@ function installMac(dmg: string): void {
   const staged = join(app.getPath("temp"), "openship-update", "Openship.app");
 
   // Mount, copy the new .app out, unmount — all before we quit.
-  const attach = spawnSync(
-    "hdiutil",
-    ["attach", "-nobrowse", "-readonly", "-noverify", dmg],
-    { encoding: "utf8" },
-  );
+  const attach = spawnSync("hdiutil", ["attach", "-nobrowse", "-readonly", "-noverify", dmg], {
+    encoding: "utf8",
+  });
   if (attach.status !== 0) return fallbackOpen(dmg);
   const mount = (attach.stdout.match(/\/Volumes\/[^\n]*/g) ?? []).pop()?.trim();
   if (!mount) return fallbackOpen(dmg);

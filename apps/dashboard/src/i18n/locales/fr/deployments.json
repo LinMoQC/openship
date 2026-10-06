@@ -32,7 +32,8 @@
       "total": "Total",
       "successful": "Réussis",
       "failed": "Échoués",
-      "inProgress": "En cours"
+      "inProgress": "En cours",
+      "pageTitle": "Sur cette page"
     },
     "autoDeploy": {
       "title": "Déploiement automatique",
@@ -191,5 +192,14 @@
     "untouchedNote": "Ils continuent de tourner et ne sont pas touchés : {names}",
     "confirm": "Revenir",
     "cancel": "Annuler"
+  },
+  "loadFailed": "Impossible de charger les déploiements.",
+  "retry": "Réessayer",
+  "pagination": {
+    "label": "Pages de l’historique des déploiements",
+    "previous": "Page précédente",
+    "next": "Page suivante",
+    "pageOf": "Page {page} sur {total}",
+    "range": "Déploiements {from}–{to} sur {total}"
   }
 }

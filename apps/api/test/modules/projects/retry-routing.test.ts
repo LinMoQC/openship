@@ -2,6 +2,7 @@ import "../mail/_setup-env";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const projectRepo = vi.hoisted(() => ({ findById: vi.fn() }));
+const serviceRepo = vi.hoisted(() => ({ listByProject: vi.fn() }));
 const deploymentRepo = vi.hoisted(() => ({ findById: vi.fn(), updateStatus: vi.fn() }));
 const domainRepo = vi.hoisted(() => ({ listByProject: vi.fn(), update: vi.fn() }));
 
@@ -19,7 +20,13 @@ vi.mock("@repo/db", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@repo/db")>();
   return {
     ...actual,
-    repos: { ...actual.repos, project: projectRepo, deployment: deploymentRepo, domain: domainRepo },
+    repos: {
+      ...actual.repos,
+      project: projectRepo,
+      service: serviceRepo,
+      deployment: deploymentRepo,
+      domain: domainRepo,
+    },
   };
 });
 
@@ -28,29 +35,29 @@ vi.mock("@repo/adapters", async (importOriginal) => {
   return { ...actual, edgeProxy, checkEdge };
 });
 
-vi.mock("../../../src/lib/ssh-manager", () => ({ sshManager: { withExecutor } }));
+vi.mock("@repo/platform/engine/lib/ssh-manager", () => ({ sshManager: { withExecutor } }));
 
-vi.mock("../../../src/lib/managed-edge-proxy", () => ({
+vi.mock("@repo/platform/engine/lib/managed-edge-proxy", () => ({
   syncManagedEdgeRoutes,
   edgeUnsyncedWarning: () => "routing unsynced",
 }));
 
-vi.mock("../../../src/lib/deployment-runtime", () => ({
+vi.mock("@repo/platform/engine/lib/deployment-runtime", () => ({
   resolveDeploymentRuntime: vi.fn(),
   withDeploymentPlatform,
 }));
 
-vi.mock("../../../src/lib/edge-reconcile", () => ({ reconcileServerEdge }));
+vi.mock("@repo/platform/engine/lib/edge-reconcile", () => ({ reconcileServerEdge }));
 
-vi.mock("../../../src/modules/domains/routing-apply.service", () => ({
+vi.mock("@repo/platform/engine/modules/domains/routing-apply.service", () => ({
   applyProjectRouting,
 }));
 
-vi.mock("../../../src/modules/domains/project-route.service", () => ({
+vi.mock("@repo/platform/engine/modules/domains/project-route.service", () => ({
   reapplyProjectLiveRoutes,
 }));
 
-import { retryProjectRouting } from "../../../src/modules/projects/project-runtime.service";
+import { retryProjectRouting } from "@repo/platform/engine/modules/projects/project-runtime.service";
 
 // A clearly-custom hostname (never under any routing base domain) so
 // syncProjectManagedEdge finds zero managed targets and just clears the warning.
@@ -91,11 +98,13 @@ describe("retryProjectRouting — safe self-heal", () => {
     });
     deploymentRepo.findById.mockResolvedValue({
       id: "dep_1",
+      projectId: "proj_1", organizationId: "org_1",
       status: "ready",
       meta: { serverId: "srv_1", deployTarget: "server" },
     });
     deploymentRepo.updateStatus.mockResolvedValue(undefined);
     domainRepo.listByProject.mockResolvedValue([]);
+    serviceRepo.listByProject.mockResolvedValue([]);
     domainRepo.update.mockResolvedValue(undefined);
     applyProjectRouting.mockResolvedValue(undefined);
     reapplyProjectLiveRoutes.mockResolvedValue(undefined);
@@ -126,7 +135,93 @@ describe("retryProjectRouting — safe self-heal", () => {
     expect(reapplyProjectLiveRoutes).toHaveBeenCalledWith(
       expect.objectContaining({ id: "proj_1" }),
       [],
-      { managedEdgeSyncedByCaller: true },
+      { managedEdgeSyncedByCaller: true, onWarning: expect.any(Function) },
+    );
+  });
+
+  it("does not report success or touch routing when the active deployment is missing", async () => {
+    deploymentRepo.findById.mockResolvedValue(undefined);
+    const verifyDomains = vi.fn();
+    expect(await retryProjectRouting("proj_1", "org_1", { verifyDomains })).toEqual({
+      ok: false,
+      warning: expect.stringContaining("no active deployment"),
+    });
+    expect(verifyDomains).not.toHaveBeenCalled();
+    expect(reapplyProjectLiveRoutes).not.toHaveBeenCalled();
+    expect(applyProjectRouting).not.toHaveBeenCalled();
+  });
+
+  it("restores the edge even when service route settings have no domain rows yet", async () => {
+    serviceRepo.listByProject.mockResolvedValue([{ id: "api", enabled: true, exposed: true }]);
+    const onLog = vi.fn();
+    const result = await retryProjectRouting("proj_1", "org_1", { onLog });
+    expect(result).toEqual({ ok: true });
+    expect(reconcileServerEdge).toHaveBeenCalledOnce();
+    expect(onLog).toHaveBeenCalledWith(expect.stringContaining("edge proxy"));
+  });
+
+  it("keeps the warning until domain and HTTPS checks finish, then preserves a partial failure", async () => {
+    const existingWarning = { edgeUnsynced: true, deployWarning: "old routing failure" };
+    deploymentRepo.findById.mockResolvedValue({
+      id: "dep_1",
+      projectId: "proj_1",
+      organizationId: "org_1",
+      status: "ready",
+      meta: { ...existingWarning, serverId: "srv_1", deployTarget: "server" },
+    });
+    const verifyDomains = vi.fn(async () => {
+      expect(deploymentRepo.updateStatus).not.toHaveBeenCalled();
+      return ["api.example.com: DNS verification is still pending"];
+    });
+    expect(await retryProjectRouting("proj_1", "org_1", { verifyDomains })).toEqual({
+      ok: false,
+      warning: "api.example.com: DNS verification is still pending",
+    });
+    expect(verifyDomains).toHaveBeenCalledOnce();
+    expect(deploymentRepo.updateStatus).toHaveBeenCalledExactlyOnceWith("dep_1", "ready", {
+      meta: expect.objectContaining({
+        edgeUnsynced: true,
+        deployWarning: "api.example.com: DNS verification is still pending",
+      }),
+    });
+  });
+
+  it("clears the warning only after successful domain checks", async () => {
+    deploymentRepo.findById.mockResolvedValue({
+      id: "dep_1",
+      projectId: "proj_1",
+      organizationId: "org_1",
+      status: "ready",
+      meta: {
+        edgeUnsynced: true,
+        deployWarning: "pending",
+        serverId: "srv_1",
+        deployTarget: "server",
+      },
+    });
+    const verifyDomains = vi.fn(async () => {
+      expect(deploymentRepo.updateStatus).not.toHaveBeenCalled();
+      return [];
+    });
+    expect(await retryProjectRouting("proj_1", "org_1", { verifyDomains })).toEqual({ ok: true });
+    expect(deploymentRepo.updateStatus).toHaveBeenCalledExactlyOnceWith("dep_1", "ready", {
+      meta: { serverId: "srv_1", deployTarget: "server" },
+    });
+  });
+
+  it("keeps a skipped domain's diagnosis visible even when the edge itself is healthy (#879)", async () => {
+    const warning = "Select a target port for app.example.com in Domains & Routes";
+    reapplyProjectLiveRoutes.mockImplementationOnce(async (_project, _previous, options) => {
+      options.onWarning(warning);
+    });
+    const result = await retryProjectRouting("proj_1", "org_1");
+    expect(result).toEqual({ ok: false, warning });
+    expect(deploymentRepo.updateStatus).toHaveBeenLastCalledWith(
+      "dep_1",
+      "ready",
+      expect.objectContaining({
+        meta: expect.objectContaining({ edgeUnsynced: true, deployWarning: warning }),
+      }),
     );
   });
 
@@ -202,7 +297,7 @@ describe("retryProjectRouting — safe self-heal", () => {
       serverId: null,
       activeDeploymentId: "dep_1",
     });
-    deploymentRepo.findById.mockResolvedValue({ id: "dep_1", status: "ready", meta: {} });
+    deploymentRepo.findById.mockResolvedValue({ id: "dep_1", projectId: "proj_1", organizationId: "org_1", status: "ready", meta: {} });
     domainRepo.listByProject.mockResolvedValue([]);
 
     const result = await retryProjectRouting("proj_1", "org_1");
@@ -216,7 +311,7 @@ describe("retryProjectRouting — safe self-heal", () => {
   // Fix 2c step 1: a snapshot whose meta.serverId drifted from the durable binding
   // is re-stamped so routing resolves to the server again, not "local".
   it("re-stamps a drifted deployment meta from the durable project.serverId", async () => {
-    deploymentRepo.findById.mockResolvedValue({ id: "dep_1", status: "ready", meta: {} });
+    deploymentRepo.findById.mockResolvedValue({ id: "dep_1", projectId: "proj_1", organizationId: "org_1", status: "ready", meta: {} });
 
     await retryProjectRouting("proj_1", "org_1");
 
@@ -294,6 +389,36 @@ describe("retryProjectRouting — safe self-heal", () => {
 
     expect(result).toEqual({ ok: true });
     expect(applyProjectRouting).not.toHaveBeenCalled();
+    expect(withExecutor).not.toHaveBeenCalled();
+  });
+
+  it("repairs Cloud Docker routes and clears the warning only after a successful apply", async () => {
+    projectRepo.findById.mockResolvedValue({ id: "proj_1", organizationId: "org_1", cloudWorkspaceId: "ws_1", activeDeploymentId: "dep_1" });
+    deploymentRepo.findById.mockResolvedValue({
+      id: "dep_1", projectId: "proj_1", organizationId: "org_1", status: "ready",
+      meta: { deployTarget: "cloud", cloudDockerWorkspace: { projectId: "proj_1", workspaceId: "ws_1" }, edgeUnsynced: true, deployWarning: "Previous route failure" },
+    });
+
+    expect(await retryProjectRouting("proj_1", "org_1")).toEqual({ ok: true });
+    expect(applyProjectRouting).toHaveBeenCalledWith("proj_1", expect.objectContaining({ onWarning: expect.any(Function) }));
+    expect(deploymentRepo.updateStatus).toHaveBeenCalledWith("dep_1", "ready", {
+      meta: { deployTarget: "cloud", cloudDockerWorkspace: { projectId: "proj_1", workspaceId: "ws_1" } },
+    });
+    expect(withExecutor).not.toHaveBeenCalled();
+  });
+
+  it("keeps Cloud Docker routing failures visible for another retry", async () => {
+    projectRepo.findById.mockResolvedValue({ id: "proj_1", organizationId: "org_1", cloudWorkspaceId: "ws_1", activeDeploymentId: "dep_1" });
+    deploymentRepo.findById.mockResolvedValue({
+      id: "dep_1", projectId: "proj_1", organizationId: "org_1", status: "ready",
+      meta: { deployTarget: "cloud", cloudDockerWorkspace: { projectId: "proj_1", workspaceId: "ws_1" } },
+    });
+    applyProjectRouting.mockImplementationOnce(async (_id, options) => options.onWarning("Cloud route could not be applied"));
+
+    expect(await retryProjectRouting("proj_1", "org_1")).toEqual({ ok: false, warning: "Cloud route could not be applied" });
+    expect(deploymentRepo.updateStatus).toHaveBeenCalledWith("dep_1", "ready", expect.objectContaining({
+      meta: expect.objectContaining({ edgeUnsynced: true, deployWarning: "Cloud route could not be applied" }),
+    }));
     expect(withExecutor).not.toHaveBeenCalled();
   });
 });

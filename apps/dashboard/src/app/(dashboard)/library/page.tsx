@@ -1,7 +1,8 @@
 "use client";
 
+import { Icon as UiIcon, type IconName } from "@repo/ui/icons";
+
 import React, { useState, useEffect, useCallback } from "react";
-import { FolderUp, Github, Link2, Sparkles, Boxes } from "lucide-react";
 import { useGitHub } from "@/context/GitHubContext";
 import { usePlatform } from "@/context/PlatformContext";
 import { useCloud } from "@/context/CloudContext";
@@ -20,8 +21,9 @@ import { HelpMenu } from "@/components/HelpMenu";
 import { ServerMigrationWizard } from "@/components/migration/ServerMigrationWizard";
 import { useI18n } from "@/components/i18n-provider";
 import { useToast } from "@/context/ToastContext";
+import { AppCatalog } from "@/components/apps/AppCatalog";
 
-type Tab = "folder" | "repositories" | "url" | "template" | "server";
+type Tab = "folder" | "repositories" | "url" | "template" | "server" | "apps";
 
 /** One-time gh-CLI repo-read consent flag (per browser — desktop is single-user). */
 const GH_CLI_CONSENT_KEY = "openship.gh-cli-consent";
@@ -29,7 +31,7 @@ const GH_CLI_CONSENT_KEY = "openship.gh-cli-consent";
 interface TabItem {
   key: Tab;
   label: string;
-  icon: React.ElementType;
+  icon: IconName;
 }
 
 export default function LibraryPage() {
@@ -90,13 +92,14 @@ export default function LibraryPage() {
   //   - SaaS → upload the folder to a cloud build workspace (stack picked up
   //     front so we know which image to provision).
   const tabs: TabItem[] = [
-    { key: "folder", label: t.library.page.tabs.folder, icon: FolderUp },
-    { key: "repositories", label: t.library.page.tabs.github, icon: Github },
-    { key: "url", label: t.library.page.tabs.url, icon: Link2 },
-    { key: "template", label: t.library.page.tabs.template, icon: Sparkles },
+    { key: "apps", label: t.dashboard.pages.apps.title, icon: "grid" },
+    { key: "folder", label: t.library.page.tabs.folder, icon: "folder-out" },
+    { key: "repositories", label: t.library.page.tabs.github, icon: "github" },
+    { key: "url", label: t.library.page.tabs.url, icon: "link" },
+    { key: "template", label: t.library.page.tabs.template, icon: "sparkles" },
     // Adopting a running Docker deployment needs SSH into the user's own box —
     // self-hosted / desktop only (cloud mode has no server inventory).
-    ...(selfHosted ? [{ key: "server" as const, label: t.migration.entry.tab, icon: Boxes }] : []),
+    ...(selfHosted ? [{ key: "server" as const, label: t.migration.entry.tab, icon: "migration" as const }] : []),
   ];
 
   return (
@@ -116,7 +119,7 @@ export default function LibraryPage() {
       </div>
 
       {/* ── Tabs ─────────────────────────────────────────────── */}
-      <div className="flex items-center gap-1 mb-6">
+      <div className="flex flex-wrap items-center gap-1 mb-6">
         {tabs.map((tab) => {
           const Icon = tab.icon;
           return (
@@ -129,7 +132,7 @@ export default function LibraryPage() {
                   : "text-muted-foreground hover:text-foreground hover:bg-muted/50"
               }`}
             >
-              <Icon className="size-4" />
+              <UiIcon name={Icon} className="size-4" />
               {tab.label}
             </button>
           );
@@ -140,13 +143,15 @@ export default function LibraryPage() {
       <div className="grid grid-cols-1 lg:grid-cols-[1fr_340px] gap-6">
         {/* ── LEFT COLUMN ────────────────────────────────────────── */}
         <div className="space-y-6 min-w-0">
-          {activeTab === "server" ? (
+          {activeTab === "apps" ? (
+            <AppCatalog />
+          ) : activeTab === "server" ? (
             // Clean centered empty state, matching the GitHub tab's ConnectPrompt
             // (bg-card + illustration-style icon + heading/desc + primary button).
             <div className="bg-card rounded-2xl border border-border/50">
               <div className="px-6 py-12 text-center">
                 <div className="mx-auto mb-5 flex size-14 items-center justify-center rounded-2xl bg-info/10 ring-4 ring-info/5">
-                  <Boxes className="size-6 text-info" />
+                  <UiIcon name="migration" className="size-6 text-info" />
                 </div>
                 <h3 className="mb-1.5 text-lg font-medium text-foreground/85">
                   {t.migration.entry.cardTitle}
@@ -159,7 +164,7 @@ export default function LibraryPage() {
                   onClick={() => setShowMigrate(true)}
                   className="inline-flex items-center gap-2 rounded-xl bg-primary px-6 py-3 text-sm font-medium text-primary-foreground transition-all hover:-translate-y-0.5 hover:bg-primary/90 hover:shadow-lg hover:shadow-primary/25"
                 >
-                  <Boxes className="size-4" />
+                  <UiIcon name="migration" className="size-4" />
                   {t.migration.entry.action}
                 </button>
               </div>
@@ -198,6 +203,8 @@ export default function LibraryPage() {
               loading={loading}
               loadingRepos={libRepos.loading}
               installUrl={installUrl}
+              onInstall={() => void connect("oauth")}
+              installing={connecting}
               server={{
                 search: libRepos.search,
                 onSearch: libRepos.setSearch,

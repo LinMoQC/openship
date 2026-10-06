@@ -23,4 +23,14 @@ describe("dashboard proxy middleware", () => {
     const res = proxy(req);
     expect(res.headers.get("location")).toBe("http://localhost:3001/login?from=%2Fprojects");
   });
+
+  it.each([
+    "/auth/callback/install?state=install-nonce",
+    "/auth/callback/close?error=unable_to_link_account",
+    "/auth/callback/github-app?installation_id=42&state=install-nonce",
+  ])("lets GitHub callback %s render without a dashboard cookie", (path) => {
+    const response = proxy(new NextRequest(`https://app.openship.io${path}`));
+    expect(response.headers.get("location")).toBeNull();
+    expect(response.headers.get("x-middleware-request-x-pathname-with-search")).toBe(path);
+  });
 });

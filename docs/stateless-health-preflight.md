@@ -27,7 +27,7 @@ The preflight rejects configured mounts, image-declared anonymous volumes, share
 
 The generic stop-first deployment pipeline delegates incumbent ownership to this transaction. Its previous container ID remains accurate, but it must not run its own pre-activation removal.
 
-The transaction is in memory. Daemon/control-plane failure during the transaction can require manual recovery; this does not claim crash-atomic recovery or zero downtime during a successful fixed-port switch. A failed preflight leaves the old port continuously serving; a failure after the old container stopped has a bounded recovery gap. Keep fixed host ports and existing proxy routes during adoption. Proxy configuration changes and stateful stacks require separate migration/recovery procedures.
+Unbound legacy deployments retain their in-memory transaction and can require manual recovery after controller loss. Registered GitOps releases persist a ServiceCutoverJournal before touching the incumbent, reconcile journal and actual containers after restart, and retain the incumbent until verified external acceptance. Accepted cleanup is retried without restoring an accepted release. Neither path promises zero downtime during a fixed-port switch. A failed candidate leaves the old port serving; failure after cutover has a recovery gap. Proxy changes and stateful stacks require separate procedures.
 
 ## Validation
 
@@ -35,5 +35,6 @@ The transaction is in memory. Daemon/control-plane failure during the transactio
 - Real Docker E2E drives the actual Compose deployment entry point, samples HTTP during a deliberately unhealthy candidate, verifies the original container ID survives, forces failure only after preflight, and exercises a later HTTP 503 veto before a successful replacement.
 - Run: `RUN_DOCKER_E2E=1 bun run --cwd apps/api test:e2e test/e2e/stateless-candidate-health.e2e.test.ts`.
 - The new test belongs to the required real-Docker release gate. An unreachable daemon or unavailable test image fails the run.
+- `durable-cutover.e2e.test.ts` covers 22 durable scenarios, including literal process kills and reopen of the persisted journal. `core-migration-scope.e2e.test.ts` proves a failed real SQL completion job preserves the incumbent API and database volume.
 
-Activation in Magic Resume remains disabled until a checksum-pinned runtime release and the server's isolated Admin pilot pass this same failure/recovery sequence. This change does not migrate Core, production traffic or Edge.
+Business production activation remains disabled. Runtime publication and isolated local tests are separate from actual control-platform maintenance and Admin → Web → Core PRT acceptance. See [the implementation and rollout gates](magic-v0.8-implementation.md).

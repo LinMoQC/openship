@@ -6,13 +6,13 @@ const h = vi.hoisted(() => ({
   appFetch: vi.fn(),
 }));
 
-vi.mock("./github.auth", () => ({
+vi.mock("@repo/platform/engine/modules/github/github.auth", () => ({
   getUserToken: h.getUserToken,
   appFetch: h.appFetch,
 }));
-vi.mock("./github.http", () => ({ ghFetch: h.ghFetch }));
+vi.mock("@repo/platform/engine/modules/github/github.http", () => ({ ghFetch: h.ghFetch }));
 
-import { verifyGitHubInstallationForUser } from "./github.installation-verification";
+import { verifyGitHubInstallationForUser } from "@repo/platform/engine/modules/github/github.installation-verification";
 
 const installation = {
   id: 42,

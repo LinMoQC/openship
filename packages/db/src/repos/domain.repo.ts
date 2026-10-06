@@ -1,5 +1,19 @@
-import { eq, and, ne, lt, asc, inArray, sql } from "drizzle-orm";
-import { ConflictError, generateId } from "@repo/core";
+import {
+  eq,
+  and,
+  or,
+  ne,
+  lt,
+  lte,
+  gte,
+  asc,
+  inArray,
+  isNull,
+  isNotNull,
+  notExists,
+  sql,
+} from "drizzle-orm";
+import { ConflictError, generateId, DOMAIN_RETRY_DELAYS_MS } from "@repo/core";
 import type { Database } from "../client";
 import { domain, orphanedResource, project, service } from "../schema";
 
@@ -12,6 +26,68 @@ type RepoTransaction = Parameters<Parameters<Database["transaction"]>[0]>[0];
 // ─── Repository ──────────────────────────────────────────────────────────────
 
 export function createDomainRepo(db: Database) {
+  // Filter before LIMIT so recent failures cannot starve older, eligible rows.
+  // The same persisted counter/timestamp drives the next-check time in clients.
+  function retryDue(now = new Date()) {
+    return or(
+      eq(domain.verifyAttempts, 0),
+      isNull(domain.lastCheckedAt),
+      ...DOMAIN_RETRY_DELAYS_MS.map((delay, index) =>
+        and(
+          index === DOMAIN_RETRY_DELAYS_MS.length - 1
+            ? gte(domain.verifyAttempts, index + 1)
+            : eq(domain.verifyAttempts, index + 1),
+          lte(domain.lastCheckedAt, new Date(now.getTime() - delay)),
+        ),
+      ),
+    );
+  }
+
+  function liveVerificationOwner(organizationId?: string) {
+    return and(
+      inArray(
+        domain.projectId,
+        db
+          .select({ id: project.id })
+          .from(project)
+          .where(
+            and(
+              isNull(project.deletedAt),
+              isNull(project.disabledAt),
+              eq(project.deletionInProgress, false),
+              isNotNull(project.activeDeploymentId),
+              organizationId ? eq(project.organizationId, organizationId) : undefined,
+            ),
+          ),
+      ),
+      or(
+        isNull(domain.serviceId),
+        inArray(
+          domain.serviceId,
+          db
+            .select({ id: service.id })
+            .from(service)
+            .where(and(eq(service.enabled, true), eq(service.exposed, true))),
+        ),
+      ),
+    );
+  }
+
+  /** The topology and domain row own the same hostname and must disappear together. */
+  async function removeInTransaction(tx: RepoTransaction, id: string) {
+    const [row] = await tx.select({ projectId: domain.projectId, hostname: domain.hostname })
+      .from(domain).where(eq(domain.id, id));
+    if (row?.projectId) {
+      const [owner] = await tx.select({ compositeRoutes: project.compositeRoutes })
+        .from(project).where(eq(project.id, row.projectId)).for("update");
+      const routes = owner?.compositeRoutes ?? [];
+      const remaining = routes.filter((route) => route.hostname.toLowerCase() !== row.hostname.toLowerCase());
+      if (remaining.length !== routes.length) await tx.update(project)
+        .set({ compositeRoutes: remaining, updatedAt: new Date() }).where(eq(project.id, row.projectId));
+    }
+    await tx.delete(domain).where(eq(domain.id, id));
+  }
+
   /**
    * A project has at most ONE primary domain: promoting one demotes the rest.
    *
@@ -93,6 +169,26 @@ export function createDomainRepo(db: Database) {
           and(
             eq(orphanedResource.resourceType, "route"),
             eq(orphanedResource.ref, row.hostname.toLowerCase()),
+            // Teardown checkpoints can survive a failed final project delete.
+            // GC defers those while the project is live: they must not prevent
+            // that SAME owner from restoring its domain row. Keep the checkpoint
+            // for eventual cleanup, and keep reserving the host against all other
+            // projects (including project-less domains and soft-deleted owners).
+            row.projectId
+              ? notExists(
+                  tx
+                    .select({ id: project.id })
+                    .from(project)
+                    .where(
+                      and(
+                        eq(project.id, row.projectId),
+                        eq(project.id, orphanedResource.projectId),
+                        isNull(project.deletedAt),
+                        eq(project.deletionInProgress, false),
+                      ),
+                    ),
+                )
+              : undefined,
           ),
         )
         .limit(1);
@@ -321,7 +417,8 @@ export function createDomainRepo(db: Database) {
       const rows = await db.query.domain.findMany({
         where: eq(domain.projectId, projectId),
       });
-      return rows.find((d) => d.isPrimary) ?? rows[0] ?? null;
+      const openable = rows.filter((d) => !d.hostname.startsWith("*."));
+      return openable.find((d) => d.isPrimary) ?? openable[0] ?? null;
     },
 
     /**
@@ -336,7 +433,7 @@ export function createDomainRepo(db: Database) {
       // Prefer isPrimary=true; fall back to first row encountered per project.
       const out = new Map<string, Domain>();
       for (const row of rows) {
-        if (!row.projectId) continue; // webhook-owned domains have no project
+        if (!row.projectId || row.hostname.startsWith("*.")) continue;
         const existing = out.get(row.projectId);
         if (!existing || (row.isPrimary && !existing.isPrimary)) {
           out.set(row.projectId, row);
@@ -382,7 +479,11 @@ export function createDomainRepo(db: Database) {
       });
       if (existing) {
         // Promote to primary if caller wants it and it isn't already
-        if (data.isPrimary && !existing.isPrimary) {
+        if (
+          data.isPrimary &&
+          !existing.isPrimary &&
+          existing.projectId === (data.projectId ?? null)
+        ) {
           // projectId is nullable (webhook-owned rows have no project) — those
           // just get the flag, there are no siblings to demote.
           if (existing.projectId) await promotePrimary(existing.projectId, existing.id);
@@ -419,7 +520,11 @@ export function createDomainRepo(db: Database) {
             where: eq(domain.hostname, hostname),
           });
           if (raced) {
-            if (data.isPrimary && !raced.isPrimary) {
+            if (
+              data.isPrimary &&
+              !raced.isPrimary &&
+              raced.projectId === (data.projectId ?? null)
+            ) {
               if (raced.projectId) await promotePrimary(raced.projectId, raced.id);
               else {
                 await db
@@ -505,26 +610,40 @@ export function createDomainRepo(db: Database) {
       });
     },
 
-    /**
-     * Record a failed verification attempt: bump the counter, stamp the time +
-     * reason, and flip status to `failed` only once attempts cross `failAfter`
-     * (so a still-propagating domain stays `pending`, a misconfigured one
-     * eventually reads `failed`). Returns the new attempt count.
-     */
-    async recordVerifyFailure(id: string, error: string, failAfter = 8): Promise<number> {
-      const row = await db.query.domain.findFirst({ where: eq(domain.id, id) });
-      const attempts = (row?.verifyAttempts ?? 0) + 1;
+    /** A completed failed check is failed, even while its next retry is scheduled.
+     * One SQL update prevents lost counters; a stale check cannot undo success. */
+    async recordVerifyFailure(id: string, error: string): Promise<number> {
+      const [row] = await db
+        .update(domain)
+        .set({
+          verifyAttempts: sql`${domain.verifyAttempts} + 1`,
+          lastVerifyError: error,
+          lastCheckedAt: new Date(),
+          status: "failed",
+          updatedAt: new Date(),
+        })
+        .where(and(eq(domain.id, id), eq(domain.verified, false), ne(domain.status, "removing")))
+        .returning();
+      return row?.verifyAttempts ?? 0;
+    },
+
+    /** A failed TLS operation records its retry state without claiming a known
+     * working certificate disappeared. Only a definitive missing/invalid read
+     * may replace that last known state. */
+    async recordSslFailure(id: string, error: string, definitive = false) {
       await db
         .update(domain)
         .set({
-          verifyAttempts: attempts,
+          verifyAttempts: sql`${domain.verifyAttempts} + 1`,
           lastVerifyError: error,
           lastCheckedAt: new Date(),
-          ...(attempts >= failAfter ? { status: "failed" } : {}),
+          status: sql`case when ${domain.verified} then 'active' else 'failed' end`,
+          sslStatus: definitive
+            ? "error"
+            : sql`case when ${domain.sslStatus} in ('active', 'external') then ${domain.sslStatus} else 'error' end`,
           updatedAt: new Date(),
         })
-        .where(eq(domain.id, id));
-      return attempts;
+        .where(and(eq(domain.id, id), ne(domain.status, "removing")));
     },
 
     /** `manualSsl` is declared because callers pass it (via spread, which slips
@@ -542,6 +661,32 @@ export function createDomainRepo(db: Database) {
         lastVerifyError?: string | null;
       },
     ) {
+      if (data.sslStatus === "error") {
+        await this.recordSslFailure(
+          id,
+          data.lastVerifyError ?? "No usable HTTPS certificate was found on the server.",
+          true,
+        );
+        return;
+      }
+      if (data.sslStatus === "active" || data.sslStatus === "external") {
+        const now = new Date();
+        // A certificate read alone does not prove cloud DNS ownership. Clear
+        // TLS failures for verified rows; the verification transaction clears
+        // unverified rows when the ownership check itself succeeds.
+        await db
+          .update(domain)
+          .set({
+            ...data,
+            status: sql`case when ${domain.verified} then 'active' else ${domain.status} end`,
+            verifyAttempts: sql`case when ${domain.verified} then 0 else ${domain.verifyAttempts} end`,
+            lastVerifyError: sql`case when ${domain.verified} then null else ${domain.lastVerifyError} end`,
+            lastCheckedAt: sql`case when ${domain.verified} then ${now.toISOString()}::timestamp else ${domain.lastCheckedAt} end`,
+            updatedAt: now,
+          })
+          .where(and(eq(domain.id, id), ne(domain.status, "removing")));
+        return;
+      }
       await this.update(id, data);
     },
 
@@ -550,7 +695,7 @@ export function createDomainRepo(db: Database) {
     },
 
     async remove(id: string) {
-      await db.delete(domain).where(eq(domain.id, id));
+      await db.transaction((tx) => removeInTransaction(tx, id));
     },
 
     /**
@@ -568,7 +713,7 @@ export function createDomainRepo(db: Database) {
       servicePatch: { serviceId: string; routing: Record<string, unknown> },
     ) {
       await db.transaction(async (tx) => {
-        await tx.delete(domain).where(eq(domain.id, id));
+        await removeInTransaction(tx, id);
         await tx
           .update(service)
           .set({ ...servicePatch.routing, updatedAt: new Date() })
@@ -586,24 +731,15 @@ export function createDomainRepo(db: Database) {
       await db.delete(domain).where(eq(domain.serviceId, serviceId));
     },
 
-    /** Find all domains needing SSL renewal */
+    /** Retry failed renewals while their existing certificate is due too.
+     * Rows without an expiry (first issuance) and externally managed TLS are
+     * excluded. A transient renewal error must not strand an expiring cert. */
     async findExpiringSsl(beforeDate: Date) {
       return db.query.domain.findMany({
-        where: and(eq(domain.sslStatus, "active"), lt(domain.sslExpiresAt, beforeDate)),
+        where: and(inArray(domain.sslStatus, ["active", "error"]), lt(domain.sslExpiresAt, beforeDate), ne(domain.sslDnsMode, "manual")),
       });
     },
 
-    /**
-     * Find custom domains stuck in pending state (verified=false +
-     * status=pending) created before `beforeDate`. Used by the pending-
-     * verifier cron to re-check DNS for rows whose user added the domain
-     * but never clicked Verify (or whose DNS hasn't propagated yet).
-     *
-     * `beforeDate` is the "added at least N minutes ago" cutoff — we
-     * skip just-added rows so the cron doesn't race with the UI's
-     * immediate Verify click. Free-managed rows are excluded; they
-     * don't go through DNS verification (we own the suffix).
-     */
     /**
      * Custom domains that are DNS-VERIFIED but still have no usable certificate.
      *
@@ -613,61 +749,59 @@ export function createDomainRepo(db: Database) {
      * `sslStatus: "provisioning"` — too verified for one job, no cert for the other —
      * so nothing retried it and the operator had to click Verify + Redeploy by hand.
      */
-    async findPendingSsl(limit = 50, organizationId?: string): Promise<Domain[]> {
+    async findPendingSsl(
+      limit = 50,
+      organizationId?: string,
+      domainId?: string,
+    ): Promise<Domain[]> {
       const conds = [
+        domainId ? eq(domain.id, domainId) : undefined,
         eq(domain.verified, true),
         eq(domain.domainType, "custom"),
-        inArray(domain.sslStatus, ["provisioning", "none", "pending"]),
+        or(
+          inArray(domain.sslStatus, ["provisioning", "none", "pending", "error", "expired"]),
+          and(eq(domain.sslStatus, "active"), lte(domain.sslExpiresAt, new Date())),
+        ),
+        ne(domain.status, "removing"),
         // Externally-terminated TLS is not ours to issue; certbot never will.
         eq(domain.externalIngress, false),
+        eq(domain.manualSsl, false),
+        ne(domain.sslDnsMode, "manual"),
+        retryDue(),
+        liveVerificationOwner(organizationId),
       ];
-      if (organizationId) {
-        conds.push(
-          inArray(
-            domain.projectId,
-            db
-              .select({ id: project.id })
-              .from(project)
-              .where(eq(project.organizationId, organizationId)),
-          ),
-        );
-      }
       return db
         .select()
         .from(domain)
         .where(and(...conds))
+        .orderBy(sql`coalesce(${domain.lastCheckedAt}, ${domain.createdAt})`, asc(domain.id))
         .limit(limit);
     },
 
+    /** Unverified custom domains, including failed checks, after the first-check
+     * grace period and persisted backoff. Scope and eligibility precede LIMIT. */
     async findPendingVerification(
       beforeDate: Date,
       limit = 100,
       organizationId?: string,
+      domainId?: string,
     ): Promise<Domain[]> {
       const conds = [
+        domainId ? eq(domain.id, domainId) : undefined,
         eq(domain.verified, false),
-        eq(domain.status, "pending"),
+        inArray(domain.status, ["pending", "failed"]),
         eq(domain.domainType, "custom"),
-        lt(domain.createdAt, beforeDate),
+        ne(domain.sslDnsMode, "manual"),
+        lte(domain.createdAt, beforeDate),
+        retryDue(),
+        liveVerificationOwner(organizationId),
       ];
-      // Org scope (HTTP /verify-pending): only this org's pending domains, so a
-      // tenant can neither enumerate nor trigger verification/SSL on another
-      // tenant's domains, and the row cap applies to their OWN backlog. `domain`
-      // has no organizationId column, so filter via its project. Omitted →
-      // instance-wide (the system `domains:verify-pending` cron only).
-      if (organizationId) {
-        conds.push(
-          inArray(
-            domain.projectId,
-            db
-              .select({ id: project.id })
-              .from(project)
-              .where(eq(project.organizationId, organizationId)),
-          ),
-        );
-      }
-      const rows = await db.query.domain.findMany({ where: and(...conds) });
-      return rows.slice(0, limit);
+      return db
+        .select()
+        .from(domain)
+        .where(and(...conds))
+        .orderBy(sql`coalesce(${domain.lastCheckedAt}, ${domain.createdAt})`, asc(domain.id))
+        .limit(limit);
     },
 
     /** Set primary domain for a project (unsets previous primary). */

@@ -211,6 +211,9 @@ export const deployment = pgTable(
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
   },
   (t) => [
+    uniqueIndex("deployment_release_run")
+      .on(sql`(${t.meta}->>'releaseRunId')`)
+      .where(sql`${t.meta}->>'releaseRunId' IS NOT NULL`),
     // At most ONE in-flight deployment per project. The race-prone
     // pattern (SELECT-then-INSERT inside checkNoActiveBuild +
     // createQueuedDeployment) is replaced by relying on this constraint:

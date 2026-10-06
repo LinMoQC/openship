@@ -28,6 +28,8 @@ import { sql, eq, inArray, count, getTableColumns } from "drizzle-orm";
 import { getTableConfig, type PgTable } from "drizzle-orm/pg-core";
 import { db, getDriver, type DatabaseTransaction } from "./client";
 import * as schema from "./schema";
+import { SERVICE_SECRET_FIELDS, DEPLOYMENT_SECRET_FIELDS } from "./configuration-secrets";
+import { AppError, deploymentBelongsToProject } from "@repo/core";
 
 export const DUMP_FORMAT_VERSION = 1;
 
@@ -74,7 +76,7 @@ export interface DumpOptions {
  * two cannot drift.
  */
 export const INSTANCE_SCOPED_REFS: Record<string, readonly string[]> = {
-  project: ["serverId"],
+  project: ["serverId", "clusterId"],
   backup_destination: ["serverId"],
   backup_policy: ["mailServerId"],
   backup_run: ["mailServerId"],
@@ -189,6 +191,21 @@ export interface TableSpec {
 }
 
 const TABLES: ReadonlyArray<TableSpec> = [
+  // Preserve release ownership and crash-recovery evidence together with the
+  // whole instance. A tenant/project move cannot carry the host or controller
+  // authority and is refused below instead of silently dropping these rows.
+  { sqlName: "release_binding", table: schema.releaseBinding, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: true },
+  { sqlName: "release_plan", table: schema.releasePlan, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: true },
+  { sqlName: "release_run", table: schema.releaseRun, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: true },
+  { sqlName: "service_cutover_journal", table: schema.serviceCutoverJournal, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: false },
+  {
+    sqlName: "external_identity", table: schema.externalIdentity,
+    scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: false,
+  },
+  {
+    sqlName: "external_namespace", table: schema.externalNamespace,
+    scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: true,
+  },
   // Auth + identity — instance-only (SaaS already has its own user/auth rows).
   {
     sqlName: "user",
@@ -294,6 +311,18 @@ const TABLES: ReadonlyArray<TableSpec> = [
   },
 
   // Infra — instance-only.
+  { sqlName: "compute_cluster", table: schema.computeCluster, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: true },
+  { sqlName: "compute_cluster_member", table: schema.computeClusterMember, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: false },
+  { sqlName: "cluster_runtime", table: schema.clusterRuntime, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: true },
+  { sqlName: "cluster_storage", table: schema.clusterStorage, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: true },
+  { sqlName: "cluster_database", table: schema.clusterDatabase, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: true },
+  { sqlName: "private_network", table: schema.serverCluster, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: true },
+  { sqlName: "managed_network_operation", table: schema.managedNetworkOperation, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: true },
+  { sqlName: "managed_network_preparation", table: schema.managedNetworkPreparation, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: true },
+  { sqlName: "managed_network_claim", table: schema.managedNetworkClaim, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: true },
+  { sqlName: "private_network_config", table: schema.clusterNetwork, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: false },
+  { sqlName: "network_member", table: schema.clusterMember, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: false },
+  { sqlName: "server_network_attachment", table: schema.serverNetworkAttachment, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: false },
   {
     sqlName: "servers",
     table: schema.servers,
@@ -382,6 +411,16 @@ const TABLES: ReadonlyArray<TableSpec> = [
   {
     sqlName: "env_var",
     table: schema.envVar,
+    scopes: [
+      { in: "instance", via: "all-rows" },
+      { in: "organization", via: "fk", column: "projectId" },
+      { in: "project", via: "fk", column: "projectId" },
+    ],
+    hasOrganizationId: false,
+  },
+  {
+    sqlName: "cloud_docker_workspace",
+    table: schema.cloudDockerWorkspace,
     scopes: [
       { in: "instance", via: "all-rows" },
       { in: "organization", via: "fk", column: "projectId" },
@@ -724,12 +763,15 @@ const TABLES: ReadonlyArray<TableSpec> = [
  * whole-instance export that claims to carry "every migration-managed table".
  */
 export const EXCLUDED_TABLES: Record<string, string> = {
+  platform_instance: "the receiving installation retains its own identity and encryption-key binding",
   // Ephemeral / in-flight — re-created on demand, meaningless on another host.
   build_session: "in-flight build state; a migration never resumes a build mid-flight",
   deployment_check_run: "GitHub check-run mirror, re-created by the next deploy",
   terminal_sessions: "SSH session audit bound to a live WS; open rows are swept at boot",
   service_terminal_sessions: "as terminal_sessions, for container shells",
   verification: "Better Auth one-shot nonces, all short-TTL",
+  domain_dns_challenge: "temporary ACME order and worker lease; start a new TXT challenge after an instance transfer",
+  acme_account: "instance-bound ACME account signing keys; the destination registers its own account without changing installed certificates",
   github_install_state: "one-shot install nonce, deleted on callback",
   cloud_handoff_code: "60s one-time cloud-connect codes",
   data_transfer_session: "short-lived whole-instance transfer capability and upload lease",
@@ -750,6 +792,7 @@ export const EXCLUDED_TABLES: Record<string, string> = {
   update_status: "cached upstream scan result; the next `updates:scan` refills it",
   server_container_status: "cached container drift; re-probed from the host",
   server_module_status: "cached module drift; re-probed from the host",
+  network_verification: "network observations and bounded probe runs; re-verify after instance restore",
 
   // History that is observability only — no config, no pending work, and prunable.
   job_run: "append-only tick log; job DEFINITIONS travel, executions do not",
@@ -767,6 +810,7 @@ export const EXCLUDED_TABLES: Record<string, string> = {
   // CLOUD_MODE is set, so these tables are unreachable by this path by construction.
   billing_customer: "CLOUD_MODE-only",
   billing_subscription: "CLOUD_MODE-only",
+  billing_plan_grant: "CLOUD_MODE-only; operator grants are not portable tenant data",
   billing_usage_snapshot: "CLOUD_MODE-only",
   billing_anniversary_grant: "CLOUD_MODE-only",
   credit_pack: "CLOUD_MODE-only",
@@ -903,6 +947,8 @@ export interface EncryptedColumnSpec {
  * per-install), so it MUST be redacted on any cross-host move.
  */
 export const ENCRYPTED_COLUMNS: ReadonlyArray<EncryptedColumnSpec> = [
+  { table: "cluster_database", column: "secretEncrypted" },
+  { table: "cluster_database", column: "envValueEncrypted" },
   { table: "user_settings", column: "cloudSessionToken" },
   { table: "user_settings", column: "cloneTokenEncrypted" },
   { table: "project", column: "cloneTokenEncrypted" },
@@ -939,7 +985,9 @@ export const ENCRYPTED_COLUMNS: ReadonlyArray<EncryptedColumnSpec> = [
   { table: "instance_settings", column: "tunnelToken" },
   { table: "instance_settings", column: "ghDeviceTokenEncrypted" },
   { table: "deployment", column: "envVars" },
-  { table: "notification_channel", column: "config", secretPaths: ["hmacSecret", "webhookUrl"] },
+  ...SERVICE_SECRET_FIELDS.map(column => ({ table: "service", column })),
+  { table: "deployment", column: "meta", secretPaths: [...DEPLOYMENT_SECRET_FIELDS] },
+  { table: "notification_channel", column: "config", secretPaths: ["hmacSecret", "webhookUrl", "botToken"] },
 ];
 
 /**
@@ -1001,6 +1049,18 @@ export async function dumpSubgraph(
   scope: SubgraphScope,
   opts: DumpOptions = {},
 ): Promise<DatabaseDump> {
+  if (scope.kind !== "instance") {
+    const projects = await db.select({ id: schema.project.id }).from(schema.project).where(
+      scope.kind === "project" ? eq(schema.project.id, scope.projectId) : eq(schema.project.organizationId, scope.organizationId),
+    );
+    const ids = projects.map(row => row.id);
+    // Independent of exclusion/history options: removing ownership from the
+    // export must never turn a managed project into an unrestricted one.
+    if (ids.length) for (const table of [schema.releaseBinding, schema.releasePlan, schema.releaseRun, schema.serviceCutoverJournal]) {
+      if ((await db.select({ id: table.id }).from(table).where(inArray(table.projectId, ids)).limit(1)).length)
+        throw new AppError("GitOps release ownership and recovery records require a whole-instance export with matched runtime ownership", 409, "GITOPS_TRANSFER_UNSUPPORTED");
+    }
+  }
   const tables: DatabaseDump["tables"] = {};
   const excludedTables = new Set(opts.excludeTables ?? []);
 
@@ -1201,6 +1261,13 @@ export interface RestoreOptions {
    * their guaranteed PK collision.
    */
   mergeConflictSkip?: string[];
+  /** Trusted control-plane imports can update matching project records by PK.
+   * Secret cells are handled separately, in the SAME transaction. */
+  mergeConflictUpdate?: string[];
+  mergePreserveColumns?: Record<string, string[]>;
+  /** Filled with exactly the rows inserted/updated, never conflict-skipped rows. */
+  writtenIds?: Map<string, Set<string>>;
+  writtenRows?: { count: number };
 }
 
 /**
@@ -1230,6 +1297,7 @@ export function assertDumpSelfContained(dump: DatabaseDump): void {
   const FK_PARENT: Record<string, string> = {
     projectId: "project",
     deploymentId: "deployment",
+    activeDeploymentId: "deployment",
     serviceId: "service",
     groupId: "project_app",
     // Backups: destinationId/runId reference org-scoped parents that DO travel
@@ -1307,6 +1375,29 @@ export function assertDumpSelfContained(dump: DatabaseDump): void {
       }
     }
   }
+
+  assertActiveDeploymentOwnership(dump.tables);
+}
+
+/** Shared by full restores and project-import preview/apply. */
+export function assertActiveDeploymentOwnership(tables: DatabaseDump["tables"]): void {
+  // Presence somewhere in the dump is insufficient: a project's active pointer
+  // must identify its own deployment, including before organization remapping.
+  const deploymentsById = new Map(
+    (tables.deployment ?? []).map((row) => {
+      const deployment = row as { id: string; projectId: string; organizationId: string };
+      return [deployment.id, deployment];
+    }),
+  );
+  for (const row of tables.project ?? []) {
+    const project = row as { id: string; organizationId: string; activeDeploymentId?: string | null };
+    if (project.activeDeploymentId == null) continue;
+    if (!deploymentBelongsToProject(project, deploymentsById.get(project.activeDeploymentId))) {
+      throw new Error(
+        `restore rejected: project ${project.id} has an active deployment that does not belong to the same project and organization.`,
+      );
+    }
+  }
 }
 
 /**
@@ -1325,9 +1416,25 @@ export async function restoreSubgraphInTransaction(
     );
   }
 
+  // Older instance archives used the original network aggregate's cluster names.
+  // Row property names and approved journal payloads are unchanged.
+  const legacyNetworks: Record<string, string> = { server_cluster: "private_network", cluster_network: "private_network_config", cluster_member: "network_member" };
+  const tables = { ...dump.tables };
+  for (const [legacy, current] of Object.entries(legacyNetworks)) {
+    if (!tables[legacy]?.length) continue;
+    if (tables[current]?.length) throw new Error(`Archive contains both ${legacy} and ${current}.`);
+    tables[current] = tables[legacy];
+    delete tables[legacy];
+  }
+  dump = { ...dump, tables };
+
   // Remap path (cloud ingest / project transfer) is the only place an untrusted
   // caller supplies a dump for a DIFFERENT org — reject cross-tenant FKs there.
   if (opts.remapOrgId) assertDumpSelfContained(dump);
+  if (opts.remapOrgId && (dump.tables.cloud_docker_workspace?.length ?? 0) > 0 &&
+      dump.tables.project?.some(row => row.organizationId !== opts.remapOrgId)) {
+    throw new Error("Cloud Docker workspaces are bound to their billing organization. Migrate the volume data to a new workspace before transferring ownership.");
+  }
 
   // Kept for the day the schema declares its FKs DEFERRABLE — but DO NOT rely on
   // it. Postgres applies this only to constraints declared DEFERRABLE, and none of
@@ -1458,6 +1565,7 @@ export async function restoreSubgraphInTransaction(
     const skipOnConflict =
       spec.scopes.some((s) => s.via === "from-root-project") ||
       (opts.mode === "merge" && !!opts.mergeConflictSkip?.includes(spec.sqlName));
+    const updateOnConflict = opts.mode === "merge" && opts.mergeConflictUpdate?.includes(spec.sqlName);
 
     try {
       // Chunked: one INSERT per `insertChunkSize(spec.table)` rows, so a large
@@ -1465,14 +1573,31 @@ export async function restoreSubgraphInTransaction(
       const chunk = insertChunkSize(spec.table);
       for (let i = 0; i < prepared.length; i += chunk) {
         const batch = prepared.slice(i, i + chunk);
-        if (skipOnConflict) {
-          await tx
+        let written: Array<Record<string, unknown>>;
+        if (updateOnConflict && columns.id) {
+          const secretNames = new Set([
+            ...(encryptedCols?.map((col) => col.column) ?? []),
+            ...(opts.mergePreserveColumns?.[spec.sqlName] ?? []),
+          ]);
+          const set = Object.fromEntries(Object.entries(columns)
+            .filter(([key]) => key !== "id" && !secretNames.has(key) && batch.some((row) => key in row))
+            .map(([key, column]) => [key, sql`excluded.${sql.identifier(column.name)}`]));
+          written = await tx.insert(spec.table).values(batch as never)
+            .onConflictDoUpdate({ target: columns.id, set }).returning();
+        } else if (skipOnConflict) {
+          written = await tx
             .insert(spec.table)
             .values(batch as never)
-            .onConflictDoNothing();
+            .onConflictDoNothing().returning();
         } else {
-          await tx.insert(spec.table).values(batch as never);
+          written = await tx.insert(spec.table).values(batch as never).returning();
         }
+        if (opts.writtenIds) {
+          const ids = opts.writtenIds.get(spec.sqlName) ?? new Set<string>();
+          for (const row of written) if (typeof row.id === "string") ids.add(row.id);
+          opts.writtenIds.set(spec.sqlName, ids);
+        }
+        if (opts.writtenRows) opts.writtenRows.count += written.length;
       }
     } catch (err) {
       // PostgreSQL unique_violation = 23505 (PGlite mirrors this).

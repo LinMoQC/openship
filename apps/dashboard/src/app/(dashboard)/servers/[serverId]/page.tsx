@@ -1,27 +1,10 @@
 "use client";
 
+import { Icon as UiIcon, type IconName } from "@repo/ui/icons";
+
 import { useState, useEffect, useCallback, useRef } from "react";
 import { BlurIp } from "@/components/BlurIp";
 import { useRouter, useSearchParams, usePathname } from "next/navigation";
-import {
-  ArrowLeft,
-  Loader2,
-  Settings2,
-  Trash2,
-  LayoutGrid,
-  Blocks,
-  Boxes,
-  Terminal,
-  MoreHorizontal,
-  Server,
-  ServerCrash,
-  Globe,
-  User,
-  KeyRound,
-  Shield,
-  Network,
-  GitBranch,
-} from "lucide-react";
 import { ApiError, getApiErrorMessage, isAbortError, systemApi } from "@/lib/api";
 import { useToast } from "@/context/ToastContext";
 import { useModal } from "@/context/ModalContext";
@@ -54,9 +37,9 @@ import { PortForwardingCard } from "./_components/port-forwarding-card";
 import { ServerGitHubConnect } from "@/components/github/ServerGitHubConnect";
 import { MigrationsTab } from "@/components/migration/MigrationsTab";
 import { ServerConnectionCard } from "./_components/connection-card";
-import { ServerDeletionModal } from "./_components/ServerDeletionModal";
-import { serverRemovalSummary, type ServerRemovalResult, type ServerRemovalWorkloadResult } from "@/lib/server-removal";
+import { ServerDeletionModal } from "@/components/servers/ServerDeletionModal";
 import { usePlatform } from "@/context/PlatformContext";
+import { ServerInfrastructure } from "@/components/servers/ServerInfrastructure";
 
 
 type Tab = "overview" | "migrations" | "components" | "github" | "security" | "ports" | "terminal";
@@ -65,7 +48,7 @@ type ManualActionMode = "remove" | null;
 interface TabDef {
   key: Tab;
   /** Narrower than ElementType so these feed the shared <Tabs> directly. */
-  icon: React.ComponentType<{ className?: string }>;
+  icon: IconName;
   /** Desktop-only tabs are filtered out in non-desktop deployments. */
   desktopOnly?: boolean;
 }
@@ -73,15 +56,15 @@ interface TabDef {
 // Mail management lives in /emails - that page picks any server and reads
 // its mail-install state at runtime. We don't repeat that UI here.
 const TABS: TabDef[] = [
-  { key: "overview",   icon: LayoutGrid },
-  { key: "migrations", icon: Boxes },
-  { key: "components", icon: Blocks },
-  { key: "github",     icon: GitBranch },
-  { key: "security",   icon: Shield },
+  { key: "overview",   icon: "grid" },
+  { key: "migrations", icon: "migration" },
+  { key: "components", icon: "server-settings" },
+  { key: "github",     icon: "git-branch" },
+  { key: "security",   icon: "shield" },
   // Port forwarding is meaningful only in desktop mode (the orchestrator IS
   // the user's machine); hidden elsewhere.
-  { key: "ports",      icon: Network, desktopOnly: true },
-  { key: "terminal",   icon: Terminal },
+  { key: "ports",      icon: "port-forwarding", desktopOnly: true },
+  { key: "terminal",   icon: "terminal" },
 ];
 
 export default function ServerDetailPage({
@@ -520,76 +503,13 @@ export default function ServerDetailPage({
     })();
   }, [serverId, fetchData, runHealthCheck]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Removal is its own modal, not a one-line confirm: the row being deleted is the
-  // deploy target of every project on the box, so the operator has to see the list and
-  // choose what happens to those workloads. `showModal` can't render either.
   const [removeOpen, setRemoveOpen] = useState(false);
-  const [removeBusy, setRemoveBusy] = useState(false);
-  const [removeFailures, setRemoveFailures] = useState<ServerRemovalWorkloadResult[] | null>(null);
-
-  const handleDelete = useCallback(() => {
-    setRemoveFailures(null);
-    setRemoveOpen(true);
-  }, []);
-
-  const handleRemoveConfirm = useCallback(
-    async (destroyOnSource: boolean, workloadCount: number) => {
-      setRemoveBusy(true);
-      try {
-        const res = await systemApi.deleteServerEntry(serverId, { destroyOnSource, workloadCount });
-        // Every message below is derived from the RESPONSE. Reporting the flag we sent
-        // is how a delete once claimed a cascade the server never performed.
-        const summary = serverRemovalSummary(res);
-        if (summary.kind === "partial") {
-          setRemoveFailures(summary.failed);
-          showToast(
-            res.error ?? t.servers.detail.toastFailedRemoveServer,
-            "error",
-            t.servers.toastTitles.server,
-          );
-          return;
-        }
-        setRemoveOpen(false);
-        showToast(
-          summary.count === 0
-            ? t.servers.detail.toastServerRemoved
-            : interpolate(
-                summary.destroyed
-                  ? summary.count === 1
-                    ? t.servers.detail.removal.toastRemovedDestroyedOne
-                    : t.servers.detail.removal.toastRemovedDestroyedOther
-                  : summary.count === 1
-                    ? t.servers.detail.removal.toastRemovedKeptOne
-                    : t.servers.detail.removal.toastRemovedKeptOther,
-                { count: String(summary.count) },
-              ),
-          "success",
-          t.servers.toastTitles.server,
-        );
-        router.push("/servers");
-      } catch (err) {
-        // A 409 carries the per-workload reasons; render them in the modal so the
-        // retry is aimed rather than blind.
-        const body = err instanceof ApiError ? (err.body as ServerRemovalResult | undefined) : undefined;
-        if (body?.workloads?.length) {
-          setRemoveFailures(body.workloads.filter((w) => !w.ok || (w.orphaned ?? 0) > 0));
-        }
-        showToast(
-          getApiErrorMessage(err, t.servers.detail.toastFailedRemoveServer),
-          "error",
-          t.servers.toastTitles.server,
-        );
-      } finally {
-        setRemoveBusy(false);
-      }
-    },
-    [serverId, router, showToast, t],
-  );
+  const handleDelete = useCallback(() => setRemoveOpen(true), []);
 
   if (loading) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
-        <Loader2 className="size-6 animate-spin text-muted-foreground" />
+        <UiIcon name="spinner" className="size-6 animate-spin text-muted-foreground" />
       </div>
     );
   }
@@ -599,7 +519,7 @@ export default function ServerDetailPage({
       <PageContainer>
         <div className="flex min-h-[60vh] items-center justify-center p-6">
           <ResourceNotFound
-            icon={<ServerCrash className="size-7" />}
+            icon={<UiIcon name="server-error" className="size-7" />}
             title={t.servers.detail.serverNotFound}
             description={t.servers.detail.serverNotFoundDesc}
             detail={serverId}
@@ -607,7 +527,7 @@ export default function ServerDetailPage({
             actions={[
               {
                 label: t.servers.setup.goToServers,
-                icon: <ArrowLeft className="size-4 rtl:rotate-180" />,
+                icon: <UiIcon name="arrow-left" className="size-4 rtl:rotate-180" />,
                 onClick: () => router.push("/servers"),
               },
             ]}
@@ -627,7 +547,7 @@ export default function ServerDetailPage({
               onClick={() => router.push(`/servers/${serverId}`)}
               className="w-8 h-8 rounded-lg hover:bg-muted flex items-center justify-center transition-colors"
             >
-              <ArrowLeft className="size-4 text-muted-foreground rtl:rotate-180" />
+              <UiIcon name="arrow-left" className="size-4 text-muted-foreground rtl:rotate-180" />
             </button>
             <div>
               <h1
@@ -685,7 +605,7 @@ export default function ServerDetailPage({
             className="app-nav-fallback w-8 h-8 rounded-lg hover:bg-muted flex items-center justify-center transition-colors"
             aria-label={t.servers.setup.goToServers}
           >
-            <ArrowLeft className="size-4 text-muted-foreground rtl:rotate-180" />
+            <UiIcon name="arrow-left" className="size-4 text-muted-foreground rtl:rotate-180" />
           </button>
           <div className="flex-1 min-w-0">
             <h1
@@ -717,7 +637,7 @@ export default function ServerDetailPage({
               onClick={() => router.push(`/servers/${serverId}?edit=true`)}
               className="inline-flex items-center gap-2 px-4 py-2 bg-muted/50 text-foreground text-sm font-medium rounded-xl hover:bg-muted transition-colors"
             >
-              <Settings2 className="size-4" />
+              <UiIcon name="sliders" className="size-4" />
               {t.servers.detail.edit}
             </button>
             <div className="relative">
@@ -725,7 +645,7 @@ export default function ServerDetailPage({
                 onClick={() => setShowMenu((v) => !v)}
                 className="w-8 h-8 rounded-lg hover:bg-muted flex items-center justify-center transition-colors text-muted-foreground hover:text-foreground"
               >
-                <MoreHorizontal className="size-4" />
+                <UiIcon name="more" className="size-4" />
               </button>
               {showMenu && (
                 <>
@@ -741,7 +661,7 @@ export default function ServerDetailPage({
                       }}
                       className="w-full flex items-center gap-2 px-3 py-2 text-sm text-danger hover:bg-danger-bg transition-colors"
                     >
-                      <Trash2 className="size-3.5" />
+                      <UiIcon name="trash" className="size-3.5" />
                       {t.servers.detail.removeServer}
                     </button>
                   </div>
@@ -878,20 +798,18 @@ export default function ServerDetailPage({
           {activeTab !== "migrations" && (
             <div className="space-y-4 lg:sticky lg:top-6 lg:self-start">
               <ServerConnectionCard server={server} />
+              <ServerInfrastructure serverId={serverId} />
             </div>
           )}
         </div>
 
-        {/* Removal confirm. The only removal entry point in the app — the fleet list
-            has no delete action. */}
         <ServerDeletionModal
           isOpen={removeOpen}
           onClose={() => setRemoveOpen(false)}
-          onConfirm={handleRemoveConfirm}
+          onRemoved={() => router.push("/servers")}
+          key={serverId}
           serverId={serverId}
           serverName={server?.name ?? ""}
-          failures={removeFailures}
-          busy={removeBusy}
         />
     </PageContainer>
   );

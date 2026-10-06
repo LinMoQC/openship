@@ -9,6 +9,7 @@ import type { BuildConfig, LogCallback } from "../types";
 
 import { getTarCreateEnv, prepareSourceTarArgs } from "../archive";
 import { assembleGitClone } from "./build-pipeline";
+import { GIT_SUBMODULE_UPDATE_ARGS } from "./git-clone";
 import { localGitSshWriter, materializeGitSsh, type GitSshMaterial } from "./git-ssh-material";
 import { generateDockerfile } from "./docker-build-plan";
 import { dockerfileNeedsBuildKit } from "./docker-buildkit-trace";
@@ -409,7 +410,22 @@ async function cloneGitSource(
       });
     }
 
-    await rm(join(targetPath, ".git"), { recursive: true, force: true });
+    await spawnGit([...credArgs, "-C", targetPath, ...GIT_SUBMODULE_UPDATE_ARGS], {
+      timeoutMs: GIT_CLONE_IDLE_TIMEOUT_MS,
+      onLog,
+      env: gitEnv,
+    });
+
+    // A submodule's .git is usually a file pointing into the parent's metadata.
+    // Strip both forms without following symlinks into a path outside the checkout.
+    const removeGitMetadata = async (directory: string): Promise<void> => {
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        const path = join(directory, entry.name);
+        if (entry.name === ".git") await rm(path, { recursive: true, force: true });
+        else if (entry.isDirectory()) await removeGitMetadata(path);
+      }
+    };
+    await removeGitMetadata(targetPath);
   } finally {
     await sshMaterial?.cleanup();
   }

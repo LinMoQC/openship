@@ -55,10 +55,10 @@ vi.mock("@repo/db", () => ({ repos: { terminalSession, server } }));
 vi.mock("../../../src/lib/ws", () => ({
   upgradeWebSocket: (fn: unknown) => fn,
 }));
-vi.mock("../../../src/lib/auth", () => ({
+vi.mock("@repo/platform/engine/lib/auth", () => ({
   auth: { api: { getSession: vi.fn() } },
 }));
-vi.mock("../../../src/lib/ssh-manager", () => ({
+vi.mock("@repo/platform/engine/lib/ssh-manager", () => ({
   sshManager: { retain: vi.fn(), release: vi.fn() },
 }));
 vi.mock("../../../src/lib/permission", () => ({
@@ -78,7 +78,7 @@ import {
 } from "../../../src/modules/terminal/terminal.controller";
 import { issueTerminalTicket } from "../../../src/lib/terminal-session-manager";
 import { checkPermission } from "../../../src/lib/permission";
-import { trustedOrigins } from "../../../src/config/env";
+import { trustedOrigins } from "@repo/platform/engine/config/env";
 import type { RequestContext } from "../../../src/lib/request-context";
 
 function fakeShell(): ShellSession {
@@ -239,4 +239,13 @@ describe("terminal.controller WS upgrade", () => {
       "org_ticket",
     );
   });
+});
+
+// The application seams moved with the shared engine.
+vi.mock("@repo/platform/engine/lib/authorization", async (importOriginal) => {
+  const mocked = await (() => ({
+  permission: { assert: vi.fn() },
+  checkPermission: vi.fn(async () => true),
+}))(importOriginal);
+  return { ...mocked, authorization: mocked.authorization ?? { authorize: async (ctx, input) => { await mocked.permission.assert(ctx, input); return ctx; } } };
 });

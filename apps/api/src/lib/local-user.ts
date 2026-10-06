@@ -12,7 +12,7 @@
 
 import { randomUUID } from "node:crypto";
 import { repos } from "@repo/db";
-import { provisionUser } from "./provision-user";
+import { provisionUser } from "@repo/platform/engine/lib/provision-user";
 
 export const LOCAL_EMAIL = "local@openship.local";
 

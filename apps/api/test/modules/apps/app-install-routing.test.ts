@@ -44,17 +44,17 @@ vi.mock("@repo/db", () => ({
   },
 }));
 
-vi.mock("../../../src/modules/projects/project-crud.service", () => ({
+vi.mock("@repo/platform/engine/modules/projects/project-crud.service", () => ({
   createProject: createProjectMock,
 }));
 
-vi.mock("../../../src/modules/services/service.service", () => ({
+vi.mock("@repo/platform/engine/modules/services/service.service", () => ({
   createService: createServiceMock,
   updateService: updateServiceMock,
   setServiceEnvVars: setEnvMock,
 }));
 
-vi.mock("../../../src/lib/cloud/require-cloud", () => ({
+vi.mock("@repo/platform/engine/lib/cloud/require-cloud", () => ({
   requireCloud: requireCloudMock,
 }));
 
@@ -64,12 +64,12 @@ import {
   planInstallRouting,
   serviceRoutingPatch,
   type InstallAppRoute,
-} from "../../../src/modules/apps/app-install.service";
+} from "@repo/platform/engine/modules/apps/app-install.service";
 import { buildPublicUrlLookup, getAppTemplate, servicePortPairs } from "@repo/core";
 import {
   mergeServiceRoutingPatch,
   type StoredServiceRouting,
-} from "../../../src/lib/public-endpoints";
+} from "@repo/platform/engine/lib/public-endpoints";
 import type { RequestContext } from "../../../src/lib/request-context";
 
 const ctx = { organizationId: "org1", userId: "u1" } as RequestContext;

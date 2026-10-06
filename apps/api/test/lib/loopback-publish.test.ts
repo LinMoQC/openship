@@ -4,7 +4,7 @@ import {
   withLoopbackPublish,
   withLoopbackPublishAll,
   upstreamHostPortFor,
-} from "../../src/lib/loopback-publish";
+} from "@repo/platform/engine/lib/loopback-publish";
 
 describe("a service with SEVERAL routes gets one host port per routed port", () => {
   // Regression: minio routes 9001 (console) and 9000 (s3 API). Pinning only the

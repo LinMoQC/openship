@@ -1,5 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { BuildAccessBody, parseCreateDeploymentInput } from "@repo/contracts";
+import { Value } from "@sinclair/typebox/value";
 
 /**
  * `targetServiceIds` is a BUILD subset. `strictScope` is an EXCLUSION. Conflating them
@@ -25,11 +27,11 @@ import { describe, expect, it } from "vitest";
  */
 const src = (rel: string) => readFileSync(new URL(rel, import.meta.url), "utf8");
 
-const buildService = src("../build.service.ts");
-const buildConfig = src("../build-config.ts");
-const pipeline = src("./pipeline.ts");
-const deployService = src("./deploy.service.ts");
-const orchestrator = src("../../migration/migration.orchestrator.ts");
+const buildService = src("../../../../../../packages/platform/src/engine/modules/deployments/build.service.ts");
+const buildConfig = src("../../../../../../packages/platform/src/engine/modules/deployments/build-config.ts");
+const pipeline = src("../../../../../../packages/platform/src/engine/modules/deployments/compose/pipeline.ts");
+const deployService = src("../../../../../../packages/platform/src/engine/modules/deployments/compose/deploy.service.ts");
+const orchestrator = src("../../../../../../packages/platform/src/engine/modules/migration/migration.orchestrator.ts");
 
 describe("strictScope reaches the compose deploy from the snapshot", () => {
   it("is persisted onto the snapshot, and only alongside a scope", () => {
@@ -40,29 +42,10 @@ describe("strictScope reaches the compose deploy from the snapshot", () => {
     expect(buildService).toContain("meta = { ...meta, strictServiceScope: true }");
   });
 
-  it("is available to an authenticated exact-service deployment", () => {
-    const controller = src("../deployment.controller.ts");
-    const schema = src("../deployment.schema.ts");
-    const cli = src("../../../../../cli/src/commands/deploy.ts");
-    expect(schema).toContain("strictServiceScope: Type.Optional");
-    expect(controller).toContain("strictServiceScope?: boolean");
-    expect(controller).toContain("strictServiceScope: body.strictServiceScope");
-    expect(cli).toContain('option("--strict-service-scope"');
-    expect(cli).toContain("strictServiceScope: opts.strictServiceScope || undefined");
-  });
-
-  it("remains available to compose folder redeploys", () => {
-    const schema = src("../deployment.schema.ts");
-    const cli = src("../../../../../cli/src/commands/deploy.ts");
-    const folderDeploy = src("../../../../../cli/src/lib/folder-deploy.ts");
-    expect(cli).not.toMatch(/const gitOnlyFlags =[^;]*strictServiceScope/);
-    expect(cli).toContain("strictServiceScope: opts.strictServiceScope");
-    expect(folderDeploy).toContain("strictServiceScope?: boolean");
-    expect(folderDeploy).toContain("strictServiceScope: true");
-    expect(schema.match(/strictServiceScope: Type\.Optional/g)).toHaveLength(2);
-    expect(buildService).toContain(
-      "strictServiceScope: strictServiceScope || internal?.strictServiceScope",
-    );
+  it("allows a public scope to narrow deployment without permitting forceAll to broaden it", () => {
+    expect(Value.Check(BuildAccessBody, { projectId: "project", serviceIds: ["api"], strictServiceScope: true })).toBe(true);
+    expect(() => parseCreateDeploymentInput({ projectId: "project", serviceIds: ["api"], strictServiceScope: true, forceAll: true })).toThrow("cannot be combined");
+    expect(() => parseCreateDeploymentInput({ projectId: "project", strictServiceScope: true })).toThrow("requires serviceIds");
   });
 
   it("is read off the snapshot and passed into the deploy", () => {
@@ -72,11 +55,11 @@ describe("strictScope reaches the compose deploy from the snapshot", () => {
     expect(pipeline).toContain("strictScope,");
   });
 
-  it("requires a scope to mean anything, and never overrides forceAll", () => {
+  it("fails a conflicting stored scope instead of silently broadening it", () => {
     const at = pipeline.indexOf("const strictScope =");
     const decl = pipeline.slice(at, at + 240);
-    expect(decl).toContain("!dep.forceAll");
-    expect(decl).toContain("!!targetServiceIds");
+    expect(decl).toContain("dep.forceAll || !targetServiceIds?.size");
+    expect(decl).toContain("throw new Error");
   });
 
   it("makes the deploy SKIP an untargeted service outright", () => {

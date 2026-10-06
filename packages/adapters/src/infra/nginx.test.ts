@@ -18,7 +18,7 @@ import {
   type ProxySettings,
 } from "@repo/core";
 import { scanOpenshipEdge } from "../system/proxy/import/nginx";
-import { makeTestCert } from "../system/proxy/test-certs";
+import { makeTestCert, makeTestRenewalConf } from "../system/proxy/test-certs";
 import { compileVercelRouting } from "./vercel-routing";
 import {
   OPENRESTY_DEFAULT_PATHS,
@@ -79,6 +79,8 @@ interface FakeOpts {
   failChmod?: boolean;
   provider?: Partial<NginxProviderOptions>;
   certbotFailure?: string;
+  /** Publish a certificate when the simulated certbot command succeeds. */
+  onCertbot?: () => void;
   paths?: OpenRestyPaths;
 }
 
@@ -176,6 +178,12 @@ function makeExecutor(
       if (command.includes(PATHS.confPath)) return PATHS.confPath;
       return "";
     }
+    const certLink = command.match(
+      /^readlink '\/etc\/letsencrypt\/live\/([^/]+)\/(cert|chain|fullchain|privkey)\.pem'/,
+    );
+    if (certLink && files.has(`/etc/letsencrypt/renewal/${certLink[1]}.conf`)) {
+      return `../../archive/${certLink[1]}/${certLink[2]}1.pem`;
+    }
     if (command === "cat /proc/321/cgroup 2>/dev/null") {
       if (opts.unreadableMasterCgroup) throw new Error("permission denied");
       return "0::/system.slice/openship-openresty.service";
@@ -190,6 +198,7 @@ function makeExecutor(
     if ((command.startsWith("certbot ") || command.startsWith("env ")) && opts.certbotFailure) {
       throw new Error(opts.certbotFailure);
     }
+    if (command.startsWith("certbot ") || command.startsWith("env ")) opts.onCertbot?.();
     if (command.startsWith("chmod ") && opts.failChmod) {
       throw new Error("chmod: cannot access operand: No such file or directory");
     }
@@ -257,7 +266,9 @@ function makeExecutor(
     },
     exists: async (p: string) =>
       files.has(p) ||
-      (opts.certDomains ?? []).some((d) => p.startsWith(`/etc/letsencrypt/live/${d}/`)),
+      (opts.certDomains ?? []).some(
+        (d) => p === `/etc/letsencrypt/live/${d}` || p.startsWith(`/etc/letsencrypt/live/${d}/`),
+      ),
     mkdir: async () => {},
     rm: async (p: string) => {
       removed.push(p);
@@ -696,6 +707,105 @@ describe("NginxProvider.serveEdgeChallenge", () => {
   });
 });
 
+/**
+ * #556 — a routed host whose app is not answering used to get OpenResty's stock 502. That
+ * matters beyond looks: Openship Cloud's shared edge forwards to the box and relays the
+ * box's response, so the stock page is what a visitor to the operator's OWN domain reads,
+ * branded for a third party. The page only belongs in vhosts where something can 502.
+ */
+describe("NginxProvider upstream-down page", () => {
+  const handlerCount = (c: string) => (c.match(/location @osh_upstream_down \{/g) ?? []).length;
+
+  test("upgrades an existing generation-2 route without changing its upstream", async () => {
+    const { nginx, files, conf } = setup();
+    await nginx.registerRoute({ domain: "legacy.example.com", tls: false, targetUrl: "http://127.0.0.1:3009" });
+    files.set(`${SITES}/legacy-example-com.conf`, `# openship-vhost-gen: 2
+server {
+    listen 80;
+    server_name legacy.example.com;
+    location / { proxy_pass http://127.0.0.1:3009; }
+}`);
+    const result = await nginx.reapplyStoredRoutes();
+    expect(result.repaired).toEqual(["legacy.example.com"]);
+    expect(result.failed).toEqual([]);
+    expect(readVhostGeneration(conf("legacy-example-com")!)).toBeGreaterThan(2);
+    expect(conf("legacy-example-com")).toContain("openship-edge-upstream-down");
+    expect(conf("legacy-example-com")).toContain("proxy_pass http://127.0.0.1:3009");
+  });
+
+  test("a proxy vhost carries it in BOTH serving blocks", async () => {
+    // A named location is server-scoped, so a block missing it would answer the
+    // `error_page` with a 500 instead of the page.
+    const { nginx, conf } = setup({ certDomains: ["app.example.com"] });
+    await nginx.registerRoute(PROXY);
+    const c = conf("app-example-com")!;
+    expect(handlerCount(c)).toBe(2);
+    // And the body actually ships, rather than an empty handler that yields a blank 502.
+    expect(c).toContain("openship-edge-upstream-down");
+    expect(c).toContain("Application unavailable");
+  });
+
+  test("the error_page sits at SERVER scope, not inside location /", async () => {
+    // Server scope is what makes it cover the extra locations a compiled vercel.json adds.
+    // Indentation is the readable proxy for scope here: 4 spaces is the server block.
+    const { nginx, conf } = setup();
+    await nginx.registerRoute(PROXY);
+    expect(conf("app-example-com")!).toMatch(/^ {4}error_page 502 504 @osh_upstream_down;$/m);
+  });
+
+  test("intercepts 502 and 504 only — never 503", async () => {
+    // `blockStatus` and `rateLimit.status` are operator-overridable and `limit_req_status`
+    // is 429; a 503 arm would brand a deliberate block as an outage.
+    const { nginx, conf } = setup();
+    await nginx.registerRoute(PROXY);
+    const line = conf("app-example-com")!.match(/^ {4}error_page .*$/m)![0];
+    expect(line).toContain("502");
+    expect(line).toContain("504");
+    expect(line).not.toContain("503");
+  });
+
+  test("passes the intercepted code through — no `=` before the named location", async () => {
+    // Verified against openresty 1.27.1.1: `= @loc` makes the named location's own return
+    // code replace the original, collapsing a real 504 into a 502.
+    const { nginx, conf } = setup();
+    await nginx.registerRoute(PROXY);
+    expect(conf("app-example-com")!).not.toContain("= @osh_upstream_down");
+  });
+
+  test("a host redirect carries none — it has no upstream to be down", async () => {
+    const { nginx, conf } = setup({ certDomains: ["www.example.com"] });
+    await nginx.registerRoute({
+      ...OURS,
+      domain: "www.example.com",
+      redirectHost: { target: "example.com", statusCode: 301 },
+    });
+    expect(handlerCount(conf("www-example-com")!)).toBe(0);
+  });
+
+  test("a static vhost carries none — it serves from disk", async () => {
+    const { nginx, conf } = setup();
+    await nginx.registerRoute({
+      domain: "site.example.com",
+      tls: false,
+      staticRoot: "/opt/openship/static/site/dist",
+    });
+    expect(handlerCount(conf("site-example-com")!)).toBe(0);
+  });
+
+  test("a static vhost WITH vercel.json proxy locations does carry it", async () => {
+    // The case a `!staticRoot` gate would have missed: the disk root cannot 502, but the
+    // `/api/` location proxying to a real upstream can.
+    const { nginx, conf } = setup();
+    await nginx.registerRoute({
+      domain: "hybrid.example.com",
+      tls: false,
+      staticRoot: "/opt/openship/static/hybrid/dist",
+      proxyLocations: [{ pathPrefix: "/api/", targetUrl: "http://10.0.0.5:3000" }],
+    });
+    expect(handlerCount(conf("hybrid-example-com")!)).toBe(1);
+  });
+});
+
 describe("NginxProvider config generation", () => {
   test("proxy route with no cert yet → HTTP-only block", async () => {
     const { nginx, conf, files } = setup();
@@ -961,7 +1071,7 @@ describe("NginxProvider config generation", () => {
     // which `renew` holds no account for after the operator changed CAs.
     files.set(
       "/etc/letsencrypt/renewal/app.example.com.conf",
-      "[renewalparams]\nserver = https://acme-v02.api.letsencrypt.org/directory\n",
+      makeTestRenewalConf("/etc/letsencrypt/live", "app.example.com"),
     );
     await nginx.renewCert("app.example.com").catch(() => undefined);
     const certonly = calls.find((c) => c.includes("certonly"));
@@ -978,7 +1088,11 @@ describe("NginxProvider config generation", () => {
     });
     files.set(
       "/etc/letsencrypt/renewal/app.example.com.conf",
-      "[renewalparams]\nserver = https://acme.example.test/directory\n",
+      makeTestRenewalConf(
+        "/etc/letsencrypt/live",
+        "app.example.com",
+        "https://acme.example.test/directory",
+      ),
     );
     await nginx.renewCert("app.example.com").catch(() => undefined);
     const renew = calls.find((c) => c.startsWith("certbot ") && c.includes("'renew'"));
@@ -998,7 +1112,7 @@ describe("NginxProvider config generation", () => {
     // so the PLAIN renew path runs — the one with no redacting catch of its own.
     files.set(
       "/etc/letsencrypt/renewal/app.example.com.conf",
-      "[renewalparams]\nserver = https://acme-v02.api.letsencrypt.org/directory\n",
+      makeTestRenewalConf("/etc/letsencrypt/live", "app.example.com"),
     );
     let error: Error | undefined;
     try {
@@ -1742,6 +1856,162 @@ describe("issuing a certificate keeps the tunables", () => {
   });
 });
 
+describe("provisionCert legacy route recovery", () => {
+  const domain = "app.example.com";
+  const slug = "app-example-com";
+  const configPath = SITES + "/" + slug + ".conf";
+  const statePath = SITES + "/" + slug + ".route.json";
+  const route: RouteConfig = { domain, tls: false, targetUrl: "http://127.0.0.1:7745" };
+
+  function issuing() {
+    const opts: FakeOpts = {};
+    const context = setup(opts);
+    const issue = () => {
+      const cert = makeTestCert([domain]);
+      context.files.set("/etc/letsencrypt/live/" + domain + "/fullchain.pem", cert.certPem);
+      context.files.set("/etc/letsencrypt/live/" + domain + "/privkey.pem", cert.keyPem);
+    };
+    opts.onCertbot = issue;
+    return { ...context, opts, issue };
+  }
+
+  async function legacy(initial: RouteConfig = route) {
+    const context = issuing();
+    await context.nginx.registerRoute(initial);
+    context.files.delete(statePath);
+    return context;
+  }
+
+  test.each(["missing", "invalid JSON"])(
+    "issuance preserves the backend when the sidecar is %s",
+    async (state) => {
+      const { nginx, files, conf } = await legacy();
+      if (state === "invalid JSON") files.set(statePath, "{");
+      expect(conf(slug)).toContain("proxy_pass http://127.0.0.1:49180;");
+      expect(conf(slug)).not.toContain("listen 443 ssl;");
+
+      await expect(nginx.provisionCert(domain)).resolves.toMatchObject({ verified: true });
+
+      const tls = conf(slug)!.split("listen 443 ssl;")[1];
+      expect(tls).toContain("proxy_pass http://127.0.0.1:7745;");
+      expect(tls).not.toContain("proxy_pass http://127.0.0.1:49180;");
+      expect(JSON.parse(files.get(statePath)!)).toMatchObject({ ...route, tls: true });
+    },
+  );
+
+  test("renewal recovers the backend beyond the nested HTTPS redirect", async () => {
+    const { nginx, files, conf, issue } = issuing();
+    issue();
+    await nginx.registerRoute({ ...route, tls: true });
+    files.delete(statePath);
+    expect(conf(slug)).toContain("if ($openship_redirect_https)");
+
+    await expect(nginx.provisionCert(domain, { force: true })).resolves.toMatchObject({
+      verified: true,
+    });
+
+    expect(JSON.parse(files.get(statePath)!)).toMatchObject({ ...route, tls: true });
+    expect(conf(slug)!.split("listen 443 ssl;")[1]).toContain("proxy_pass http://127.0.0.1:7745;");
+  });
+
+  test("issuance recovers the adopted site's root rather than the challenge directory", async () => {
+    const initial: RouteConfig = {
+      domain,
+      tls: false,
+      staticRoot: "/srv/legacy/public",
+      staticRootAdopted: true,
+    };
+    const { nginx, files, conf } = await legacy(initial);
+
+    await expect(nginx.provisionCert(domain)).resolves.toMatchObject({ verified: true });
+
+    expect(JSON.parse(files.get(statePath)!)).toMatchObject({ ...initial, tls: true });
+    expect(conf(slug)!.split("listen 443 ssl;")[1]).toContain("root /srv/legacy/public;");
+  });
+
+  test.each([
+    "http://app49180.internal:8080",
+    "http://127.0.0.1:7745/releases/49180",
+    "http://192.0.2.7:49180",
+  ])(
+    "does not mistake a legitimate upstream for the local challenge listener: %s",
+    async (targetUrl) => {
+      const { nginx, files, conf } = await legacy({ domain, tls: false, targetUrl });
+
+      await expect(nginx.provisionCert(domain)).resolves.toMatchObject({ verified: true });
+
+      expect(JSON.parse(files.get(statePath)!)).toMatchObject({ targetUrl, tls: true });
+      expect(conf(slug)!.split("listen 443 ssl;")[1]).toContain("proxy_pass " + targetUrl + ";");
+    },
+  );
+
+  test.each(["http://127.0.0.1:49180", "http://[::1]:49180"])(
+    "leaves an already corrupted upstream untouched and reports recovery is needed: %s",
+    async (targetUrl) => {
+      const { nginx, files, conf } = await legacy({ domain, tls: false, targetUrl });
+      const before = conf(slug);
+
+      await expect(nginx.provisionCert(domain)).rejects.toThrow(/recover.*route/i);
+
+      expect(conf(slug)).toBe(before);
+      expect(files.has(statePath)).toBe(false);
+    },
+  );
+
+  test("does not promote a challenge or sibling location when the primary location is absent", async () => {
+    const { nginx, files, conf } = await legacy();
+    files.set(configPath, conf(slug)!.replace("location / {", "location /api/ {"));
+    const before = conf(slug);
+
+    await expect(nginx.provisionCert(domain)).rejects.toThrow(/recover.*route/i);
+
+    expect(conf(slug)).toBe(before);
+    expect(files.has(statePath)).toBe(false);
+  });
+
+  test("certificate-only issuance still works when no vhost exists", async () => {
+    const { nginx, files, conf } = issuing();
+
+    await expect(nginx.provisionCert(domain)).resolves.toMatchObject({ verified: true });
+
+    expect(conf(slug)).toBeUndefined();
+    expect(files.has(statePath)).toBe(false);
+  });
+
+  test("an intact sidecar retains all locations while issuance enables TLS", async () => {
+    const { nginx, files, conf } = issuing();
+    const initial: RouteConfig = {
+      ...route,
+      proxyLocations: [{ pathPrefix: "/api/", targetUrl: "http://127.0.0.1:4010" }],
+    };
+    await nginx.registerRoute(initial);
+
+    await expect(nginx.provisionCert(domain)).resolves.toMatchObject({ verified: true });
+
+    expect(JSON.parse(files.get(statePath)!)).toEqual({ ...initial, tls: true });
+    const tls = conf(slug)!.split("listen 443 ssl;")[1];
+    expect(tls).toContain("proxy_pass http://127.0.0.1:7745;");
+    expect(tls).toContain("proxy_pass http://127.0.0.1:4010;");
+  });
+
+  test.each([true, false])(
+    "a failed reload is reported and restores the route (sidecar: %s)",
+    async (sidecar) => {
+      const { nginx, files, conf, opts } = issuing();
+      await nginx.registerRoute(route);
+      if (!sidecar) files.delete(statePath);
+      const before = conf(slug);
+      const state = files.get(statePath);
+      opts.failReload = true;
+
+      await expect(nginx.provisionCert(domain)).rejects.toThrow();
+
+      expect(conf(slug)).toBe(before);
+      expect(files.get(statePath)).toBe(state);
+    },
+  );
+});
+
 /**
  * An installed private key must not be world-readable at rest.
  *
@@ -1777,6 +2047,46 @@ describe("installCert leaves the private key unreadable to other users", () => {
     expect(files.get("/etc/letsencrypt/live/app.example.com/fullchain.pem")).toContain(
       "CERTIFICATE",
     );
+  });
+});
+
+describe("manual DNS certificate activation", () => {
+  const wildcard: RouteConfig = {
+    domain: "*.example.com", tls: false, targetUrl: "http://127.0.0.1:3009",
+    proxyLocations: [{ pathPrefix: "/api/", targetUrl: "http://127.0.0.1:4010" }],
+  };
+
+  test("enables wildcard TLS without dropping composite service routes", async () => {
+    const { nginx, files } = setup();
+    await nginx.registerRoute(wildcard);
+    const statePath = [...files.keys()].find((path) => path.endsWith(".route.json"))!;
+    const result = await nginx.installCert(wildcard.domain, makeTestCert([wildcard.domain]));
+    expect(result.verified).toBe(true);
+    expect(JSON.parse(files.get(statePath)!)).toEqual({ ...wildcard, tls: true });
+    const config = files.get(statePath.replace(/\.route\.json$/, ".conf"))!;
+    expect(config).toContain("server_name *.example.com;");
+    expect(config).toContain("listen 443 ssl;");
+    expect(config).toContain("proxy_pass http://127.0.0.1:3009;");
+    expect(config).toContain("proxy_pass http://127.0.0.1:4010;");
+  });
+
+  test("reports a failed reload and retains the previous route instead of claiming HTTPS is ready", async () => {
+    const opts: FakeOpts = {};
+    const { nginx, files } = setup(opts);
+    await nginx.registerRoute(wildcard);
+    const paths = [...files.keys()].filter((path) => path.endsWith(".conf") || path.endsWith(".route.json"));
+    const previous = paths.map((path) => [path, files.get(path)]);
+    opts.failReload = true;
+    await expect(nginx.installCert(wildcard.domain, makeTestCert([wildcard.domain]))).rejects.toThrow();
+    expect(paths.map((path) => [path, files.get(path)])).toEqual(previous);
+
+    // The certificate did get written. A retry must activate it instead of
+    // accepting readable PEM files as proof the previous reload succeeded.
+    opts.failReload = false;
+    await expect(nginx.provisionCert(wildcard.domain)).resolves.toMatchObject({ verified: true });
+    const config = files.get(paths.find((path) => path.endsWith(".conf"))!)!;
+    expect(config).toContain("listen 443 ssl;");
+    expect(config).toContain("proxy_pass http://127.0.0.1:4010;");
   });
 });
 
@@ -1993,6 +2303,10 @@ describe("re-registering a route leaves no stale rules", () => {
     files.delete(`${SITES}/app-example-com.route.json`);
     // certbot "succeeds" and the cert appears on disk.
     opts.certDomains!.push("app.example.com");
+    files.set(
+      "/etc/letsencrypt/renewal/app.example.com.conf",
+      makeTestRenewalConf("/etc/letsencrypt/live", "app.example.com"),
+    );
     // ensureIssued still fails in the fake (no real cert to read), which is AFTER
     // the re-register we care about.
     await nginx.provisionCert("app.example.com", { force: true }).catch(() => undefined);

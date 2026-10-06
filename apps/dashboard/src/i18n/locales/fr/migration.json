@@ -1,5 +1,10 @@
 {
   "wizard": {
+    "edgeReview": {
+      "detected": "{proxy} détecté sur le serveur source",
+      "handoff": "Vérifiez les domaines associés ci-dessous. La migration configure le routage du serveur cible et demande confirmation avant de remplacer un proxy existant.",
+      "warnings": "Consulter les {count} remarques de détection"
+    },
     "title": "Migrer un déploiement Docker",
     "intro": "Inspectez Docker sur ce serveur et adoptez ses conteneurs comme projet Openship. L'inspection est en lecture seule — rien ne change sur le serveur tant que vous ne déployez pas.",
     "selectServer": "Sélectionner un serveur",

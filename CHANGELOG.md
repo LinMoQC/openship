@@ -3,6 +3,27 @@
 All notable changes to Openship. Versions follow [semver](https://semver.org);
 the in-app updater surfaces critical advisories from `release-advisories.json`.
 
+## 0.8.0
+
+### Domains
+
+- **Wildcard HTTPS with automatic DNS or manual TXT verification** — project and
+  service domains such as `*.example.com` now open inline certificate setup.
+  Connected DNS providers automate verification; manual TXT orders retain their
+  progress across reconnects and controller restarts. API, SDK and MCP share the
+  same start, status, check and cancel operations. Existing certificates survive
+  failed attempts, and HTTPS is reported ready only after its route is active.
+  Manual certificates include renewal guidance in all nine dashboard languages
+  (#954).
+
+### Release checks
+
+- **Continue an unpublished release with updated code** — reuse successful whole
+  checks only when their source and workflow inputs match, and rerun failed or
+  affected checks. Artifact reuse verifies the original run and immutable artifact
+  identity; concurrent tag changes and earlier publishing attempts prevent unsafe
+  continuation.
+
 ## 0.7.2
 
 Soft maintenance patch for Docker build reliability. No breaking API changes or

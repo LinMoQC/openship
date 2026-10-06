@@ -30,7 +30,7 @@ import {
   encrypt,
   encryptBytesWithKey,
   encryptWithKey,
-} from "../../../lib/encryption";
+} from "@repo/platform/engine/lib/encryption";
 import {
   assertCompleteChunkSet,
   beginDirectSession,
@@ -52,6 +52,7 @@ import {
   type TransferSessionRow,
 } from "./chunk-store";
 import { prepareInstanceExport } from "./export.service";
+import { InvalidExportSelectionError, resolveExportSelection } from "./selection";
 import { importPreparedInstance } from "./import.service";
 import { jsonByteChunks } from "./json-chunks";
 import { readStagedJson } from "./staged-payload";
@@ -635,6 +636,11 @@ export async function sendDirectTransfer(opts: {
   selection?: ExportSelection;
   fetchImpl?: typeof fetch;
 }): Promise<DirectTransferResult> {
+  if (resolveExportSelection(opts.selection).selection.scope === "projects") {
+    throw new InvalidExportSelectionError(
+      "For selected projects, download an export file and import it on the destination to review project conflicts and server mappings. Direct transfer supports whole-instance exports.",
+    );
+  }
   const connection = decodeDirectTransferCode(opts.code);
   // The process id is a fast legacy check, but is not stable across restarts or
   // multiple API workers. The durable capability record is authoritative: if

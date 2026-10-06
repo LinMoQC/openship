@@ -32,19 +32,19 @@ vi.mock("@repo/db", () => ({
 
 // Stubbed for the same reason the sibling install test stubs them: importing the real
 // service layer drags in lib/auth, which needs a full `schema` export off @repo/db.
-vi.mock("../../../src/modules/projects/project-crud.service", () => ({
+vi.mock("@repo/platform/engine/modules/projects/project-crud.service", () => ({
   createProject: vi.fn(),
 }));
-vi.mock("../../../src/modules/services/service.service", () => ({
+vi.mock("@repo/platform/engine/modules/services/service.service", () => ({
   createService: vi.fn(),
   updateService: vi.fn(),
   setServiceEnvVars: vi.fn(),
 }));
-vi.mock("../../../src/lib/cloud/require-cloud", () => ({ requireCloud: vi.fn() }));
+vi.mock("@repo/platform/engine/lib/cloud/require-cloud", () => ({ requireCloud: vi.fn() }));
 
 import { getAppTemplate } from "@repo/core";
-import { ensureGeneratedAppSecrets } from "../../../src/modules/apps/app-install.service";
-import { decrypt, encrypt } from "../../../src/lib/encryption";
+import { ensureGeneratedAppSecrets } from "@repo/platform/engine/modules/apps/app-install.service";
+import { decrypt, encrypt } from "@repo/platform/engine/lib/encryption";
 
 const WEBMAIL = getAppTemplate("webmail")!;
 

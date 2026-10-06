@@ -1,13 +1,13 @@
 "use client";
 
-import React, { useCallback, useRef } from "react";
-import { GitBranch, Rocket, Github, Loader2, Globe, Container, Server, Layers, Check, AlertCircle, Key, Plus, Copy, ExternalLink } from "lucide-react";
+import { Icon as UiIcon } from "@repo/ui/icons";
+
+import React, { useCallback, useState } from "react";
 import { useI18n, interpolate } from "@/components/i18n-provider";
-import { CustomSelect } from "@/components/ui/CustomSelect";
+import { RepositoryBranchSelect } from "@/components/github/RepositoryBranchSelect";
 import DropdownMenu from "@/components/ui/DropdownMenu";
 import DomainSettings from "./DomainSettings";
 import BuildSummary from "./BuildSummary";
-import { CloudWaitlistModal } from "./CloudWaitlistModal";
 import { LocalDeployComingSoonModal } from "@/components/LocalDeployComingSoonModal";
 import { useLocalDeployGate } from "@/hooks/useLocalDeployGate";
 import DnsRecordsModal from "@/components/domains/DnsRecordsModal";
@@ -64,7 +64,7 @@ const ComposeChecklist: React.FC = () => {
       label: t.deploy.checklist.servicesDetected,
       value: interpolate(t.deploy.checklist.servicesCount, { count: String(services.length) }),
       ok: services.length > 0,
-      icon: Layers,
+      icon: "layers" as const,
     },
     {
       label: t.deploy.checklist.publicDomains,
@@ -73,14 +73,14 @@ const ComposeChecklist: React.FC = () => {
         : interpolate(t.deploy.checklist.canBeExposed, { count: String(exposableServices.length) }),
       ok: exposedServices.length > 0,
       warn: exposedServices.length === 0 && exposableServices.length > 0,
-      icon: Globe,
+      icon: "globe" as const,
     },
     ...(buildServices.length > 0
       ? [{
           label: t.deploy.checklist.buildServices,
           value: interpolate(t.deploy.checklist.toBuild, { count: String(buildServices.length) }),
           ok: true,
-          icon: Container,
+          icon: "layers" as const,
         }]
       : []),
     {
@@ -89,7 +89,7 @@ const ComposeChecklist: React.FC = () => {
         ? interpolate(t.deploy.checklist.varsAcross, { vars: String(totalEnvVars), services: String(envConfigured) })
         : t.deploy.checklist.noEnvVars,
       ok: totalEnvVars > 0,
-      icon: Key,
+      icon: "key" as const,
     },
   ];
 
@@ -111,11 +111,11 @@ const ComposeChecklist: React.FC = () => {
                     : "bg-muted/50 text-muted-foreground/50"
               }`}>
                 {check.ok ? (
-                  <Check className="size-3" />
+                  <UiIcon name="check" className="size-3" />
                 ) : (check as any).warn ? (
-                  <AlertCircle className="size-3" />
+                  <UiIcon name="alert-circle" className="size-3" />
                 ) : (
-                  <Icon className="size-3" />
+                  <UiIcon name={Icon} className="size-3" />
                 )}
               </div>
               <div className="flex-1 min-w-0">
@@ -139,7 +139,7 @@ const ComposeChecklist: React.FC = () => {
           </p>
           {routedServices.map(({ svc, host }) => (
             <div key={svc.name} className="flex items-center gap-2">
-              <Globe className="size-3 text-primary" />
+              <UiIcon name="globe" className="size-3 text-primary" />
               <span className="text-sm text-primary font-medium truncate">{host}</span>
               <span className="text-xs text-muted-foreground ms-auto">{svc.name}</span>
             </div>
@@ -153,7 +153,8 @@ const ComposeChecklist: React.FC = () => {
 // ─── Sidebar ─────────────────────────────────────────────────────────────────
 
 const Sidebar: React.FC = () => {
-  const { config, state, updateConfig, startDeployment } = useDeployment();
+  const { config, state, updateConfig, startDeployment, rescanWithBranch, isRescanning } =
+    useDeployment();
   const { t } = useI18n();
   const { requireCloud } = useCloud();
   const { baseDomain, selfHosted, deployMode } = usePlatform();
@@ -163,6 +164,15 @@ const Sidebar: React.FC = () => {
   const { showToast } = useToast();
   const router = useRouter();
   const isServices = usesServiceDeployment(config);
+  const [branchError, setBranchError] = React.useState<string | null>(null);
+  const handleBranchChange = useCallback(
+    async (branch: string) => {
+      setBranchError(null);
+      const result = await rescanWithBranch(branch);
+      if (!result.success && result.error) setBranchError(result.error);
+    },
+    [rescanWithBranch],
+  );
 
   // Copy a ready-to-run `git clone` command with a short-lived GitHub App
   // installation token. Cloud / GitHub-App mode only — surfaces a clear
@@ -190,32 +200,6 @@ const Sidebar: React.FC = () => {
   // build vs PAT vs existing GitHub credential). Opshcloud has its own
   // connect-account flow, local builds don't need a remote credential.
   const cloneGate = useCloneStrategyGate();
-
-  // Lazy branch list. In config-edit mode the wizard hydrates from saved data
-  // with only the current branch seeded (no repo round-trip on load). The full
-  // list is fetched once, on first open of the branch dropdown — never for
-  // local-sourced projects (no remote repo to list).
-  const branchesFetchedRef = useRef(false);
-  const loadBranches = useCallback(async () => {
-    if (branchesFetchedRef.current) return;
-    if (!config.projectId || !config.owner || config.owner === "local") return;
-    // Only when the list is "thin" (config-edit seeds just the current branch);
-    // the first-deploy path already preloads the full list via prepare.
-    if (config.branches.length > 1) return;
-    branchesFetchedRef.current = true;
-    try {
-      const res = await projectsApi.getBranches(config.projectId);
-      const names: string[] = (res?.data ?? [])
-        .map((b: { name?: string }) => b?.name)
-        .filter((n: unknown): n is string => typeof n === "string" && n.length > 0);
-      if (names.length) {
-        const merged = Array.from(new Set([config.branch, ...names].filter(Boolean)));
-        updateConfig({ branches: merged });
-      }
-    } catch {
-      branchesFetchedRef.current = false; // allow a retry on next open
-    }
-  }, [config.projectId, config.owner, config.branch, config.branches.length, updateConfig]);
 
   const handleOpenEnvironmentCreator = useCallback(() => {
     if (!config.projectId) return;
@@ -273,20 +257,6 @@ const Sidebar: React.FC = () => {
   }, [doDeploy, selfHosted, config, showModal, hideModal]);
 
   const handleDeploy = useCallback(async () => {
-    // TODO: removed — temporary SaaS gate. The managed cloud isn't open yet, so
-    // pressing Deploy on the hosted control plane shows the "Cloud is almost
-    // here" waitlist instead of running a deploy. Self-hosted / desktop deploys
-    // are unaffected. Delete this block (+ CloudWaitlistModal + the
-    // /api/cloud-waitlist route) when Cloud launches.
-    if (!selfHosted) {
-      let modalId = "";
-      modalId = showModal({
-        customContent: <CloudWaitlistModal onClose={() => hideModal(modalId)} />,
-        maxWidth: "460px",
-      });
-      return;
-    }
-
     // TODO: temporary desktop gate (useLocalDeployGate). Desktop mode controls
     // remote servers; the workload can't run on this machine yet. Scoped to NEW
     // projects on purpose — a project that already lives locally stays fully
@@ -408,7 +378,7 @@ const Sidebar: React.FC = () => {
     await continueDeploy(buildStrategyOverride ? { buildStrategy: buildStrategyOverride } : undefined);
   }, [baseDomain, canConnectCloud, cloneGate.preference, config.buildStrategy, config.deployTarget, config.owner, config.projectId, config.serverId, config.publicEndpoints, config.services, continueDeploy, hideModal, isServices, localDeployGate, requireCloud, selfHosted, showModal, showToast, updateConfig, t]);
 
-  // Edit mode (opened from the project Runtime page with ?mode=config): the
+  // Edit mode (opened from project Settings with ?mode=config): the
   // finish button SAVES the config to the project and returns — no deploy, no
   // deploy gates (cloud/clone/domain checks are deploy concerns). Deploying is
   // the separate "Redeploy" action on the project page.
@@ -420,11 +390,10 @@ const Sidebar: React.FC = () => {
     try {
       const projectId = await startDeployment({ saveConfigOnly: true });
       if (projectId) {
-        // Bust the cached project info so the Runtime tab shows the just-saved
-        // config (it's served from infoCache and would otherwise be stale), then
-        // return to the Runtime tab the user edited from — not the default tab.
+        // Refresh the cached project info before returning to Settings so it
+        // shows the saved configuration.
         invalidateProjectCaches(projectId);
-        router.push(`/projects/${projectId}/runtime`);
+        router.push(`/projects/${projectId}/advanced`);
       }
     } finally {
       setIsSaving(false);
@@ -442,7 +411,7 @@ const Sidebar: React.FC = () => {
         </div>
         <div className="p-4 pt-3">
           <div className="flex items-center gap-3">
-            <Github className="size-4 text-muted-foreground shrink-0" />
+            <UiIcon name="github" className="size-4 text-muted-foreground shrink-0" />
             <div className="flex-1 min-w-0">
               {config.owner && config.owner !== "local" && config.repo ? (
                 <a
@@ -453,7 +422,7 @@ const Sidebar: React.FC = () => {
                   className="group inline-flex max-w-full items-center gap-1.5 text-sm font-medium text-foreground transition-colors hover:text-primary"
                 >
                   <span className="truncate">{config.owner}/{config.repo}</span>
-                  <ExternalLink className="size-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-hover:text-primary" />
+                  <UiIcon name="external-link" className="size-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-hover:text-primary" />
                 </a>
               ) : (
                 <p className="text-sm font-medium text-foreground truncate">
@@ -469,7 +438,7 @@ const Sidebar: React.FC = () => {
                   {
                     id: "clone-token",
                     label: t.deploy.sidebar.copyCloneToken,
-                    icon: <Copy className="size-4" />,
+                    icon: <UiIcon name="copy" className="size-4" />,
                     onClick: handleCopyCloneToken,
                   },
                 ]}
@@ -478,30 +447,43 @@ const Sidebar: React.FC = () => {
           </div>
           {config.branches.length > 0 && (
             <div className="mt-3">
-              <CustomSelect
+              <RepositoryBranchSelect
+                owner={config.owner}
+                repo={config.repo}
+                projectId={config.projectId}
                 value={config.branch}
-                onChange={(val) => updateConfig({ branch: val })}
-                onOpen={loadBranches}
-                options={config.branches.map(branch => ({
-                  value: branch,
-                  label: branch,
-                  icon: <GitBranch className="w-3.5 h-3.5" />
-                }))}
+                onChange={(val) => void handleBranchChange(val)}
+                disabled={isRescanning || isSaving || state.isDeploying}
+                initialBranches={config.branches}
+                initialPage={config.branchPage}
+                initialHasMore={config.branchesHasMore}
                 footerAction={config.projectId
                   ? {
                       label: t.deploy.sidebar.newEnvironment,
-                      icon: <Plus className="w-3.5 h-3.5 text-muted-foreground" />,
+                      icon: <UiIcon name="plus" className="w-3.5 h-3.5 text-muted-foreground" />,
                       onClick: handleOpenEnvironmentCreator,
                     }
                   : undefined}
-                placeholder={t.deploy.sidebar.selectBranch}
-                className="w-full"
               />
+              {isRescanning && (
+                <p
+                  role="status"
+                  className="flex items-center gap-2 mt-2 text-sm text-muted-foreground"
+                >
+                  <UiIcon name="spinner" className="size-3.5 animate-spin" aria-hidden="true" />
+                  {t.importProject.buildSettings.composePath.scanning}
+                </p>
+              )}
+              {branchError && (
+                <p role="alert" className="mt-2 text-sm text-danger break-words">
+                  {branchError}
+                </p>
+              )}
             </div>
           )}
           {config.branches.length === 0 && config.branch && (
             <div className="flex items-center gap-1 mt-2 text-xs text-muted-foreground">
-              <GitBranch className="size-3" />
+              <UiIcon name="git-branch" className="size-3" />
               {config.branch}
             </div>
           )}
@@ -546,17 +528,17 @@ const Sidebar: React.FC = () => {
       {isConfigMode ? (
         <button
           onClick={handleSave}
-          disabled={isSaving}
+          disabled={isSaving || isRescanning}
           className="w-full inline-flex items-center justify-center gap-2 px-5 py-3 bg-primary text-primary-foreground text-sm font-medium rounded-xl hover:bg-primary/90 transition-all hover:shadow-lg hover:shadow-primary/25 hover:-translate-y-0.5 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {isSaving ? (
             <>
-              <Loader2 className="size-4 animate-spin" />
+              <UiIcon name="spinner" className="size-4 animate-spin" />
               {t.deploy.sidebar.saving}
             </>
           ) : (
             <>
-              <Check className="size-4" />
+              <UiIcon name="check" className="size-4" />
               {t.deploy.sidebar.saveChanges}
             </>
           )}
@@ -564,17 +546,17 @@ const Sidebar: React.FC = () => {
       ) : (
         <button
           onClick={handleDeploy}
-          disabled={state.isDeploying}
+          disabled={state.isDeploying || isRescanning}
           className="w-full inline-flex items-center justify-center gap-2 px-5 py-3 bg-primary text-primary-foreground text-sm font-medium rounded-xl hover:bg-primary/90 transition-all hover:shadow-lg hover:shadow-primary/25 hover:-translate-y-0.5 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {state.isDeploying ? (
             <>
-              <Loader2 className="size-4 animate-spin" />
+              <UiIcon name="spinner" className="size-4 animate-spin" />
               {t.deploy.sidebar.deploying}
             </>
           ) : (
             <>
-              <Rocket className="size-4" />
+              <UiIcon name="rocket" className="size-4" />
               {t.deploy.sidebar.deploy}
             </>
           )}
@@ -595,8 +577,21 @@ function hasConnectedDomain(service: {
   customDomain?: string;
   domain?: string;
   name?: string;
+  publicEndpoints?: Array<{
+    domainType?: "free" | "custom";
+    customDomain?: string;
+    domain?: string;
+  }>;
 }) {
   if (!service.exposed) return false;
+  if (service.publicEndpoints && service.publicEndpoints.length > 0) {
+    const hasEndpointDomain = service.publicEndpoints.some((ep) =>
+      ep.domainType === "custom"
+        ? Boolean(ep.customDomain?.trim())
+        : Boolean(ep.domain?.trim()),
+    );
+    if (hasEndpointDomain) return true;
+  }
   if (service.domainType === "custom") return Boolean(service.customDomain?.trim());
   return Boolean(service.domain?.trim() || service.name?.trim());
 }

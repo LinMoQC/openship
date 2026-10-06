@@ -12,6 +12,7 @@ concurrency:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   gate:
@@ -61,14 +62,8 @@ jobs:
           set -euo pipefail
           short_sha="${GITHUB_SHA:0:12}"
           tag="magic-runtime-${short_sha}"
-          version="0.7.2-magic.${short_sha}"
-          node -e '
-            const fs = require("node:fs");
-            const path = "apps/cli/package.json";
-            const pkg = JSON.parse(fs.readFileSync(path, "utf8"));
-            pkg.version = process.argv[1];
-            fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + "\n");
-          ' "$version"
+          version="0.8.0-magic.${short_sha}"
+          node scripts/magic-runtime-identity.mjs
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
 
@@ -95,6 +90,7 @@ jobs:
           rm -rf "$staging"
           mkdir -p "$staging"
           cp -a apps/dashboard/.next/standalone/. "$staging"/
+          cp magic-runtime.json "$staging"/
           mkdir -p "$staging/apps/dashboard/.next"
           cp -a apps/dashboard/.next/static "$staging/apps/dashboard/.next/static"
           if [ -d apps/dashboard/public ]; then
@@ -123,6 +119,13 @@ jobs:
           tar -xzf "$asset" -C /tmp/openship-runtime-check
           actual="$(node /tmp/openship-runtime-check/dist/index.js --version)"
           test "$actual" = "${{ steps.runtime.outputs.version }}"
+          node scripts/verify-magic-runtime.mjs /tmp/openship-runtime-check
+          cmp /tmp/openship-runtime-check/magic-runtime.json /tmp/openship-dashboard-check/magic-runtime.json
+
+      - name: Verify the shipped offline migration tool in real Docker isolation
+        run: |
+          docker pull node@sha256:363e1587494626837fa7f9a23bdb453d13b0ff3c67c705c2805cfc69c2d2fad7
+          bun scripts/verify-copied-platform-drill.ts /tmp/openship-runtime-check
 
       - name: Publish immutable prerelease assets
         env:
@@ -134,17 +137,19 @@ jobs:
           asset="apps/cli/.cli-payload/openship-cli-${RUNTIME_TAG}.tar.gz"
           dashboard_asset="openship-dashboard-${RUNTIME_TAG}.tar.gz"
           if gh release view "$RUNTIME_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$RUNTIME_TAG" \
-              "$asset" "$asset.sha256" \
-              "$dashboard_asset" "$dashboard_asset.sha256" \
-              --clobber --repo "$GITHUB_REPOSITORY"
+            verification="$(mktemp -d)"
+            gh release download "$RUNTIME_TAG" --repo "$GITHUB_REPOSITORY" --dir "$verification"
+            cmp "$asset.sha256" "$verification/$(basename "$asset").sha256"
+            cmp "$dashboard_asset.sha256" "$verification/$(basename "$dashboard_asset").sha256"
+            cmp magic-runtime.json "$verification/magic-runtime.json"
+            (cd "$verification" && sha256sum --check *.sha256)
           else
             gh release create "$RUNTIME_TAG" \
               "$asset" "$asset.sha256" \
-              "$dashboard_asset" "$dashboard_asset.sha256" \
+              "$dashboard_asset" "$dashboard_asset.sha256" magic-runtime.json \
               --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
               --prerelease \
               --title "Magic OpenShip runtime ${GITHUB_SHA:0:12}" \
-              --notes "Pinned OpenShip 0.7.2 compatibility runtime for Magic Resume. Built from ${GITHUB_SHA}."
+              --notes "Pinned OpenShip 0.8.0 GitOps runtime (contract 1) for Magic Resume. Built from ${GITHUB_SHA}."
           fi

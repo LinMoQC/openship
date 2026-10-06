@@ -18,6 +18,7 @@ import type {
   DeploymentResult,
   LogEntry,
   LogCallback,
+  RuntimeLogStreamOptions,
   ContainerInfo,
   ContainerStatus,
   ResourceUsage,
@@ -40,6 +41,8 @@ import type { ContainerStabilitySample } from "./stability";
  * it actually implements - callers never hit a silent stub.
  */
 export type RuntimeCapability =
+  /** Real Docker container semantics, including a Docker daemon in a cloud workspace. */
+  | "dockerHost"
   | "build"
   /** Acquire and deploy an already-built application container image verbatim. */
   | "prebuiltImage"
@@ -130,6 +133,14 @@ export type RuntimeCapability =
    */
   | "isolatedExec"
   /**
+   * Runtime can run a one-off RELEASE COMMAND against a freshly-built artifact,
+   * between the build and the cutover — `runReleaseCommand`. Docker runs it in a
+   * throwaway container off the new image; Bare runs it in the staged release
+   * directory. A runtime without this capability must refuse a deployment that
+   * requires release commands.
+   */
+  | "releaseCommand"
+  /**
    * Runtime can report a container's RESTART HISTORY and health, not just a
    * point-in-time status — the readings the post-deploy stabilization watch
    * needs to tell "up" from "bouncing" (`sampleStability`). Docker implements
@@ -176,6 +187,13 @@ export interface ContainerLifecycleEvent {
 
 // ─── Interface ───────────────────────────────────────────────────────────────
 
+export interface ReleaseCommandOptions {
+  timeoutMs?: number;
+  signal?: AbortSignal;
+  /** Attach the candidate's service networks before its command can execute. */
+  beforeStart?: (containerId: string) => Promise<void>;
+}
+
 export interface RuntimeAdapter {
   /** Human-readable name of the runtime */
   readonly name: string;
@@ -188,6 +206,8 @@ export interface RuntimeAdapter {
 
   /** Clean up any resources held by the runtime (connections, temp files) */
   dispose?(): Promise<void>;
+  /** Cancel this deployment's API/build work without disposing the cleanup transport. */
+  setOperationSignal?(signal: AbortSignal): void;
 
   // ── Build lifecycle ──────────────────────────────────────────────────
 
@@ -219,6 +239,24 @@ export interface RuntimeAdapter {
   /** Start a container/process from a completed build */
   deploy(config: DeployConfig, onLog?: LogCallback): Promise<DeploymentResult>;
 
+  /**
+   * Run ONE release command against the freshly-built artifact named by
+   * `config.imageRef`, before anything is activated. Streams the command's
+   * output through `onLog` and REJECTS on a non-zero exit (or on the timeout)
+   * with that output in the message, which is what fails the deploy.
+   *
+   * Must not touch the running deployment: this is a throwaway execution
+   * context (a one-off container / the not-yet-promoted release directory), so
+   * a failure leaves the previous version untouched and still serving.
+   * Only present when `supports("releaseCommand")`.
+   */
+  runReleaseCommand?(
+    config: DeployConfig,
+    command: string,
+    onLog: LogCallback,
+    opts?: ReleaseCommandOptions,
+  ): Promise<void>;
+
   /** Stop a running container/process (preserves state) */
   stop(containerId: string): Promise<void>;
 
@@ -238,6 +276,8 @@ export interface RuntimeAdapter {
    * present when `supports("projectContainerSweep")`.
    */
   listProjectContainerIds?(projectId: string): Promise<string[]>;
+  /** Remove an empty owned project scope after full project teardown (not one release). */
+  cleanupProject?(projectId: string): Promise<void>;
 
   /**
    * List the containers this runtime owns for `deploymentId`, matched by the
@@ -305,7 +345,7 @@ export interface RuntimeAdapter {
   streamRuntimeLogs(
     containerId: string,
     onLog: LogCallback,
-    opts?: { tail?: number },
+    opts?: RuntimeLogStreamOptions,
   ): Promise<() => void>;
 
   /** Get current resource usage metrics */
@@ -342,6 +382,7 @@ export interface RuntimeAdapter {
     /** Containers to include BEYOND the `openship.project` label match — an adopted
      *  container keeps its original labels, so the filter cannot see it. */
     extraContainerIds?: string[],
+    options?: { prunePrefix?: string; retain?: string[]; strict?: boolean; onlyContainerIds?: string[] },
   ): Promise<void>;
 
   /**
@@ -353,7 +394,11 @@ export interface RuntimeAdapter {
   joinServiceGroupContainers?(
     slug: string,
     members: Array<{ containerId: string; aliases: string[] }>,
+    options?: { strict?: boolean },
   ): Promise<void>;
+
+  /** Disconnect exact containers from a shared-service network; remove it when empty. */
+  leaveServiceGroupContainers?(slug: string, containerIds: string[]): Promise<void>;
 
   // ── Rollback primitives ──────────────────────────────────────────────
   //
@@ -522,7 +567,7 @@ export interface MultiServiceDeployConfig {
    * the tag text: a registry image can legitimately use Openship's tag shape. */
   imageAlreadyPrepared?: boolean;
   /** Opt-in stateless candidate and activation health checks before retiring the incumbent. */
-  healthcheckPreflight?: { timeoutMs: number; signal?: AbortSignal };
+  healthcheckPreflight?: import("./docker-preflight").HealthcheckPreflight;
   /** Extended compose fields (healthcheck, …). Docker honors them; runtimes
    *  that can't (cloud) warn-and-drop. See ComposeAdvanced in @repo/core. */
   advanced?: ComposeAdvanced;
@@ -536,6 +581,10 @@ export interface MultiServiceDeployConfig {
   publicSlug?: string;
   customDomain?: string;
   expose?: boolean;
+  /** All approved Cloud hostnames for this service, including secondary ports. */
+  cloudEndpoints?: Array<{ hostname: string; port: number; custom: boolean }>;
+  /** Ports needed by project/composite edge routes, without a service hostname. */
+  cloudProxyPorts?: number[];
   /** Cloud only: the workspace id this service used in the PREVIOUS deployment.
    *  Reused so its permanent-workspace disk — the only persistence Oblien
    *  offers (no volume primitive) — survives a redeploy. A fresh workspace each
@@ -564,11 +613,12 @@ export interface MultiServiceDeployConfig {
 }
 
 export interface MultiServiceDeployResult {
-  /** In-memory stateless cutover transaction. Caller MUST settle it after ALL
-   * deployment gates, or roll it back on errors/cancellation. Never serialize. */
+  /** Settled only after all deployment gates; never serialized. */
   activation?: { commit(): Promise<void>; rollback(): Promise<void> };
   containerId: string;
   status: string;
+  /** The container is running, but one or more edge routes need a retry. */
+  routeWarnings?: string[];
   ip?: string;
   /** The FIRST binding the daemon reports — arbitrary for a multi-port container.
    *  Anything picking a proxy target for a SPECIFIC container port must read
@@ -762,6 +812,8 @@ export interface DockerContainerDetail {
   restart?: { name: string; maximumRetryCount?: number };
   /** Names of the networks the container is attached to. */
   networks: string[];
+  /** Live addresses on every attached network, for matching proxy upstreams. */
+  networkAddresses?: string[];
   mounts: DockerMount[];
   ports: DockerPortBinding[];
   /** Healthcheck as declared on the container config (durations in ns). */

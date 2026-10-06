@@ -38,7 +38,7 @@
 
 import { AppError, safeErrorMessage } from "@repo/core";
 
-import { MAIL_COMPONENTS } from "../mail-health.service";
+import { MAIL_COMPONENTS } from "@repo/platform/engine/modules/mail/mail-health.service";
 import {
   mailUnitActionCommand,
   mailUnitLogsRead,
@@ -47,7 +47,7 @@ import {
   runMailCommand,
   type MailEngineFlavor,
   type MailUnitState,
-} from "../mail-engine";
+} from "@repo/platform/engine/modules/mail/mail-engine";
 
 export class UnknownComponentError extends Error {}
 

@@ -55,6 +55,7 @@
     }
   },
   "nav": {
+    "scale": "Scale",
     "home": "Home",
     "new-project": "New Project",
     "projects": "Projects",

@@ -244,24 +244,26 @@
   },
   "backup": {
     "live": {
-      "title": "ライブバックアップ",
+      "title": "バックアップのアクティビティ",
       "description": "開始したばかりの実行のリアルタイムの進捗です。ページを更新しても保持されます。",
       "dismiss": "閉じる"
     },
     "destinations": {
       "title": "バックアップ先",
-      "description": "ユーザーごとのストレージ先。S3互換バケット、SFTPサーバー、ローカルディスクを追加できます。",
+      "description": "このプロジェクトで利用できる保存先。",
       "manage": "管理",
       "loading": "読み込み中…",
       "emptyPrefix": "まだバックアップ先がありません。",
       "emptyLink": "作成する",
       "emptySuffix": " とバックアップを開始できます。",
       "verified": "検証済み",
-      "failed": "失敗"
+      "failed": "失敗",
+      "emptyHint": "S3バケット、SFTPホスト、または既存のサーバーに接続します。",
+      "inUse": "使用中"
     },
     "services": {
-      "title": "サービスとポリシー",
-      "description": "各サービスは独自のバックアップポリシー（スケジュール＋バックアップ先）を持てます。プロジェクトレベルのデフォルトは Chunk 2 で提供されます。",
+      "title": "バックアップポリシー",
+      "description": "バックアップ対象、実行日時、保存先を選択します。",
       "refresh": "更新",
       "empty": "このプロジェクトにはまだサービスがありません。サービスを追加すると、サービスレベルのバックアップがここに表示されます。",
       "policyLabel": "ポリシー:",
@@ -273,22 +275,54 @@
       "editPolicy": "ポリシーを編集",
       "addDestinationFirst": "先にバックアップ先を追加してください",
       "createPolicyHint": "このサービスのバックアップポリシーを作成します",
-      "createPolicy": "ポリシーを作成"
+      "createPolicy": "ポリシーを作成",
+      "projectHint": "このプロジェクトの全サービスに適用するポリシー。",
+      "includedInProject": "プロジェクトのポリシーに含まれています。",
+      "retainCount": "{count}件のバックアップを保持",
+      "retainDays": "最大{days}日間"
     },
     "recent": {
+      "loadOlder": "以前のバックアップを読み込む",
       "title": "最近のバックアップ",
-      "description": "このプロジェクトの全サービスにわたる直近25件の実行です。",
+      "description": "最近の実行結果と復元オプション。",
       "loading": "読み込み中…",
       "empty": "まだバックアップがありません。",
       "protectedTitle": "保持期間による削除から保護",
       "protected": "保護済み",
       "restoreTitle": "このバックアップから復元",
       "allowPrune": "保持期間による削除を許可",
-      "protectFrom": "保持期間から保護"
+      "protectFrom": "保持期間から保護",
+      "emptyHint": "ポリシーを作成して、ここから最初のバックアップを実行してください。",
+      "backup": "バックアップ",
+      "viewDetails": "詳細を表示",
+      "restore": "復元",
+      "triggers": {
+        "manual": "手動実行",
+        "cron": "定期実行",
+        "webhook": "Webhook",
+        "pre_deploy": "デプロイ前"
+      }
     },
     "toast": {
       "runFailed": "バックアップの実行に失敗しました",
       "toggleProtectionFailed": "保護の切り替えに失敗しました"
+    },
+    "overview": {
+      "description": "バックアップをスケジュールし、プロジェクトのデータを復元します。",
+      "lastBackup": "最後に成功したバックアップ",
+      "noRecentBackup": "最近のバックアップなし",
+      "scheduledPolicies": "スケジュール済みポリシー",
+      "projectScope": "プロジェクト全体",
+      "serviceBackup": "サービスのバックアップ",
+      "paused": "一時停止中",
+      "loadFailed": "バックアップを読み込めませんでした"
+    },
+    "schedule": {
+      "daily": "毎日 {time}",
+      "weekly": "毎週 {day} {time}",
+      "monthly": "毎月{day}日 {time}",
+      "custom": "カスタムスケジュール",
+      "timezone": "サーバーのタイムゾーンを使用します。"
     }
   },
   "build": {
@@ -365,16 +399,16 @@
       "appliesOnDeploy": "次回のデプロイで適用されます。"
     },
     "env": {
-      "title": "環境変数",
-      "description": "保存時に暗号化されます。シークレットはマスクされたまま保持され、変更した値のみが書き込まれます。",
+      "title": "プロジェクト環境（ビルドと共有ランタイム）",
+      "description": "イメージのビルドと共有ランタイムの入力に使用します。実行時は Compose の値とサービス固有の値が優先されます。シークレットはマスクされます。",
       "edit": "編集"
     }
   },
   "envVars": {
     "cancel": "キャンセル",
     "saveChanges": "変更を保存",
-    "title": "環境変数",
-    "description": "本番環境。保存時に暗号化されます。シークレットは設定済みと表示されます。置き換えるには入力し、そのまま保持するには空欄にしてください。",
+    "title": "プロジェクト環境（ビルドと共有ランタイム）",
+    "description": "プロジェクトの本番環境変数です。シークレットはマスクされます。保存済みのシークレットを維持するには空欄にします。同じキーではサービスの実行時の値が優先されます。",
     "empty": "まだ環境変数がありません。",
     "keyPlaceholder": "KEY",
     "secretPlaceholder": "•••••••• （設定済み — 入力して置き換え）",
@@ -401,7 +435,8 @@
     "linkedTitle": "リンクされた統合",
     "linkedBody": "この値は {app} の接続から取得されます。そのアプリ側で管理してください — ここでの変更は保存されません。",
     "unlink": "接続を削除",
-    "close": "閉じる"
+    "close": "閉じる",
+    "applyText": "保存しました。実行時の変更は再起動で適用します。イメージのビルドで使用する値は、再ビルドして再デプロイしてください。"
   },
   "gitInfo": {
     "autoDeploy": "自動デプロイ"
@@ -429,6 +464,7 @@
       "install": "GitHub App をインストール"
     },
     "webhookBanner": {
+      "summary": "公開エンドポイントが必要です",
       "title": "自動デプロイを有効にする",
       "description": "自動デプロイには直接の webhook エンドポイントが必要です。この Openship API を公開 URL で公開するか、直接配信用の検証済み webhook ドメインを設定してください。"
     },
@@ -467,13 +503,13 @@
       "title": "ロールバック戦略",
       "rebuild": "再ビルド（git）",
       "instant": "即時（スナップショット）",
-      "descRebuild": "イメージがホストに残っていない場合は、以前のコミットを再ビルドします。",
-      "descInstant": "各バージョンのイメージを保持するため、復元で再ビルドは発生しません。ディスク使用量は増えます。",
+      "descRebuild": "ホストにイメージが残っていない場合は、過去のコミットを再ビルドします。",
+      "descInstant": "履歴の上限内で成果物を保持します。古いバージョンは再ビルドが必要になる場合があります。",
       "toggleAria": "スナップショット保持を切り替え",
-      "keepNone": "追加のコピーを保持しない",
-      "keepCopies": "バージョンごとにコピーを保持",
-      "descRebuildFiles": "ファイルがホストに残っていない場合は、以前のコミットを再ビルドします。",
-      "descInstantFiles": "各バージョンのファイルを保持するため、復元で再ビルドは発生しません。ディスク使用量は増えます。"
+      "keepNone": "イメージを再利用、または再ビルド",
+      "keepCopies": "ロールバック用の成果物を保持",
+      "descRebuildFiles": "ホストにファイルが残っていない場合は、過去のコミットを再ビルドします。",
+      "descInstantFiles": "履歴の上限内でビルド済みファイルを保持します。古いバージョンは再ビルドが必要になる場合があります。"
     },
     "rollbackHistory": {
       "title": "ロールバック履歴",
@@ -483,13 +519,17 @@
       "descGit": "最近のイメージはいずれの場合も保持されるため、ロールバックはビルドを省略できます。",
       "decreaseAria": "ロールバック履歴を減らす",
       "increaseAria": "ロールバック履歴を増やす",
-      "sizeEach": "各 ~{size}",
+      "sizeEach": "イメージあたり約 {size}（共有レイヤーを含む）",
       "diskFree": "空き {size}",
       "autoBadge": "自動調整",
       "manualBadge": "手動設定",
       "kindFiles": "ディスク上のビルド済みファイル",
       "kindImages": "ホスト上のイメージ",
-      "descGitFiles": "最近のバージョンのファイルはいずれの場合も保持されるため、ロールバックはビルドを省略できます。"
+      "descGitFiles": "最近のバージョンのファイルはいずれの場合も保持されるため、ロールバックはビルドを省略できます。",
+      "retentionHint": "最近のデプロイ成果物を保持し、すばやくロールバックできるようにします。",
+      "retentionDescription": "保持する過去のリリース数の上限です。稼働中およびピン留めしたリリースは別枠で保持します。古い成果物は削除されますが、デプロイ履歴は残ります。0 にすると、稼働中およびピン留めしたリリースのみ保持します。",
+      "defaultBadge": "インスタンスの既定値",
+      "loadFailed": "ロールバック設定を読み込めませんでした。"
     },
     "commits": {
       "title": "最近のコミット",
@@ -679,12 +719,13 @@
       "active": "アクティブ",
       "failed": "失敗",
       "removing": "削除中",
-      "pending": "保留中"
+      "pending": "保留中",
+      "waiting": "対応待ち"
     },
     "ssl": {
       "includedByHost": "ホストに含まれる",
       "active": "アクティブ",
-      "provisioning": "プロビジョニング中",
+      "provisioning": "証明書を待機中",
       "expired": "期限切れ",
       "error": "エラー",
       "inactive": "非アクティブ"
@@ -731,8 +772,8 @@
       "mapsToPort": "マッピング先ポート",
       "includeWww": "www を含める",
       "dnsChallenge": "DNS-01 チャレンジを使用",
-      "dnsChallengeDesc": "接続済みの DNS プロバイダーで証明書を発行・更新します。ポート 80 に到達できない場合に使用してください。",
-      "dnsChallengeWildcardDesc": "ワイルドカード証明書には DNS-01 と接続済みの DNS プロバイダーが必要です。",
+      "dnsChallengeDesc": "DNS プロバイダーまたは一時的な TXT レコードで検証します。ポート 80 を利用できない場合に便利です。",
+      "dnsChallengeWildcardDesc": "ワイルドカード HTTPS には必須です。接続済みの DNS プロバイダーを使用するか、HTTPS の設定中に一時的な TXT レコードを追加してください。",
       "includeWwwDesc": "www.{domain} 用のレコードも生成します",
       "includeWwwFallback": "yourdomain.com",
       "adding": "追加中...",
@@ -840,10 +881,28 @@
       "foreignProxyHint": "別のプロキシが 80/443 を使用中"
     },
     "diagnosis": {
-      "title": "うまくいかない理由",
+      "title": "ドメインの詳細",
       "noneYet": "まだチェックが実行されていないため、表示できる結果がありません。表示されている DNS レコードを追加してから「検証」を実行してください。",
       "attempts": "これまでに {count} 回失敗しています。",
-      "pillHint": "理由を表示"
+      "pillHint": "理由を表示",
+      "lastChecked": "最終確認：",
+      "nextCheck": "次回の確認予定：",
+      "scheduleHint": "このインスタンスがオンラインの間に確認を実行します。待機中の処理により開始が遅れることがあります。",
+      "automaticDisabled": "ドメインの自動確認は無効です。手動で再試行するか、ジョブで有効にしてください。",
+      "scheduleUnavailable": "自動確認のスケジュールを取得できません。手動で再試行できます。",
+      "retryNow": "今すぐ再試行",
+      "checking": "確認中…",
+      "reasons": {
+        "verification": "ドメインの検証は完了していません。再試行する前に DNS レコードを確認してください。",
+        "certificate": "サイトを提供するサーバーで HTTPS の確認が必要です。再試行時は、新しい証明書を要求する前に既存の証明書を確認します。",
+        "deployment": "このルートはデプロイを待っています。プロジェクトをデプロイして適用してください。",
+        "disabled": "このプロジェクトまたはサービスは無効です。ルートを確認する前に有効にしてください。",
+        "removing": "このドメインは削除中です。検証は予定されていません。",
+        "manual_certificate": "このドメインはアップロードされた証明書を使用しています。有効な証明書をアップロードして再確認してください。Openship は自動更新しません。",
+        "managed_certificate": "TLS は外部プロキシまたは Openship Cloud が管理しています。そのプロバイダーの設定を確認してください。",
+        "route_missing": "設定されたルートはまだ適用されていません。ルーティングを再試行して適用してください。ルーティングの自動再試行は予定されていません。",
+        "manual_dns": "この証明書は手動の TXT 検証を使用しています。HTTPS 設定を開いて新しい TXT レコードを確認するか、接続済みの DNS プロバイダーを選んで自動更新を有効にしてください。"
+      }
     },
     "records": {
       "failed": "このドメインの DNS レコードを読み込めませんでした。",
@@ -853,6 +912,51 @@
       "body": "{path} にビルド出力が見つかりません — 出力ディレクトリを確認して再デプロイしてください。",
       "noIndex": "{path} に出力はありますが index ファイルがありません — リクエストは 404 になります。出力ディレクトリを確認してください。",
       "notServed": "エッジが {path} に対して HTTP {status} を返しました — このパスは配信されていません。出力ディレクトリとルートを確認してください。"
+    },
+    "wildcard": {
+      "title": "DNS 検証による HTTPS",
+      "scope": "ワイルドカードはサブドメインの 1 階層を対象とします。ベースドメインでもこのアプリを配信する場合は、別途追加してください。",
+      "notice": "ワイルドカード HTTPS には DNS 検証が必要です。保存後、DNS プロバイダーを接続するか、HTTPS 設定に表示される TXT レコードを追加してください。",
+      "automatic": "自動（プロバイダー）",
+      "manual": "手動 TXT",
+      "automaticHint": "設定 → DNS で Cloudflare を接続すると、証明書の検証レコードを作成し、HTTPS を自動更新できます。",
+      "manualHint": "DNS プロバイダーで一時的な TXT レコードを追加してください。更新のたびに新しい TXT レコードが必要です。更新時期は Openship に表示されます。",
+      "routing": "1. ドメインをこのサーバーに向ける",
+      "certificate": "2. HTTPS を有効にする",
+      "startAutomatic": "HTTPS を自動で有効にする",
+      "startManual": "TXT レコードを取得",
+      "renew": "証明書を更新",
+      "check": "TXT を確認して HTTPS を有効化",
+      "cancel": "検証をキャンセル",
+      "refresh": "状態を更新",
+      "close": "設定を閉じる",
+      "loading": "証明書設定を読み込み中",
+      "loadFailed": "証明書設定を読み込めませんでした。再試行して現在の状態を確認してください。",
+      "recordsFailed": "ルーティング用の DNS レコードを読み込めませんでした。保存済みの証明書検証情報は引き続き利用できます。",
+      "actionFailed": "証明書設定を更新できませんでした。",
+      "expires": "{date} までにこの検証を完了してください。",
+      "txtHint": "この TXT 値をそのまま追加してください。同じ名前の他の TXT 値は残してください。プロバイダーがゾーン名を補完する場合は、相対部分のみを入力してください。",
+      "cleanup": "この試行の TXT 値は削除できます。他の TXT レコードはすべて残してください。",
+      "logs": "証明書ログ",
+      "states": {
+        "preparing": "証明書の検証を準備中…",
+        "waiting": "TXT レコードを待機中",
+        "checking": "DNS と証明書の所有権を確認中…",
+        "installing": "HTTPS を有効化中…",
+        "cancelling": "検証をキャンセル中…",
+        "completed": "HTTPS の準備ができました",
+        "failed": "証明書の設定に対応が必要です",
+        "cancelled": "検証をキャンセルしました",
+        "expired": "TXT 検証の有効期限が切れました"
+      }
     }
+  },
+  "serviceEnvironment": {
+    "title": "サービスのランタイム環境",
+    "description": "これらの変数はこのサービスのみに適用され、Compose やプロジェクトの同名の値より優先されます。「環境の変更を適用」で保存済みの値を有効にします。",
+    "overrides": "このサービスでは次のキーがプロジェクトの値より優先されます: {keys}。",
+    "buildArguments": "ビルド引数は Compose ファイルまたはソース設定で指定し、変更を反映するには再ビルドが必要です。",
+    "projectLink": "共有プロジェクト環境を編集",
+    "loadFailed": "上書きを確認するためのプロジェクト変数名を読み込めませんでした。"
   }
 }

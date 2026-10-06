@@ -46,6 +46,13 @@ if (!result.success) {
   process.exit(1);
 }
 
+// Offline DB verifier has no engine, providers or job runner. It is shipped in
+// the exact runtime bundle so an isolated copied-database drill uses the same
+// migrations and encryption code as the forthcoming control-plane upgrade.
+const drill = await Bun.build({ entrypoints: [join(REPO_ROOT, "packages/db/src/tools/copied-pglite-upgrade.ts")], target: "node", outdir: OUT, naming: "copied-pglite-upgrade.mjs" });
+if (!drill.success) { console.error("[stage-server] offline database verifier bundle failed"); for (const log of drill.logs) console.error(log); process.exit(1); }
+cpSync(join(REPO_ROOT, "scripts/copied-platform-docker.mjs"), join(OUT, "copied-platform-docker.mjs"));
+
 const require = createRequire(join(REPO_ROOT, "packages/db/package.json"));
 const pgliteDist = dirname(require.resolve("@electric-sql/pglite"));
 const pgliteOut = join(OUT, "pglite");

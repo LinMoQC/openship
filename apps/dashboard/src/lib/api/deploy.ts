@@ -1,4 +1,5 @@
 import { api } from "./client";
+import type { DeploymentPage, ListDeploymentsInput } from "@repo/contracts";
 import { endpoints } from "./endpoints";
 import type {
   StackId,
@@ -55,7 +56,7 @@ export interface RestorePlanUI {
   reason?: string;
 }
 
-export type PrepareProjectSource =
+export type PrepareProjectSource = { includeEnv?: boolean } & (
   | {
       source?: "github";
       owner: string;
@@ -73,7 +74,7 @@ export type PrepareProjectSource =
       composePath?: string;
       /** Env already configured for this deploy, for compose interpolation. */
       env?: Record<string, string>;
-    };
+    });
 
 export interface PrepareComposeService {
   /** Set only when this service was hydrated from a PERSISTED row (an edit / redeploy
@@ -176,6 +177,7 @@ export interface PrepareProjectResponse extends PrepareAppConfig {
     clone_url?: string;
     html_url?: string;
     branches?: Array<{ name: string }>;
+    branches_has_more?: boolean;
   };
   singleAppCandidate?: PrepareSingleAppCandidate;
   /** The compose path this scan used (request value, or the one openship.json
@@ -220,6 +222,8 @@ export interface PrepareProjectResponse extends PrepareAppConfig {
    * common case) leaves it off, which is also what the pipeline does.
    */
   readiness?: OpenshipReadiness;
+  /** Ordered commands required before activating a single-app release. */
+  releaseCommands?: string[] | null;
   /**
    * What the repo's openship.json parse refused (#641). Advisory — the deploy
    * runs either way, on the fields that did parse. Reaches the wizard without a
@@ -237,8 +241,8 @@ export interface PrepareProjectResponse extends PrepareAppConfig {
 
 export const deployApi = {
   /** List all deployments for the authenticated user */
-  getAll: (opts?: { page?: number; perPage?: number }) =>
-    api.get<any>(endpoints.deploy.list, { params: opts }),
+  getAll: (opts?: ListDeploymentsInput, signal?: AbortSignal) =>
+    api.get<DeploymentPage>(endpoints.deploy.list, { params: opts, signal }),
 
   /** Cancel a deployment */
   cancel: (id: string) =>
@@ -345,7 +349,7 @@ export const deployApi = {
       domainType: "free" | "custom";
     }>;
     buildStrategy?: "server" | "local";
-    deployTarget?: "local" | "server" | "cloud";
+    deployTarget?: "local" | "server" | "cloud" | "cluster";
     serverId?: string;
     /** Folder-upload deploy: adopt the uploaded source (workspace / staging dir). */
     uploadSessionId?: string;

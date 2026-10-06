@@ -5,7 +5,7 @@ import {
   resolveRouteStrategy,
   resolveUpstreamUrl,
   usesHostLoopbackUpstream,
-} from "./upstream-url";
+} from "@repo/platform/engine/lib/upstream-url";
 
 /** A docker-shaped runtime whose live inspect we control. */
 function dockerRuntime(opts: {

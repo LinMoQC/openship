@@ -55,6 +55,7 @@
     "appsEmptyDesc": "Ein Klick, vollständig selbst gehostet — Datenbanken, Automatisierung, Analytics, Passwort-Vaults und mehr, auf deinen eigenen Servern."
   },
   "nav": {
+    "scale": "Skalierung",
     "home": "Startseite",
     "new-project": "Neues Projekt",
     "projects": "Projekte",

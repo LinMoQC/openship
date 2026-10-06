@@ -26,7 +26,6 @@
     "staticOnly": "静的サイトのみ — SSG、SPA、素の HTML",
     "anyWorkload": "何でも動かせる — コンテナ、Compose、ワーカー、Postgres、Redis",
     "runningServices": "同時に稼働するアプリ・データベース・ワーカー {runningServices} 個",
-    "computeMinutes": "毎月 {computeMinutes} コンピュート分",
     "buildMinutes": "毎月 {buildMinutes} 分のビルド時間",
     "power": "アプリ 1 つあたり最大 {powerCpu} vCPU と {powerRamGb} GB RAM",
     "projects": "プロジェクト {maxProjects} 個",
@@ -60,9 +59,9 @@
     "cta": "セルフホストを始める"
   },
   "creditPacks": {
-    "pack_5k": "{computeMinutes} コンピュート分",
-    "pack_25k": "{computeMinutes} コンピュート分",
-    "pack_100k": "{computeMinutes} コンピュート分"
+    "pack_5k": "{credits} クレジット",
+    "pack_25k": "{credits} クレジット",
+    "pack_100k": "{credits} クレジット"
   },
   "ui": {
     "perMonth": "/月",
@@ -80,6 +79,6 @@
     "campaignEnds": "キャンペーンは {date} まで",
     "wasPrice": "通常 {price}",
     "standardTitle": "すべてのプランに含まれるもの",
-    "creditPackNote": "小規模アプリ約 {appHours} 時間、またはビルド {buildMinutes} 分"
+    "creditPackNote": "計測されたクラウド使用量に適用されます。利用可能な時間はワークロードによって異なります。"
   }
 }

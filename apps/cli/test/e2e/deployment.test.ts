@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { deploymentFixture } from "../../../../packages/contracts/test/fixtures";
 
 vi.mock("../../src/lib/config", () => ({
   getApiUrl: () => "http://api.test",
@@ -14,19 +15,19 @@ afterEach(() => fetchStub?.restore());
 describe("openship deployment get", () => {
   it("GETs /deployments/:id and renders it", async () => {
     fetchStub = stubFetch(() => ({
-      json: { data: { id: "dep1", status: "success", env: "production" } },
+      json: { data: { ...deploymentFixture(), id: "dep1", status: "ready" } },
     }));
     const { out, code } = await runCommand(deploymentCommand, ["get", "dep1"]);
     expect(code).toBe(0);
     expect(fetchStub.calls[0].url).toBe("http://api.test/api/deployments/dep1");
     expect(out).toContain("dep1");
-    expect(out).toContain("success");
+    expect(out).toContain("ready");
   });
 });
 
 describe("openship deployment redeploy", () => {
   it("POSTs to /deployments/:id/redeploy", async () => {
-    fetchStub = stubFetch(() => ({ json: { deploymentId: "dep2" } }));
+    fetchStub = stubFetch(() => ({ json: { success: true, deployment_id: "dep2", project_id: "project-a" } }));
     const { code } = await runCommand(deploymentCommand, ["redeploy", "dep1"]);
     expect(code).toBe(0);
     expect(fetchStub.calls[0].method).toBe("POST");
@@ -36,7 +37,7 @@ describe("openship deployment redeploy", () => {
 
 describe("openship deployment rollback", () => {
   it("POSTs to /deployments/:id/rollback", async () => {
-    fetchStub = stubFetch(() => ({ json: { ok: true } }));
+    fetchStub = stubFetch(() => ({ json: { data: deploymentFixture() } }));
     const { code } = await runCommand(deploymentCommand, ["rollback", "dep1"]);
     expect(code).toBe(0);
     expect(fetchStub.calls[0].method).toBe("POST");

@@ -2,9 +2,9 @@ import type { Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { hashPassword } from "better-auth/crypto";
 import { repos } from "@repo/db";
-import { isSaasDeployment } from "../../lib/auth";
-import { resolveInvitationClaim } from "../../lib/invitation-claim";
-import { createInvitedUserWithCredential } from "../../lib/invitation-signup";
+import { isSaasDeployment } from "@repo/platform/engine/lib/auth";
+import { resolveInvitationClaim } from "@repo/platform/engine/lib/invitation-claim";
+import { createInvitedUserWithCredential } from "@repo/platform/engine/lib/invitation-signup";
 
 export const INVITATION_SIGNUP_BODY_MAX_BYTES = 8 * 1024;
 

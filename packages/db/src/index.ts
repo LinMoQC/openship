@@ -1,5 +1,13 @@
 // ─── Database client ─────────────────────────────────────────────────────────
-export { db, getDriver, getPgPool, closeDb, type Database, type DatabaseTransaction, type Driver } from "./client";
+export {
+  db,
+  getDriver,
+  getPgPool,
+  closeDb,
+  type Database,
+  type DatabaseTransaction,
+  type Driver,
+} from "./client";
 // The dev hot-reload contract: shutdown must free the PGlite lock inside the
 // successor's takeover grace, or every reload hard-kills the DB mid-close.
 export { DEV_LOCK_TAKEOVER_GRACE_MS, isDevWatchReload } from "./pglite-lock";
@@ -30,6 +38,7 @@ export {
   countInstanceSubgraphTables,
   restoreSubgraph,
   restoreSubgraphInTransaction,
+  assertActiveDeploymentOwnership,
   deleteProjectSubgraph,
   dumpDatabase,
   restoreDatabase,
@@ -56,17 +65,30 @@ export {
   createGitSourceRepo,
   createProjectGroupRepo,
   createProjectRepo,
+  createCloudDockerWorkspaceRepo,
+  type CloudDockerWorkspace,
   createDeploymentRepo,
   createDomainRepo,
+  createDomainDnsChallengeRepo,
+  type DomainDnsChallenge,
   createServiceRepo,
   createServiceDeploymentRepo,
   createPersonalAccessTokenRepo,
   normalizeRoutingFields,
   toComposeSpec,
+  composeWritePatch,
   composeSpecsEqual,
+  reconcileComposeSpec,
+  unresolvedComposeEnvironmentKeys,
   composeSpecDiff,
   createSettingsRepo,
   createServerRepo,
+  createServerClusterRepo,
+  type ServerClusterRecord,
+  type ClusterVerificationRecord,
+  type ManagedNetworkOperationRecord,
+  createNetworkPreparationRepo,
+  type NetworkPreparationRecord,
   createServerGithubAuthRepo,
   createGithubDeployKeyRepo,
   createServerTunnelRepo,
@@ -219,3 +241,12 @@ export {
   sql,
   count,
 } from "drizzle-orm";
+export * from "./project-transfer";
+
+export { createComputeClusterRepo, type ComputeClusterRecord } from "./repos/compute-cluster.repo";
+export { createClusterRuntimeRepo, type ClusterRuntimeRecord } from "./repos/cluster-runtime.repo";
+export { createClusterStorageRepo, type ClusterStorageRecord } from "./repos/cluster-storage.repo";
+export {
+  createClusterDatabaseRepo,
+  type ClusterDatabaseRecord,
+} from "./repos/cluster-database.repo";

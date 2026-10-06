@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@repo/db", () => ({ repos: {} }));
 
-import { reconcileProjectRoutes } from "../../src/lib/route-apply.service";
+import { reconcileProjectRoutes } from "@repo/platform/engine/lib/route-apply.service";
 
 /**
  * The LIVE path: editing a project's request limits has to take effect on save, the
@@ -41,6 +41,26 @@ function fakeRouting() {
 }
 
 describe("reconcileProjectRoutes — project request limits", () => {
+  it("reports a failed vhost write while applying healthy siblings (#879)", async () => {
+    const { routing, registerRoute } = fakeRouting();
+    registerRoute.mockRejectedValueOnce(new Error("edge rejected the route"));
+    const onWarning = vi.fn();
+    await reconcileProjectRoutes(project(), {
+      routing,
+      onWarning,
+      registers: [...REGISTER, { ...REGISTER[0], hostname: "healthy.example.com" }],
+    });
+    expect(registerRoute).toHaveBeenCalledTimes(2);
+    expect(onWarning).toHaveBeenCalledExactlyOnceWith(
+      expect.stringContaining(
+        "registerRoute app.example.com failed (non-fatal): edge rejected the route",
+      ),
+    );
+    expect(registerRoute).toHaveBeenLastCalledWith(
+      expect.objectContaining({ domain: "healthy.example.com" }),
+    );
+  });
+
   it("passes the project's proxy settings into the live vhost", async () => {
     const { routing, registerRoute } = fakeRouting();
 

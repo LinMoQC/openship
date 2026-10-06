@@ -19,8 +19,8 @@
 
 import type { Context } from "hono";
 import { getRequestContext } from "../../lib/request-context";
-import { auth } from "../../lib/auth";
-import { issueNamespaceToken } from "../../lib/openship-cloud";
+import { auth } from "@repo/platform/engine/lib/auth";
+import { issueNamespaceToken } from "@repo/platform/engine/lib/openship-cloud";
 import {
   exchangeHandoffCode,
   validateDesktopRedirect,
@@ -30,15 +30,15 @@ import {
   findHandoffCodeByState,
   mintSession,
 } from "../../lib/cloud-auth-proxy";
-import { runCloudPreflight } from "../../lib/cloud-preflight";
-import { cloudRuntimeTarget } from "../../config/env";
-import * as githubAuth from "../github/github.auth";
-import { canMintInstallationToken } from "../github/github-access";
+import { runCloudPreflight } from "@repo/platform/engine/lib/cloud-preflight";
+import { cloudRuntimeTarget } from "@repo/platform/engine/config/env";
+import * as githubAuth from "@repo/platform/engine/modules/github/github.auth";
+import { canMintInstallationToken } from "@repo/platform/engine/modules/github/github-access";
 import {
   proxyCloudAnalytics,
   CloudAnalyticsForbiddenError,
   type CloudAnalyticsOperation,
-} from "./cloud-analytics.service";
+} from "@repo/platform/engine/modules/cloud/cloud-analytics.service";
 import { revokeCloudSession } from "./cloud-session.service";
 import {
   syncCloudEdgeProxy,
@@ -74,7 +74,7 @@ import {
   mintOrgInstallationToken,
   oauthBridgeStore,
   OAUTH_BRIDGE_TTL_MS,
-} from "./cloud-github.service";
+} from "@repo/platform/engine/modules/cloud/cloud-github.service";
 
 /** Coerce a thrown Oblien SDK error into an HTTP response shape. */
 function oblienErrorResponse(c: Context, err: unknown, fallback: string) {

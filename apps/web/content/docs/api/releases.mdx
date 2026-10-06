@@ -1,0 +1,106 @@
+---
+title: GitOps releases
+description: Inspect fixed release targets, submit with the current operator identity, and follow durable acceptance.
+---
+
+GitOps management is an explicit project binding. Ordinary source-deployment projects retain their
+existing workflow. A bound project rejects direct Update, Redeploy, Rollback, source uploads and
+deployment webhooks without its authenticated registered controller context. The legacy Update
+endpoint returns `GITOPS_RELEASE_REQUIRED` and directs the caller to release plans.
+
+## Inspect and plan
+
+```ts
+const state = await ship.releases.state("proj_123", { fresh: true });
+console.log(state.kind, state.checkedAt, state.stale);
+const plan = await ship.releases.plan("proj_123", { action: "verify" });
+console.log(plan.id, plan.target.services, plan.checks, plan.expiresAt);
+```
+
+`verify` is restricted to PRT. `release` selects the exact next pending event for that stack;
+it does not drain the shared queue. `rollback` requires the full commit of an accepted manifest
+for the same project and environment. A production candidate must have a still-active PRT
+acceptance receipt. Unknown information blocks submission rather than claiming that the current
+version is the latest.
+
+Plans expire after ten minutes. Submission rechecks permissions, current deployment, binding
+revision, target digests, configuration and every blocking check. A changed target or expired plan
+requires a new plan. Consumed plans remain associated with their queued run and are checked again
+before execution.
+
+## Operator identity and submission
+
+Use the Dashboard release workspace to connect the **currently signed-in user's GitHub account**.
+The administrator must configure `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` first. Repository
+write access is required; production additionally requires the configured operator policy and
+the exact `production` confirmation. Server clone credentials, GitHub App credentials and project
+tokens do not replace this identity.
+
+The HTTP and SDK expose submission consistently, but personal/project token and MCP submissions
+are refused with `GITHUB_USER_CONNECTION_REQUIRED`. SDK and CLI callers can inspect plans and
+follow runs within their existing scope. Submission through an authenticated operator session
+uses a stable `idempotencyKey`; preserve it when retrying the same plan. Reusing it for a different
+plan or user is a conflict. Only one active run may execute for a project.
+
+The Run is persisted before dispatch. A timeout becomes `dispatch_unknown`; the platform finds
+the original workflow by its explicit Run ID and never automatically dispatches a second one.
+Poll the existing Run before offering any retry.
+
+## Follow acceptance and recovery
+
+```ts
+const latest = await ship.releases.latest("proj_123");
+if (latest) {
+  const run = await ship.releases.getRun(latest.id);
+  console.log(run.stage, run.workflowUrl, run.deploymentId, run.receipt);
+}
+```
+
+`GET /api/release-runs/:id/events` uses the existing SSE transport. Reconnecting or refreshing
+reads the same persisted Run; it does not start another deployment.
+
+Stages cover submission, queueing, configuration synchronization, pulling, deployment, health
+checks and external acceptance. A successful GitHub workflow or a ready OpenShip deployment
+alone is insufficient. Acceptance verifies the immutable GitOps receipt, active deployment,
+actual image digests and topology, environment hash and external probes. A genuine unchanged
+target may produce a verified no-op; no historical acceptance is fabricated at first binding.
+
+Failure reports `recovering`, `restored` or `action_required`. Stateless candidates retain the
+incumbent through acceptance. Stateful services do not inherit parallel startup, database
+schema rollback or automatic business-volume cleanup.
+
+## Controller boundary
+
+Automatic registration, workflow registration, progress and Compose document synchronization
+require the configured controller Token ID and matching repository, workflow, main commit,
+operator, target manifest and exact service scope. They are not MCP tools; internal registration
+and progress are excluded from the public SDK. Environment values and credentials are never
+part of release plan output.
+
+## Operations
+
+{/* api-operations:start */}
+
+### Resource methods
+
+| Operation | SDK | REST API |
+| --- | --- | --- |
+| Read actual and target versions with environment-specific checks; request fresh inspection explicitly. | `releases.state(projectId, options?)` | `GET /api/projects/:id/release-state`<br />`project:read` |
+| Register explicit GitOps ownership and bound controller Token IDs; requires project administration. | `releases.bind(projectId, input)` | `PUT /api/projects/:id/release-binding`<br />`project:admin` |
+| Persist a fixed target and read-only preflight with a ten-minute expiry. | `releases.plan(projectId, input?)` | `POST /api/projects/:id/release-plans`<br />`project:write` |
+| Read a saved release plan through its stored project permission. | `releases.getPlan(id)` | `GET /api/release-plans/:id`<br />`project:read` |
+| Submit using the current user’s GitHub OAuth identity and a stable idempotency key; token and MCP submissions are refused. | `releases.start(id, input)` | `POST /api/release-plans/:id/runs`<br />`project:write` |
+| Read the latest persisted run for the bound project and environment. | `releases.latest(projectId)` | `GET /api/projects/:id/release-run`<br />`project:read` |
+| Read workflow, recovery and acceptance state; an ambiguous submission is reconciled without redispatch. | `releases.getRun(id)` | `GET /api/release-runs/:id`<br />`project:read` |
+| Read runtime provenance and GitOps contract capabilities within the optional project scope. | `releases.capabilities(projectId?)` | `GET /api/releases/capabilities`<br />`updates:read` |
+
+### Controller and events
+
+| Operation | SDK | REST API |
+| --- | --- | --- |
+| Register an automatic PRT execution using its bound authenticated controller token and exact workflow/event/manifest. | HTTP only | `POST /api/projects/:id/controller-releases`<br />`project:write` |
+| Bind the real GitHub Run and verify workflow identity, actor and fixed plan. Internal controller endpoint; excluded from SDK and MCP. | HTTP only | `POST /api/release-runs/:id/register-workflow`<br />`project:write` |
+| Record authenticated controller progress and validate actual deployment, immutable receipt and external probes before acceptance. Excluded from SDK and MCP. | HTTP only | `POST /api/release-runs/:id/progress`<br />`project:write` |
+| Subscribe to persisted release state over SSE; reconnect by reading the same Run ID. | HTTP only | `GET /api/release-runs/:id/events`<br />`project:read` |
+
+{/* api-operations:end */}

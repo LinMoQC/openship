@@ -29,7 +29,7 @@ vi.mock("@repo/db", async (importOriginal) => {
   };
 });
 
-vi.mock("../../lib/startup/self-server", () => ({
+vi.mock("@repo/platform/engine/lib/startup/self-server", () => ({
   findLocalServer: () => h.findLocalServer(),
 }));
 
@@ -49,7 +49,7 @@ describe("resolveProjectServer", () => {
   beforeEach(() => {
     h.findProject.mockReset().mockResolvedValue(project);
     h.findDeployment.mockReset().mockResolvedValue({
-      id: "deployment-1",
+      id: "deployment-1", projectId: "project-1", organizationId: "org-1",
       meta: { serverId: "server-live" },
     });
     h.getServerInOrganization.mockReset().mockResolvedValue({ id: "server-live" });
@@ -70,7 +70,7 @@ describe("resolveProjectServer", () => {
       cloudWorkspaceId: "workspace-next",
     });
     h.findDeployment.mockResolvedValue({
-      id: "deployment-1",
+      id: "deployment-1", projectId: "project-1", organizationId: "org-1",
       meta: { deployTarget: "server", serverId: "server-live" },
     });
 
@@ -91,7 +91,7 @@ describe("resolveProjectServer", () => {
 
   it("uses the local server instead of a future server when the active release is explicitly local", async () => {
     h.findDeployment.mockResolvedValue({
-      id: "deployment-1",
+      id: "deployment-1", projectId: "project-1", organizationId: "org-1",
       meta: { deployTarget: "local" },
     });
     h.findLocalServer.mockResolvedValue({ id: "server-local", isLocal: true });
@@ -111,7 +111,7 @@ describe("resolveProjectServer", () => {
       serverId: null,
     });
     h.findDeployment.mockResolvedValue({
-      id: "deployment-1",
+      id: "deployment-1", projectId: "project-1", organizationId: "org-1",
       meta: {},
     });
     h.findLocalServer.mockResolvedValue({ id: "server-local", isLocal: true });
@@ -131,7 +131,7 @@ describe("resolveProjectServer", () => {
       serverId: null,
     });
     h.findDeployment.mockResolvedValue({
-      id: "deployment-1",
+      id: "deployment-1", projectId: "project-1", organizationId: "org-1",
       meta: { deployTarget: "server" },
     });
     h.findLocalServer.mockResolvedValue({ id: "server-local", isLocal: true });

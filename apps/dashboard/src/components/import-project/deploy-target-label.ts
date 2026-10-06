@@ -21,6 +21,7 @@ export function describeBuildTarget(
 ): string {
   const dp = t.importProject.deploymentProcessing;
   if (config.deployTarget === "cloud") return dp.targetOpenshipCloud;
+  if (config.deployTarget === "cluster") return "Server cluster";
   if (config.deployTarget === "server") {
     return config.serverName
       ? interpolate(dp.targetServerNamed, { name: config.serverName })
@@ -39,6 +40,7 @@ export function describeBuildStrategy(
   const dp = t.importProject.deploymentProcessing;
   if (config.buildStrategy === "local") return dp.strategyLocal;
   if (config.deployTarget === "cloud") return dp.strategyCloud;
+  if (config.deployTarget === "cluster") return "Cluster build server";
   if (config.deployTarget === "server") return dp.strategyServer;
   return dp.strategyHost;
 }

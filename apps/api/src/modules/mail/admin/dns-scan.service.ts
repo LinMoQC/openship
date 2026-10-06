@@ -18,7 +18,7 @@
  * resolved in parallel). The Health tab refreshes on demand.
  */
 
-import { createPublicDnsResolver } from "../../../lib/public-dns";
+import { createPublicDnsResolver } from "@repo/platform/engine/lib/public-dns";
 
 /**
  * PUBLIC resolvers, not the system stub.
@@ -39,9 +39,9 @@ const resolveCname = publicResolver.resolveCname.bind(publicResolver);
 const resolveMx = publicResolver.resolveMx.bind(publicResolver);
 const resolveTxt = publicResolver.resolveTxt.bind(publicResolver);
 const reverse = publicResolver.reverse.bind(publicResolver);
-import { sshManager } from "../../../lib/ssh-manager";
-import { isSyntheticDnsAddress } from "../../../lib/dns-address";
-import { readState } from "../mail-state";
+import { sshManager } from "@repo/platform/engine/lib/ssh-manager";
+import { isSyntheticDnsAddress } from "@repo/platform/engine/lib/dns-address";
+import { readState } from "@repo/platform/engine/modules/mail/mail-state";
 import { relayedDomainsFor, safeErrorMessage, mailHostname } from "@repo/core";
 
 export type DnsCheckStatus = "pass" | "warn" | "fail" | "unknown";

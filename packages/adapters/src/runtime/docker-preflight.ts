@@ -1,12 +1,15 @@
 import type Dockerode from "dockerode";
 import { randomUUID } from "node:crypto";
+import { deployDurablePreflightedService, type CutoverPersistence } from "./docker-cutover";
+import { assertStatelessPreflight } from "./docker-preflight-scope";
 
 export interface HealthcheckPreflight {
   timeoutMs: number;
   signal?: AbortSignal;
+  journal?: CutoverPersistence;
 }
 
-async function waitHealthy(container: Dockerode.Container, options: HealthcheckPreflight) {
+export async function waitForHealthyContainer(container: Dockerode.Container, options: HealthcheckPreflight) {
   const deadline = Date.now() + options.timeoutMs;
   while (Date.now() < deadline) {
     options.signal?.throwIfAborted();
@@ -34,6 +37,8 @@ export async function deployPreflightedService(
   options: HealthcheckPreflight,
   warn: (message: string) => void,
 ): Promise<{ container: Dockerode.Container; commit(): Promise<void>; rollback(): Promise<void> }> {
+  assertStatelessPreflight(payload);
+  if (options.journal) return deployDurablePreflightedService(docker, payload, options, options.journal);
   options.signal?.throwIfAborted();
   if (
     !Number.isFinite(options.timeoutMs) ||
@@ -73,7 +78,7 @@ export async function deployPreflightedService(
   });
   try {
     await candidate.start();
-    await waitHealthy(candidate, options);
+    await waitForHealthyContainer(candidate, options);
   } finally {
     // Failure to clean up must veto cutover, not leave a duplicate app running.
     await candidate.remove({ force: true, v: true });
@@ -114,7 +119,7 @@ export async function deployPreflightedService(
     options.signal?.throwIfAborted();
     replacement = await docker.createContainer(activationPayload);
     await replacement.start();
-    await waitHealthy(replacement, options);
+    await waitForHealthyContainer(replacement, options);
   } catch (error) {
     try {
       if (replacement) await replacement.remove({ force: true, v: true });
@@ -122,7 +127,7 @@ export async function deployPreflightedService(
       if (incumbent && stopped) {
         await incumbent.start();
         // Recovery is not cancelled with the failed attempt.
-        if (hadHealthcheck) await waitHealthy(incumbent, { timeoutMs: options.timeoutMs });
+        if (hadHealthcheck) await waitForHealthyContainer(incumbent, { timeoutMs: options.timeoutMs });
       }
     } catch (restoreError) {
       throw new AggregateError(
@@ -161,7 +166,7 @@ export async function deployPreflightedService(
       if (incumbent && stopped) {
         await incumbent.start();
         stopped = false;
-        if (hadHealthcheck) await waitHealthy(incumbent, { timeoutMs: options.timeoutMs });
+        if (hadHealthcheck) await waitForHealthyContainer(incumbent, { timeoutMs: options.timeoutMs });
       }
       settled = true;
     },

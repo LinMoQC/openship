@@ -26,6 +26,7 @@
  */
 
 import type { DeployConfig, LogCallback, RouteConfig, SslResult } from "../types";
+import type { PromptPayload } from "@repo/core";
 import type { BuildLogger } from "./build-pipeline";
 import { DeployError, safeErrorMessage, withTimeout } from "@repo/core";
 import {
@@ -68,26 +69,7 @@ function delayWithCancellation(ms: number, signal?: AbortSignal): Promise<void> 
  * Callback that pauses the pipeline and asks the user for a decision.
  * Returns the action string chosen by the user.
  */
-/** A user-decision prompt (edge takeover, port conflict, …) — the ONE shape
- *  shared by the deploy pipeline, server-setup, the CLI, and the dashboard modal
- *  that renders it. Resolves to the chosen action id. */
-export interface PromptPayload {
-  promptId: string;
-  title: string;
-  message: string;
-  actions: Array<{ id: string; label: string; variant?: string }>;
-  details?: Record<string, unknown>;
-  /**
-   * ISO deadline after which the hold gives up and the pipeline aborts.
-   *
-   * Stamped by whoever HOLDS the prompt (the session manager owns the timeout),
-   * not by the code that raises it — so it is absent on the raising side and
-   * present by the time a client sees it. A human watching a modal doesn't need
-   * this; an API client that has to poll to notice the prompt at all does, or it
-   * cannot tell "still waiting" from "I have 12 seconds left".
-   */
-  expiresAt?: string;
-}
+export type { PromptPayload } from "@repo/core";
 
 export type PromptUserFn = (prompt: PromptPayload) => Promise<string>;
 

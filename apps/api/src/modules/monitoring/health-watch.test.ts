@@ -98,6 +98,10 @@ const h = vi.hoisted(() => {
     /** Every runtime teardown, so the deadline path can be shown to release one. */
     disposed: vi.fn(),
     renew: vi.fn(async (_groupKeys: readonly string[]) => {}),
+    stopEvents: vi.fn(async () => {}),
+    watcherEnabled: true,
+    disconnected: false,
+    disconnectOnList: false,
     logLines: ["panic: dial tcp 127.0.0.1:5432: connect: connection refused"],
   };
 });
@@ -116,6 +120,7 @@ vi.mock("@repo/db", () => {
   return {
     incidentSeverity: (kind: string) => SEVERITY[kind] ?? 0,
     repos: {
+      job: { findByKey: vi.fn(async () => ({ enabled: h.watcherEnabled, scheduleType: "recurring", cronExpression: "* * * * *" })) },
       project: {
         listAllForScan: vi.fn(async () => h.projects),
         listByOrganization: vi.fn(async (organizationId: string) => {
@@ -260,16 +265,19 @@ vi.mock("@repo/adapters", async (importOriginal) => ({
   }),
 }));
 
-vi.mock("../../lib/notification-dispatcher", () => ({ notification: { emit: h.emit } }));
+vi.mock("@repo/platform/engine/lib/notification-dispatcher", () => ({ notification: { emit: h.emit } }));
+vi.mock("@repo/platform/engine/lib/desktop-network", () => ({
+  desktopNetworkDisconnected: () => h.platformTarget === "desktop" && h.disconnected,
+}));
 
-vi.mock("../../lib/public-url", () => ({
+vi.mock("@repo/platform/engine/lib/public-url", () => ({
   resolveDashboardPublicUrl: () => "https://ops.example.com",
 }));
 
 // The event accelerator has its own suite (container-events.test.ts). Here it
 // would only pull a module graph — and live SSH/timer state — into a suite about
 // the sweep itself.
-vi.mock("./container-events", () => ({ renewEventWatchers: h.renew }));
+vi.mock("@repo/platform/engine/modules/monitoring/container-events", () => ({ renewEventWatchers: h.renew, stopAllContainerEventWatchers: h.stopEvents }));
 
 /**
  * Faithful copies of the two routing functions for self-hosted and desktop bases.
@@ -289,7 +297,7 @@ vi.mock("./container-events", () => ({ renewEventWatchers: h.renew }));
  * makes the mis-keyed group unrepresentable: every daemon answers alike, so the fixture
  * agrees with a sweep that is reading the wrong box.
  */
-vi.mock("../../lib/deployment-runtime", () => ({
+vi.mock("@repo/platform/engine/lib/deployment-runtime", () => ({
   resolveEffectiveTarget: (base: string, meta: Record<string, unknown>) => {
     if (base !== "cloud" && meta.serverId) return "server";
     if (base === "desktop") return meta.deployTarget ?? "cloud";
@@ -326,6 +334,7 @@ function fakeRuntime(box: string | null = null) {
     supports: (cap: string) =>
       cap === "hostContainerQuery" || (cap === "stabilityProbe" && !h.noProbe),
     listAllContainers: async () => {
+      if (h.disconnectOnList) h.disconnected = true;
       if (h.listThrows) throw new Error(h.listThrows);
       // Accepted and never answered. A rejection is the polite failure; this is the
       // one the deadline exists for.
@@ -534,13 +543,13 @@ vi.useFakeTimers({ toFake: ["Date"], now: START });
 
 async function tick(opts?: { onlyServerKeys?: ReadonlySet<string>; afterMs?: number }) {
   vi.setSystemTime(Date.now() + (opts?.afterMs ?? TICK_SPACING_MS));
-  const { runHealthWatch } = await import("./health-watch");
+  const { runHealthWatch } = await import("@repo/platform/engine/modules/monitoring/health-watch");
   return runHealthWatch(opts?.onlyServerKeys ? { onlyServerKeys: opts.onlyServerKeys } : undefined);
 }
 
 async function checkCurrent(organizationId = "org1", afterMs = TICK_SPACING_MS) {
   vi.setSystemTime(Date.now() + afterMs);
-  const { runCurrentHealthScan } = await import("./health-watch");
+  const { runCurrentHealthScan } = await import("@repo/platform/engine/modules/monitoring/health-watch");
   return runCurrentHealthScan(organizationId);
 }
 
@@ -564,7 +573,7 @@ function restart() {
 
 /** The sweep's grouping key for a box, via the real helper the accelerator uses. */
 async function groupKey(serverId: string | null) {
-  const { watchGroupKey } = await import("./health-watch");
+  const { watchGroupKey } = await import("@repo/platform/engine/modules/monitoring/health-watch");
   return watchGroupKey(serverId, "org1");
 }
 
@@ -608,18 +617,100 @@ beforeEach(() => {
   h.emit.mockClear();
   h.disposed.mockClear();
   h.renew.mockClear();
+  h.stopEvents.mockClear();
+  h.watcherEnabled = true;
+  h.disconnected = false;
+  h.disconnectOnList = false;
+});
+
+describe("automatic monitoring coverage and lifecycle", () => {
+  it("records and recovers a desktop-managed workload through the existing incident path", async () => {
+    h.platformTarget = "desktop";
+    const { projectId, containerId } = seedApp({ serverId: "desktop-box" });
+    h.samples.set(containerId, { state: "running", health: "unhealthy" });
+    await confirm();
+    expect(openFor(projectId)).toHaveLength(1);
+    expect(h.emit).toHaveBeenCalledTimes(1);
+    expect(h.renew).toHaveBeenCalled();
+    h.samples.set(containerId, { state: "running", health: "healthy" });
+    await tick();
+    expect(openFor(projectId)).toHaveLength(0);
+    expect(h.emit).toHaveBeenCalledTimes(2);
+  });
+
+  it("replaces a healthy snapshot with unknown when an automatic check cannot reach the server", async () => {
+    const { projectId } = seedApp({ serverId: "offline-box" });
+    const { listWorkloadHealthSnapshots } = await import("@repo/platform/engine/modules/monitoring/health-watch");
+    await tick();
+    expect(listWorkloadHealthSnapshots("org1").find(row => row.projectId === projectId)?.state).toBe("healthy");
+    h.listThrows = "connect ECONNREFUSED";
+    await tick();
+    expect(listWorkloadHealthSnapshots("org1").find(row => row.projectId === projectId)?.state).toBe("unknown");
+    expect(openFor(projectId)).toHaveLength(0);
+    expect(h.incidents.filter(row => row.kind === "server_unreachable" && row.status === "open")).toHaveLength(1);
+  });
+
+  it("never treats unknown coverage as recovery of an existing workload incident", async () => {
+    const { projectId, containerId } = seedApp({ serverId: "broken-box" });
+    h.samples.set(containerId, { state: "running", health: "unhealthy" });
+    await confirm();
+    h.listThrows = "connect ECONNREFUSED";
+    await tick();
+    expect(openFor(projectId)).toHaveLength(1);
+  });
+
+  it("does not start event subscriptions when a paused watcher is manually rescanned", async () => {
+    seedApp({ serverId: "manual-box" });
+    h.watcherEnabled = false;
+    await tick();
+    expect(h.renew).not.toHaveBeenCalled();
+    expect(h.stopEvents).toHaveBeenCalledOnce();
+  });
+
+  it("retires snapshots and incidents when the last project is removed", async () => {
+    const { projectId, containerId } = seedApp({ serverId: "last-box" });
+    h.samples.set(containerId, { state: "running", health: "unhealthy" });
+    await confirm();
+    h.projects.length = 0;
+    await tick();
+    const { listWorkloadHealthSnapshots, isTrackedHealthContainer } = await import("@repo/platform/engine/modules/monitoring/health-watch");
+    expect(listWorkloadHealthSnapshots("org1")).toEqual([]);
+    expect(openFor(projectId)).toHaveLength(0);
+    expect(isTrackedHealthContainer(await groupKey("last-box"), containerId)).toBe(false);
+  });
+
+  it("does no probing or incident work in the cloud runtime", async () => {
+    seedApp({ serverId: "must-not-be-probed" });
+    h.platformTarget = "cloud";
+    expect(await tick()).toMatchObject({ servers: 0, workloads: 0, opened: 0 });
+    expect(h.inspects).toBe(0);
+    expect(h.incidents).toEqual([]);
+    expect(h.renew).not.toHaveBeenCalled();
+  });
 });
 
 // ─── Current-state checks ───────────────────────────────────────────────────
 
 describe("current-state check", () => {
+  it.each([
+    { projectId: "another-project" },
+    { organizationId: "another-org" },
+  ])("does not observe a workload selected by a mismatched active pointer: %j", async (owner) => {
+    seedApp();
+    Object.assign(h.deployments[0]!, owner);
+    const result = await checkCurrent();
+    expect(result.summary).toMatchObject({ servers: 0, workloads: 0 });
+    expect(h.inspects).toBe(0);
+    expect(h.incidents).toEqual([]);
+  });
+
   it("checks a desktop-managed remote Docker deployment without a watcher job", async () => {
     h.platformTarget = "desktop";
     const { projectId, containerId } = seedApp({ serverId: "desktop-remote" });
 
     const result = await checkCurrent();
     const { isTrackedHealthContainer, listWorkloadHealthSnapshots, watchGroupKey } =
-      await import("./health-watch");
+      await import("@repo/platform/engine/modules/monitoring/health-watch");
 
     expect(result.summary).toMatchObject({ servers: 1, projects: 1, workloads: 1 });
     expect(listWorkloadHealthSnapshots("org1").find((row) => row.projectId === projectId)?.state).toBe("healthy");
@@ -636,7 +727,7 @@ describe("current-state check", () => {
     setState(down.containerId, "exited", { exitCode: 1 });
 
     const result = await checkCurrent();
-    const { listWorkloadHealthSnapshots, getCurrentHealthScan } = await import("./health-watch");
+    const { listWorkloadHealthSnapshots, getCurrentHealthScan } = await import("@repo/platform/engine/modules/monitoring/health-watch");
     const states = new Map(
       listWorkloadHealthSnapshots("org1").map((row) => [row.projectId, row.state]),
     );
@@ -657,7 +748,7 @@ describe("current-state check", () => {
     setState(other.containerId, "exited", { exitCode: 1 });
 
     const result = await checkCurrent("org1");
-    const { listWorkloadHealthSnapshots } = await import("./health-watch");
+    const { listWorkloadHealthSnapshots } = await import("@repo/platform/engine/modules/monitoring/health-watch");
 
     expect(result.summary).toMatchObject({ servers: 1, projects: 1, workloads: 1 });
     expect(h.inspects).toBe(1);
@@ -694,7 +785,7 @@ describe("current-state check", () => {
 
   it("reports an unreachable host and replaces stale certainty with unknown", async () => {
     const { projectId } = seedApp();
-    const { listWorkloadHealthSnapshots } = await import("./health-watch");
+    const { listWorkloadHealthSnapshots } = await import("@repo/platform/engine/modules/monitoring/health-watch");
 
     await checkCurrent();
     expect(listWorkloadHealthSnapshots("org1").find((item) => item.projectId === projectId)?.state).toBe("healthy");
@@ -713,7 +804,7 @@ describe("current-state check", () => {
 
   it("deduplicates concurrent checks for the same organization", async () => {
     seedApp();
-    const { runCurrentHealthScan } = await import("./health-watch");
+    const { runCurrentHealthScan } = await import("@repo/platform/engine/modules/monitoring/health-watch");
 
     const [first, second] = await Promise.all([
       runCurrentHealthScan("org1"),
@@ -1238,6 +1329,66 @@ describe("intentional stop", () => {
 // ─── Gate 3: an unreachable box ──────────────────────────────────────────────
 
 describe("unreachable server", () => {
+  it("keeps remote health unknown while the desktop is offline without opening server incidents", async () => {
+    h.platformTarget = "desktop";
+    const first = seedApp({ serverId: "remote-a" });
+    seedApp({ serverId: "remote-b" });
+    h.disconnected = true;
+
+    const summary = await tick();
+    expect(summary).toMatchObject({ offline: 2, unreachable: 0, opened: 0, indeterminate: 2 });
+    expect(h.disposed).not.toHaveBeenCalled();
+    expect(h.emit).not.toHaveBeenCalled();
+    expect(h.renew).not.toHaveBeenCalled();
+    const { listWorkloadHealthSnapshots } = await import("@repo/platform/engine/modules/monitoring/health-watch");
+    expect(listWorkloadHealthSnapshots("org1").find(row => row.projectId === first.projectId)?.state).toBe("unknown");
+
+    h.disconnected = false;
+    const recovered = await tick();
+    expect(recovered).toMatchObject({ offline: 0, unreachable: 0, opened: 0 });
+    expect(listWorkloadHealthSnapshots("org1").find(row => row.projectId === first.projectId)?.state).toBe("healthy");
+    expect(h.emit).not.toHaveBeenCalled();
+  });
+
+  it("does not blame the server when the desktop disconnects during the SSH request", async () => {
+    h.platformTarget = "desktop";
+    seedApp({ serverId: "remote-mid-request" });
+    h.disconnectOnList = true;
+    h.listThrows = "Timed out while waiting for handshake";
+
+    expect(await tick()).toMatchObject({ offline: 1, unreachable: 0, opened: 0 });
+    expect(h.disposed).toHaveBeenCalledOnce();
+    expect(h.emit).not.toHaveBeenCalled();
+  });
+
+  it("preserves an existing server incident offline and resolves it only after Docker answers", async () => {
+    h.platformTarget = "desktop";
+    seedApp({ serverId: "remote-recovery" });
+    h.listThrows = "Timed out while waiting for handshake";
+    expect(await tick()).toMatchObject({ unreachable: 1, opened: 1 });
+
+    h.disconnected = true;
+    expect(await tick()).toMatchObject({ offline: 1, resolved: 0 });
+    expect(emitted("server.reachable")).toHaveLength(0);
+
+    h.disconnected = false;
+    // A network interface returning is not proof that the SSH server recovered.
+    expect(await tick()).toMatchObject({ unreachable: 1, resolved: 0 });
+    h.listThrows = null;
+    expect(await tick()).toMatchObject({ unreachable: 0, resolved: 1 });
+    await tick();
+    expect(emitted("server.reachable")).toHaveLength(1);
+  });
+
+  it("reports offline coverage in the current-state scan without incident side effects", async () => {
+    h.platformTarget = "desktop";
+    seedApp({ serverId: "offline-current" });
+    h.disconnected = true;
+    expect((await checkCurrent()).summary).toMatchObject({ offline: 1, indeterminate: 1, unreachable: 0 });
+    expect(h.incidents).toHaveLength(0);
+    expect(h.disposed).not.toHaveBeenCalled();
+  });
+
   it("sends one alert for the box, not one per project, and resolves nothing", async () => {
     const seeds = Array.from({ length: 5 }, () => seedApp({ serverId: "srv9" }));
     // One of them was already down before the box went away.
@@ -1430,7 +1581,7 @@ describe("unreachable server", () => {
     vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"], now: Date.now() });
     let summary: Awaited<ReturnType<typeof tick>>;
     try {
-      const { runHealthWatch } = await import("./health-watch");
+      const { runHealthWatch } = await import("@repo/platform/engine/modules/monitoring/health-watch");
       const run = runHealthWatch();
       await vi.advanceTimersByTimeAsync(120_000);
       summary = await run;
@@ -1470,7 +1621,7 @@ describe("unreachable server", () => {
     let summary: Awaited<ReturnType<typeof tick>>;
     let atDeadline = 0;
     try {
-      const { runHealthWatch } = await import("./health-watch");
+      const { runHealthWatch } = await import("@repo/platform/engine/modules/monitoring/health-watch");
       const run = runHealthWatch();
       await vi.advanceTimersByTimeAsync(120_000);
       summary = await run;
@@ -1508,7 +1659,7 @@ describe("unreachable server", () => {
     vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"], now: Date.now() });
     let summary: Awaited<ReturnType<typeof tick>>;
     try {
-      const { runHealthWatch } = await import("./health-watch");
+      const { runHealthWatch } = await import("@repo/platform/engine/modules/monitoring/health-watch");
       const run = runHealthWatch();
       await vi.advanceTimersByTimeAsync(120_000);
       summary = await run;
@@ -1993,7 +2144,7 @@ describe("filtered run", () => {
     // The accelerator parses keys the sweep built, and container-events.test.ts
     // mirrors this pair to stay off the sweep's module graph. Both rely on the
     // round-trip holding — including for the local daemon, whose id is null.
-    const { watchGroupKey, parseWatchGroupKey } = await import("./health-watch");
+    const { watchGroupKey, parseWatchGroupKey } = await import("@repo/platform/engine/modules/monitoring/health-watch");
     for (const serverId of ["srv1", null]) {
       expect(parseWatchGroupKey(watchGroupKey(serverId, "org1"))).toEqual({
         serverId,

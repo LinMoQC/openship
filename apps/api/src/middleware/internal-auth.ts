@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import type { Context, Next } from "hono";
-import { env } from "../config";
+import { env } from "@repo/platform/engine/config/index";
 import { isLoopbackRequest, peerAddress } from "./loopback-peer";
 
 /**

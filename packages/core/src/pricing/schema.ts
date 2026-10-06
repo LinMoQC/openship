@@ -1,4 +1,4 @@
-import { z } from "zod";
+import * as z from "zod";
 import { WORKLOAD_TYPES } from "../deployment-class";
 import { RESOURCE_TIER_ORDER } from "../resources";
 
@@ -29,29 +29,17 @@ export const MAX_SUPPORTED_PRICING_SCHEMA = 1;
 
 /** A limit that may be "unlimited" (null). Non-negative integers only. */
 const limitNumber = z.number().int().nonnegative().nullable();
+const namespaceLimit = z.number().int().min(0).max(1_000_000_000).nullable();
 
-/**
- * Limits are stated in the units a CUSTOMER can act on, and the Oblien ceilings
- * are derived from them (`toOblienLimits`) rather than authored separately.
- *
- * That direction is deliberate. Oblien's `resource_limits` are
- * `{max_workspaces, max_vcpus, max_ram_mb, max_disk_gb}`, and three of those four
- * are PER-WORKSPACE caps — only `max_workspaces` is namespace-wide. Authoring
- * them directly produced a catalog that read as a pool ("Pro: 16 vCPU") while
- * permitting 16 × 10 = 160 vCPU, and whose numbers matched nothing the deploy
- * wizard could actually select. Deriving instead means the published number and
- * the enforced number cannot drift, and the transient BUILD workspace is
- * accounted for by construction instead of 409-ing the free tier.
- */
-const planLimitsSchema = z.object({
+/** App-level customer rules. Oblien's VM policy is declared separately below. */
+export const planLimitsSchema = z.object({
   /** Which deployment workloads the tier may run. Free ships `["static"]`. */
   workloads: z.array(z.enum(WORKLOAD_TYPES)).min(1),
   /** May the tier run multi-service stacks — Compose, catalog apps, managed DBs? */
   services: z.boolean(),
   /**
-   * Concurrently running services — one Oblien workspace each. This is the
-   * ceiling customers feel: an app + Postgres + Redis is 3, a static site is 0
-   * at rest. Drives `max_workspaces` (plus build headroom).
+   * Concurrent services across projects. Compose services share a workspace;
+   * this app-level rule is independent of Oblien's workspace count.
    */
   runningServices: limitNumber,
   /** Projects (project groups). Oblien has no project concept — Openship gates it. */
@@ -63,29 +51,15 @@ const planLimitsSchema = z.object({
    * `null` = uncapped (enterprise).
    */
   maxResourceTier: z.enum(RESOURCE_TIER_ORDER).nullable(),
-  /**
-   * App runtime included per month, in COMPUTE MINUTES — one minute of a `low`
-   * machine. Bigger machines burn proportionally more (`computeUnitsPerMinute`:
-   * medium 2×, high 4×, xlarge 8×), so one published number covers every size
-   * without quoting a separate allowance per tier of machine.
-   *
-   * This replaced an authored `credits` blob whose numbers meant nothing: 60,000
-   * credits against a 43,200-minute month, on a tier advertising 50 running
-   * services — i.e. not enough to run ONE app around the clock. The unit now has
-   * a definition, and `planMonthlyCredits()` derives the Oblien grant from it.
-   *
-   * `runningServices` is a CONCURRENCY cap, this is the METER. A tier may allow
-   * more always-on apps than its minutes cover; that is what "up to" means and is
-   * how metered compute works everywhere.
-   *
-   * 0 is meaningful and correct for a static-only tier: the edge serves static
-   * sites, `runningServices` is already 0, so no app compute is consumed.
-   */
+  /** Legacy display field. Paid offers leave it null: metered credits do not
+   * imply a fixed number of runtime minutes. It never determines a credit grant. */
   computeMinutesPerMonth: limitNumber,
   buildMinutesPerMonth: limitNumber,
   freeSubdomains: limitNumber,
-  customDomains: limitNumber,
-  seats: limitNumber,
+  // No finite admission gates exist for these fields yet. Do not sell a limit
+  // that the application cannot enforce; current offers leave both uncapped.
+  customDomains: z.null(),
+  seats: z.null(),
 });
 
 const planSchema = z.object({
@@ -95,6 +69,29 @@ const planSchema = z.object({
     monthly: z.number().int().nonnegative().nullable(),
     annual: z.number().int().nonnegative().nullable(),
   }),
+  /** Oblien namespace allowance, independent of the USD price and product copy. */
+  billing: z
+    .object({
+      creditsPerCycle: z.number().int().min(0).max(1_000_000_000).nullable(),
+      yearlyCreditsPerCycle: z.number().int().min(1).max(1_000_000_000).nullable(),
+      overdraft: z.number().int().min(0).max(1_000_000_000),
+      suspendThreshold: z.number().int().min(0).max(1_000_000_000),
+      onOverdraftAction: z.enum(["block", "stop_workspaces"]),
+      /** Declarative namespace policy. null inherits Oblien capacity; only
+       * max_workspaces is a namespace-wide count. Other fields cap one VM. */
+      resourceLimits: z.object({
+        max_workspaces: namespaceLimit,
+        max_vcpus: namespaceLimit,
+        max_ram_mb: namespaceLimit,
+        max_disk_gb: namespaceLimit,
+      }).strict(),
+      checkoutName: z.string().min(1).max(120).optional(),
+      checkoutDescription: z.string().min(1).max(500).optional(),
+    })
+    .refine(
+      (value) => value.suspendThreshold >= value.overdraft,
+      "suspendThreshold must be at least overdraft",
+    ),
   stripePriceEnv: z.object({
     monthly: z.string().min(1).nullable(),
     annual: z.string().min(1).nullable(),
@@ -184,24 +181,8 @@ export const pricingCatalogSchema = z
       enabled: z.boolean(),
       monthsFree: z.number().int().nonnegative(),
     }),
-    /**
-     * How customer-facing limits translate into Oblien's per-namespace ceilings.
-     *
-     * `buildResources` MIRRORS `DEFAULT_BUILD_RESOURCE_CONFIG` in adapters — a
-     * build runs in its own Oblien workspace, and since `max_vcpus`/`max_ram_mb`/
-     * `max_disk_gb` are per-workspace caps, a tier whose ceiling sits below the
-     * build machine cannot build AT ALL (Oblien 409s the create). That is not
-     * hypothetical: free published 2 vCPU / 2 GB against a 4 vCPU / 8 GB build,
-     * so the one workload free is allowed to run would have failed the moment
-     * ceilings went live. The mirror is asserted by test.
-     *
-     * `buildWorkspaceHeadroom` is how many transient build workspaces a tier may
-     * hold ON TOP of its running services, because Oblien counts build
-     * workspaces in `max_workspaces` too. Without it a free user with one
-     * service could never deploy — the build would have nowhere to go.
-     */
+    /** Actual build-machine requests, independent of namespace policy. */
     oblien: z.object({
-      buildWorkspaceHeadroom: z.number().int().nonnegative(),
       buildResources: z.object({
         cpuCores: z.number().positive(),
         memoryMb: z.number().int().positive(),
@@ -254,15 +235,31 @@ export const pricingCatalogSchema = z
       if (plan.inherits === plan.id) {
         ctx.addIssue({ code: "custom", path: ["plans", i, "inherits"], message: `plan "${plan.id}" inherits itself` });
       }
-      // A purchasable price with no Stripe env name can never reach checkout;
-      // an env name with no price would render a free-looking paid tier.
+      // Namespace offers use dynamic provider prices; no Stripe price ID is needed.
       const monthlyPurchasable = plan.price.monthly !== null && plan.price.monthly > 0;
-      if (monthlyPurchasable && !plan.stripePriceEnv.monthly) {
-        ctx.addIssue({ code: "custom", path: ["plans", i, "stripePriceEnv", "monthly"], message: `plan "${plan.id}" has a monthly price but no Stripe price env name` });
+      if (monthlyPurchasable && !plan.billing.creditsPerCycle) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["plans", i, "billing", "creditsPerCycle"],
+          message: `plan "${plan.id}" needs a finite positive namespace allowance`,
+        });
       }
       const annualPurchasable = plan.price.annual !== null && plan.price.annual > 0;
-      if (annualPurchasable && !plan.stripePriceEnv.annual) {
-        ctx.addIssue({ code: "custom", path: ["plans", i, "stripePriceEnv", "annual"], message: `plan "${plan.id}" has an annual price but no Stripe price env name` });
+      if (annualPurchasable && !plan.billing.yearlyCreditsPerCycle) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["plans", i, "billing", "yearlyCreditsPerCycle"],
+          message: `plan "${plan.id}" needs an explicit annual namespace allowance`,
+        });
+      }
+      for (const amount of [plan.price.monthly, plan.price.annual]) {
+        if (amount !== null && amount !== 0 && (amount < 100 || amount > 1_000_000)) {
+          ctx.addIssue({
+            code: "custom",
+            path: ["plans", i, "price"],
+            message: "Hosted offers require USD cents between 100 and 1000000",
+          });
+        }
       }
       // "Contact sales" and "has a price" are mutually exclusive: the UI keys
       // its whole CTA off which one is set.

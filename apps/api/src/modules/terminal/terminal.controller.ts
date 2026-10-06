@@ -28,9 +28,10 @@
  */
 
 import type { Context } from "hono";
-import { sshManager } from "../../lib/ssh-manager";
-import { auth } from "../../lib/auth";
-import { trustedOrigins } from "../../config/env";
+import { randomUUID } from "node:crypto";
+import { sshManager } from "@repo/platform/engine/lib/ssh-manager";
+import { auth } from "@repo/platform/engine/lib/auth";
+import { trustedOrigins } from "@repo/platform/engine/config/env";
 import { upgradeWebSocket } from "../../lib/ws";
 import { repos } from "@repo/db";
 import type { ShellSession } from "@repo/adapters";
@@ -352,7 +353,8 @@ function buildHandlers(ctx: HandshakeCtx) {
       // ── RESUME path ──────────────────────────────────────────────
       if (ctx.resumeToken) {
         const existing = getSessionByResumeToken(ctx.resumeToken, ctx.userId);
-        if (!existing) {
+        // The handshake authorized this server, not every session the user owns.
+        if (!existing || existing.serverId !== ctx.serverId) {
           // Token doesn't match a live session (expired, idle/cap
           // fired, server restarted, or wrong user). Tell the client
           // so it can drop the stale token from localStorage and try
@@ -450,7 +452,7 @@ function buildHandlers(ctx: HandshakeCtx) {
 
       state.sessionId = auditId;
 
-      const sessionId = auditId ?? `transient-${Date.now()}`;
+      const sessionId = auditId ?? `transient-${randomUUID()}`;
       const session = registerSession({
         sessionId,
         userId: ctx.userId,
@@ -464,6 +466,25 @@ function buildHandlers(ctx: HandshakeCtx) {
         },
       });
       state.sessionId = sessionId;
+
+      // The WS can go away while we await the SSH channel and the audit-row
+      // insert — @hono/node-ws registers its 'close' listener as soon as this
+      // async onOpen suspends, so onClose runs against a state that has no
+      // sessionId yet. The client never received `ready`, so it holds no
+      // resumeToken and can never reattach: parking would strand the shell and
+      // leave the audit row open forever, permanently burning a slot in the
+      // per-user cap (which counts rows with endedAt IS NULL).
+      if (state.closed) {
+        unregisterSession(sessionId);
+        await teardown(
+          state,
+          "client_close",
+          null,
+          /* alreadyUnregistered */ true,
+          /* forceClose */ true,
+        );
+        return;
+      }
 
       // Pipe remote stdout/stderr → ws via the session manager's
       // dispatcher. The dispatcher drops bytes while the session is
@@ -620,8 +641,15 @@ export async function teardown(
     state.heartbeatTimer = null;
   }
 
+  // No session registered yet: onOpen is still awaiting the SSH channel /
+  // audit-row insert and owns the lifecycle of what it is about to create.
+  // Marking this connection `ended` here would make onOpen's abort check —
+  // and any later idle/cap timeout — a no-op, orphaning the audit row. Leave
+  // `closed` set: that is the flag onOpen reads to abort.
+  if (!state.sessionId) return;
+
   // PARK path - keep the shell + audit row alive for resume.
-  if (!forceClose && state.sessionId) {
+  if (!forceClose) {
     parkSession(state.sessionId);
     return;
   }

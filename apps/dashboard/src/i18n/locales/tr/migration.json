@@ -1,5 +1,10 @@
 {
   "wizard": {
+    "edgeReview": {
+      "detected": "Kaynak sunucuda {proxy} algılandı",
+      "handoff": "Aşağıda eşleştirilen alan adlarını inceleyin. Taşıma, hedef sunucunun yönlendirmesini kurar ve mevcut bir proxy değiştirilecekse onayınızı ister.",
+      "warnings": "{count} keşif bildirimini inceleyin"
+    },
     "title": "Uygulamaları taşı",
     "intro": "Bu sunucunun Docker yapısını inceleyin ve konteynerlerini bir Openship projesine aktarın. İnceleme salt okunurdur — siz dağıtım yapana kadar sunucuda hiçbir şey değişmez.",
     "selectServer": "Bir sunucu seçin",

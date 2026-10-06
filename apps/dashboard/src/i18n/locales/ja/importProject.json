@@ -105,7 +105,12 @@
     "modeWorker": "ワーカー",
     "modeStatic": "静的",
     "workerModeDesc": "ポートや公開URLを持たず継続的に実行 — キューコンシューマー、cron、ボットなど。",
-    "buildSettingsTitle": "ビルド設定"
+    "buildSettingsTitle": "ビルド設定",
+    "releaseTitle": "有効化前",
+    "releaseDescription": "ビルド後に実行する任意のコマンドです。失敗するとデプロイを停止します。Docker・Bareアプリのみ対応。",
+    "releaseCommand": "コマンド {number}",
+    "addReleaseCommand": "コマンドを追加",
+    "removeReleaseCommand": "コマンド {number} を削除"
   },
   "projectSettings": {
     "framework": "フレームワーク",
@@ -123,6 +128,7 @@
     "noneSet": "未設定",
     "pasteEnv": ".env を貼り付け",
     "uploadEnv": ".env をアップロード",
+    "downloadEnv": ".env をダウンロード",
     "edit": "編集",
     "cancel": "キャンセル",
     "saving": "保存中...",
@@ -144,6 +150,7 @@
       "interpolated": "補間済み"
     },
     "toast": {
+      "downloadFailed": "環境変数をダウンロードできませんでした。",
       "title": "環境変数",
       "added": "{count} 件追加",
       "updated": "{count} 件更新",
@@ -205,9 +212,9 @@
       "volumes": "ボリューム",
       "statefulWarnPart1": "クラウド上のステートフルサービス: データはワークスペースの永続ディスクに保存され（再起動後も保持されます）が、",
       "statefulWarnBold": "リビルド間では引き継がれません",
-      "statefulWarnPart2": "（バックアップが有効な場合を除く）。Docker のボリュームマウントは適用されません。",
+      "statefulWarnPart2": "。ワークスペースを置き換える前に、データのバックアップと復元を明示的に行ってください。",
       "volumeHint": "名前付きボリュームまたはホストパス → コンテナパス。",
-      "volumeCloudNote": "クラウドではこれらのマウントは適用されません — データはワークスペースのディスクに保持されます（バックアップなしではリビルド間で保持されません）。",
+      "volumeCloudNote": "Openship Cloud は永続ボリュームのマウントに対応していません。ボリュームが必要なワークロードにはサーバーを選択してください。",
       "sourcePlaceholder": "ソース",
       "containerPathPlaceholder": "コンテナパス",
       "readOnlyMount": "読み取り専用マウント",
@@ -315,7 +322,7 @@
       "successful": "デプロイに成功しました",
       "deploying": "デプロイ中..."
     },
-    "visitSite": "サイトを開く",
+    "openSite": "サイトを開く",
     "warningTitle": "デプロイは完了しましたが、一部のサービスに対応が必要です。",
     "productionLogs": "本番ログ",
     "buildTerminal": "ビルドターミナル",
@@ -325,7 +332,7 @@
     "stopDeployment": "デプロイを停止",
     "redeploy": "再デプロイ",
     "goToProject": "プロジェクトへ移動",
-    "openDashboard": "ダッシュボードを開く",
+    "openProject": "プロジェクトを開く",
     "edit": "編集",
     "status": {
       "cancelled": "キャンセル済み",

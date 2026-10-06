@@ -26,7 +26,6 @@
     "staticOnly": "Nur statische Websites – SSG, SPA und reines HTML",
     "anyWorkload": "Beliebige Workloads – Container, Compose, Worker, Postgres, Redis",
     "runningServices": "{runningServices} laufende Apps, Datenbanken oder Worker",
-    "computeMinutes": "{computeMinutes} Compute-Minuten pro Monat",
     "buildMinutes": "{buildMinutes} Build-Minuten pro Monat",
     "power": "Bis zu {powerCpu} vCPU und {powerRamGb} GB RAM pro App",
     "projects": "{maxProjects} Projekte",
@@ -60,9 +59,9 @@
     "cta": "Self-Hosting starten"
   },
   "creditPacks": {
-    "pack_5k": "{computeMinutes} Compute-Minuten",
-    "pack_25k": "{computeMinutes} Compute-Minuten",
-    "pack_100k": "{computeMinutes} Compute-Minuten"
+    "pack_5k": "{credits} Credits",
+    "pack_25k": "{credits} Credits",
+    "pack_100k": "{credits} Credits"
   },
   "ui": {
     "perMonth": "/Mon.",
@@ -80,6 +79,6 @@
     "campaignEnds": "Angebot endet am {date}",
     "wasPrice": "vorher {price}",
     "standardTitle": "In jedem Plan enthalten",
-    "creditPackNote": "≈ {appHours} Stunden einer kleinen App oder {buildMinutes} Build-Minuten"
+    "creditPackNote": "Für gemessene Cloud-Nutzung; die Laufzeit hängt von Ihrer Arbeitslast ab."
   }
 }

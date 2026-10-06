@@ -1,5 +1,7 @@
 "use client";
 
+import { Icon as UiIcon } from "@repo/ui/icons";
+
 /**
  * The mail console — the whole of /emails, and Openship Mail's home page.
  *
@@ -17,7 +19,6 @@
 
 import { Suspense, useState, useEffect, useCallback, useRef } from "react";
 import { useSearchParams, useRouter, usePathname } from "next/navigation";
-import { Loader2, ArrowLeft, Plus } from "lucide-react";
 import {
   mailApi,
   mailAdminApi,
@@ -65,7 +66,7 @@ export function MailConsole() {
     <Suspense
       fallback={
         <PageContainer>
-          <div className="size-6 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent" />
+          <UiIcon name="spinner" className="size-6 animate-spin text-muted-foreground" />
         </PageContainer>
       }
     >
@@ -900,7 +901,7 @@ function MailConsoleInner() {
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-screen">
-        <Loader2 className="size-5 animate-spin text-muted-foreground" />
+        <UiIcon name="spinner" className="size-5 animate-spin text-muted-foreground" />
       </div>
     );
   }
@@ -908,8 +909,8 @@ function MailConsoleInner() {
   return (
     <PageContainer>
         {/* Header */}
-        <div className="flex items-center justify-between mb-6">
-          <div className="flex items-center gap-3">
+        <div className="flex items-center justify-between gap-3 mb-6">
+          <div className="flex min-w-0 items-center gap-3">
             {/* One slot, two meanings: cancelling a forced re-run returns to the
                 panel it was launched from, which takes precedence over the
                 list-level back (the operator's last step was opening this form). */}
@@ -917,30 +918,30 @@ function MailConsoleInner() {
               <button
                 type="button"
                 onClick={() => setServerInUrl(selectedServer!.id)}
-                className="flex size-9 items-center justify-center rounded-xl border border-border/60 bg-card text-muted-foreground transition-colors hover:text-foreground"
+                className="flex shrink-0 size-9 items-center justify-center rounded-xl border border-border/60 bg-card text-muted-foreground transition-colors hover:text-foreground"
                 title={t.emails.page.backToAdmin}
               >
-                <ArrowLeft className="size-4 rtl:rotate-180" />
+                <UiIcon name="arrow-left" className="size-4 rtl:rotate-180" />
               </button>
             ) : canGoBack ? (
               <button
                 type="button"
                 onClick={handleBack}
-                className="flex size-9 items-center justify-center rounded-xl border border-border/60 bg-card text-muted-foreground transition-colors hover:text-foreground"
+                className="flex shrink-0 size-9 items-center justify-center rounded-xl border border-border/60 bg-card text-muted-foreground transition-colors hover:text-foreground"
                 title={t.emails.page.backToServers}
               >
-                <ArrowLeft className="size-4 rtl:rotate-180" />
+                <UiIcon name="arrow-left" className="size-4 rtl:rotate-180" />
               </button>
             ) : null}
             <div className="min-w-0">
               <h1
-                className="text-2xl font-medium text-foreground/80"
+                className="truncate text-2xl font-medium text-foreground/80"
                 style={{ letterSpacing: "-0.2px" }}
               >
                 {headerTitle}
               </h1>
               {headerSubtitle && (
-                <p className="text-sm text-muted-foreground/70 mt-1 max-w-2xl">
+                <p className="truncate text-sm text-muted-foreground/70 mt-1 max-w-2xl">
                   {headerSubtitle}
                 </p>
               )}
@@ -949,16 +950,21 @@ function MailConsoleInner() {
 
           {/* Add-server action while viewing a server (add a 2nd, etc.).
               The list view has its own Add button; the setup/progress views
-              are already the add flow. */}
+              are already the add flow. `whitespace-nowrap` + `shrink-0` keep
+              this on one line - it used to wrap onto 3 lines once the title
+              block above squeezed it for space on a narrow viewport. Label
+              text drops below `sm` so the button stays icon-only there
+              instead of fighting the title for room. */}
           {showAdmin && (
             <button
               type="button"
               onClick={handleAddNew}
-              className="inline-flex items-center gap-1.5 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
+              aria-label={t.emails.page.addServer}
+              className="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
               title={t.emails.page.addServer}
             >
-              <Plus className="size-4" />
-              {t.emails.page.addServer}
+              <UiIcon name="plus" className="size-4 shrink-0" />
+              <span className="hidden sm:inline">{t.emails.page.addServer}</span>
             </button>
           )}
         </div>

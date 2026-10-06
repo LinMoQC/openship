@@ -19,7 +19,14 @@ import type { ImportedSite, ProxyScanResult } from "../../types";
 import { EDGE_HOST_PATHS, OPENRESTY_DEFAULT_PATHS } from "../../../infra/openresty-lua";
 import { containerCommand } from "../../edge-container-executor";
 import { detectEdgeContainer, resolveOurEdgeContainer } from "../detect";
-import { collapseByHost, extractBlocks, stripComments, tryExec } from "./parse-utils";
+import {
+  collapseByHost,
+  extractBlocks,
+  firstDirective,
+  locationBlocks,
+  stripComments,
+  tryExec,
+} from "./parse-utils";
 
 /**
  * The fully-resolved config dump from the first of `bins` that yields one. `-T`
@@ -79,11 +86,6 @@ async function loadNginxConfig(executor: CommandExecutor): Promise<string> {
   return cat ?? "";
 }
 
-function firstDirective(body: string, name: string): string | undefined {
-  const m = body.match(new RegExp(`(?:^|[;{\\s])${name}\\s+([^;]+);`));
-  return m?.[1]?.trim();
-}
-
 /** Parse `upstream <name> { server <host:port>; ... }` → every declared target. */
 function parseUpstreams(config: string): Map<string, string[]> {
   const map = new Map<string, string[]>();
@@ -105,14 +107,15 @@ const HTTP_PROXY_TARGET_RE = /^(https?:\/\/)([^/?#]+)([/?#].*)?$/i;
 /**
  * Turn a raw proxy_pass value into a concrete Openship route target, or reject
  * it (so the caller warns and skips) when it can't be resolved to a real
- * host:port — an unknown/undeclared upstream, an nginx variable, or a unix
- * socket would otherwise produce a vhost that fails `openresty -t`.
+ * host:port — an unknown/undeclared upstream or an nginx variable would
+ * otherwise produce a vhost that fails `openresty -t`, and a unix socket one
+ * that passes it but points at a path the edge can't reach.
  */
 function resolveProxyTarget(
   proxyPass: string,
   upstreams: Map<string, string[]>,
   opts: { allowVariablesAfterAuthority?: boolean } = {},
-): { url: string } | { reason: string } {
+): { url: string } | { reason: string; unixSocket?: true } {
   const raw = proxyPass.replace(/;$/, "").trim();
   const parsed = raw.match(HTTP_PROXY_TARGET_RE);
   if (raw.includes("$")) {
@@ -124,14 +127,24 @@ function resolveProxyTarget(
       return { reason: `proxy_pass "${raw}" uses an nginx variable` };
     }
   }
-  if (/\/\/unix:/i.test(raw)) return { reason: `proxy_pass "${raw}" targets a unix socket` };
+  if (/\/\/unix:/i.test(raw)) {
+    return { reason: `proxy_pass "${raw}" targets a unix socket`, unixSocket: true };
+  }
   const m = parsed;
   if (!m) return { reason: `unrecognized proxy_pass "${raw}"` };
   const scheme = m[1];
   const authority = m[2];
   const host = authority.replace(/:\d+$/, "");
   const declaredUpstream = upstreams.get(authority);
-  if (declaredUpstream?.[0]) return { url: `${scheme}${declaredUpstream[0]}` };
+  if (declaredUpstream?.[0]) {
+    if (/^unix:/i.test(declaredUpstream[0])) {
+      return {
+        reason: `proxy_pass "${raw}" resolves to upstream "${authority}", a unix socket`,
+        unixSocket: true,
+      };
+    }
+    return { url: `${scheme}${declaredUpstream[0]}` };
+  }
   const isIp = /^\d{1,3}(\.\d{1,3}){3}$/.test(host);
   // `localhost` is NOT safe to carry over verbatim: nginx resolves it to ::1
   // first, and most app servers bind IPv4 only — so an adopted
@@ -165,10 +178,7 @@ function strictLoopbackUpstreamPorts(config: string): Set<number> {
     const raw = match[1]?.trim();
     if (!raw) continue;
     const resolved = resolveProxyTarget(raw, upstreams, { allowVariablesAfterAuthority: true });
-    if ("reason" in resolved) {
-      // Unix sockets never consume a TCP port and therefore cannot collide with
-      // Docker's loopback publishing. Every other unresolved target is unknown.
-      if (/\/\/unix:/i.test(raw)) continue;
+    if ("reason" in resolved && !resolved.unixSocket) {
       throw new Error(`Cannot inventory Openship edge routes: ${resolved.reason}`);
     }
 
@@ -182,9 +192,13 @@ function strictLoopbackUpstreamPorts(config: string): Set<number> {
     const targets =
       authority && scheme && upstreams.has(authority)
         ? upstreams.get(authority)!.map((target) => `${scheme}${target}`)
-        : [resolved.url];
+        : "url" in resolved ? [resolved.url] : [];
 
     for (const target of targets) {
+      // Sockets cannot consume a TCP port. A named group can mix sockets and
+      // TCP backends, so keep inspecting its other members even when migration
+      // refused the group's first (socket) target.
+      if (/^https?:\/\/unix:/i.test(target)) continue;
       let url: URL;
       try {
         url = new URL(target);
@@ -210,31 +224,6 @@ function parseStrictEdgeConfig(raw: string): ProxyScanResult & {
     ...parseNginxConfig(raw),
     loopbackUpstreamPorts: strictLoopbackUpstreamPorts(raw),
   };
-}
-
-/**
- * Every `location <path> { … }` in a server block with its body, in source order.
- * Balanced-brace matched so a nested `if {}` / `types {}` inside a location doesn't
- * truncate it.
- */
-function locationBlocks(serverBody: string): { path: string; body: string }[] {
-  const out: { path: string; body: string }[] = [];
-  const re = /(?:^|[\s;}])location\s+([^{]+?)\s*\{/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(serverBody)) !== null) {
-    const path = m[1].trim();
-    const openIdx = m.index + m[0].length - 1; // the `{`
-    let depth = 1;
-    let i = openIdx + 1;
-    for (; i < serverBody.length && depth > 0; i++) {
-      if (serverBody[i] === "{") depth++;
-      else if (serverBody[i] === "}") depth--;
-    }
-    if (depth !== 0) break; // unbalanced — stop
-    out.push({ path, body: serverBody.slice(openIdx + 1, i - 1) });
-    re.lastIndex = i;
-  }
-  return out;
 }
 
 /**

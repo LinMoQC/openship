@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { Value } from "@sinclair/typebox/value";
-import { CreateProjectBody, EnsureProjectBody, UpdateProjectBody } from "./project.schema";
+import { CreateProjectBody, EnsureProjectBody, UpdateProjectBody } from "@repo/contracts";
 
 /**
  * Mass-assignment guard: `updateProject` builds its DB patch ONLY from the keys

@@ -244,24 +244,26 @@
   },
   "backup": {
     "live": {
-      "title": "Copia de seguridad en vivo",
+      "title": "Actividad de copias",
       "description": "Progreso en tiempo real de la ejecución que acabas de iniciar. Se mantiene al recargar la página.",
       "dismiss": "Descartar"
     },
     "destinations": {
       "title": "Destinos de copia de seguridad",
-      "description": "Destinos de almacenamiento por usuario. Añade buckets compatibles con S3, servidores SFTP o discos locales.",
+      "description": "Almacenamiento disponible para este proyecto.",
       "manage": "Administrar",
       "loading": "Cargando…",
       "emptyPrefix": "Aún no hay destinos. ",
       "emptyLink": "Crea uno",
       "emptySuffix": " para empezar a hacer copias de seguridad.",
       "verified": "Verificado",
-      "failed": "Fallido"
+      "failed": "Fallido",
+      "emptyHint": "Conecta un bucket S3, un servidor SFTP o un servidor que ya uses.",
+      "inUse": "En uso"
     },
     "services": {
-      "title": "Servicios y políticas",
-      "description": "Cada servicio puede tener su propia política de copia de seguridad (programación + destino). Los valores predeterminados a nivel de proyecto llegan en el Chunk 2.",
+      "title": "Políticas de copia de seguridad",
+      "description": "Elige qué guardar, cuándo hacerlo y dónde almacenarlo.",
       "refresh": "Actualizar",
       "empty": "Este proyecto aún no tiene servicios. Las copias de seguridad a nivel de servicio aparecerán aquí una vez que añadas algunos.",
       "policyLabel": "Política:",
@@ -273,22 +275,54 @@
       "editPolicy": "Editar política",
       "addDestinationFirst": "Añade primero un destino",
       "createPolicyHint": "Crea una política de copia de seguridad para este servicio",
-      "createPolicy": "Crear política"
+      "createPolicy": "Crear política",
+      "projectHint": "Una política para todos los servicios de este proyecto.",
+      "includedInProject": "Incluido en la política del proyecto.",
+      "retainCount": "Conservar {count} copias",
+      "retainDays": "Hasta {days} días"
     },
     "recent": {
+      "loadOlder": "Cargar copias de seguridad anteriores",
       "title": "Copias de seguridad recientes",
-      "description": "Las 25 ejecuciones más recientes de todos los servicios de este proyecto.",
+      "description": "Copias recientes, sus resultados y opciones de restauración.",
       "loading": "Cargando…",
       "empty": "Aún no hay copias de seguridad.",
       "protectedTitle": "Protegido de la limpieza por retención",
       "protected": "Protegido",
       "restoreTitle": "Restaurar desde esta copia de seguridad",
       "allowPrune": "Permitir que la retención la limpie",
-      "protectFrom": "Proteger de la retención"
+      "protectFrom": "Proteger de la retención",
+      "emptyHint": "Crea una política y ejecuta aquí tu primera copia.",
+      "backup": "Copia",
+      "viewDetails": "Ver detalles",
+      "restore": "Restaurar",
+      "triggers": {
+        "manual": "A petición",
+        "cron": "Programada",
+        "webhook": "Webhook",
+        "pre_deploy": "Antes del despliegue"
+      }
     },
     "toast": {
       "runFailed": "La ejecución de la copia de seguridad falló",
       "toggleProtectionFailed": "No se pudo cambiar la protección"
+    },
+    "overview": {
+      "description": "Programa copias de seguridad y restaura los datos de tu proyecto.",
+      "lastBackup": "Última copia completada",
+      "noRecentBackup": "Sin copias recientes",
+      "scheduledPolicies": "Políticas programadas",
+      "projectScope": "Todo el proyecto",
+      "serviceBackup": "Copia del servicio",
+      "paused": "En pausa",
+      "loadFailed": "No se pudieron cargar las copias"
+    },
+    "schedule": {
+      "daily": "Cada día a las {time}",
+      "weekly": "Cada {day} a las {time}",
+      "monthly": "Día {day} de cada mes, {time}",
+      "custom": "Horario personalizado",
+      "timezone": "Usa la zona horaria del servidor."
     }
   },
   "build": {
@@ -365,16 +399,16 @@
       "appliesOnDeploy": "Se aplica en el próximo despliegue."
     },
     "env": {
-      "title": "Variables de entorno",
-      "description": "Cifradas en reposo. Los secretos permanecen enmascarados: solo se escriben los valores que cambies.",
+      "title": "Entorno del proyecto (compilación y ejecución compartida)",
+      "description": "Se usa para compilar imágenes y como entrada compartida en ejecución. Los valores de Compose y del servicio tienen prioridad en ejecución. Los secretos permanecen ocultos.",
       "edit": "Editar"
     }
   },
   "envVars": {
     "cancel": "Cancelar",
     "saveChanges": "Guardar cambios",
-    "title": "Variables de entorno",
-    "description": "Producción. Cifradas en reposo. Los secretos se muestran como establecidos: escribe para reemplazarlos; déjalos en blanco para conservarlos.",
+    "title": "Entorno del proyecto (compilación y ejecución compartida)",
+    "description": "Variables de producción del proyecto. Los secretos permanecen ocultos; deja vacío un secreto guardado para conservarlo. Los valores del servicio tienen prioridad para la misma clave.",
     "empty": "Aún no hay variables de entorno.",
     "keyPlaceholder": "CLAVE",
     "secretPlaceholder": "•••••••• (establecido — escribe para reemplazar)",
@@ -401,7 +435,8 @@
     "linkedTitle": "Integración vinculada",
     "linkedBody": "Este valor proviene de la conexión de {app}. Gestiónalo desde esa app — los cambios aquí no se guardan.",
     "unlink": "Eliminar conexión",
-    "close": "Cerrar"
+    "close": "Cerrar",
+    "applyText": "Guardado. Reinicia para aplicar cambios de ejecución. Vuelve a compilar y desplegar para aplicar valores usados al compilar una imagen."
   },
   "gitInfo": {
     "autoDeploy": "Despliegue automático"
@@ -429,6 +464,7 @@
       "install": "Instalar app de GitHub"
     },
     "webhookBanner": {
+      "summary": "Se requiere un endpoint público",
       "title": "Habilitar despliegue automático",
       "description": "El despliegue automático necesita un endpoint de webhook directo. Expón esta API de Openship en una URL pública o configura un dominio de webhook verificado para la entrega directa."
     },
@@ -468,12 +504,12 @@
       "rebuild": "Reconstruir (git)",
       "instant": "Instantáneo (snapshot)",
       "descRebuild": "Reconstruye el commit anterior, salvo que su imagen siga en el host.",
-      "descInstant": "Guarda la imagen de cada versión, así una restauración nunca reconstruye. Usa más disco.",
+      "descInstant": "Conserva los artefactos dentro del límite del historial. Las versiones más antiguas pueden necesitar reconstruirse.",
       "toggleAria": "Alternar retención de snapshots",
-      "keepNone": "Sin copias extra",
-      "keepCopies": "Una copia por versión",
+      "keepNone": "Reutilizar imágenes o reconstruir",
+      "keepCopies": "Conservar artefactos de reversión",
       "descRebuildFiles": "Reconstruye el commit anterior, salvo que sus archivos sigan en el host.",
-      "descInstantFiles": "Guarda los archivos de cada versión, así una restauración nunca reconstruye. Usa más disco."
+      "descInstantFiles": "Conserva los archivos compilados dentro del límite del historial. Las versiones más antiguas pueden necesitar reconstruirse."
     },
     "rollbackHistory": {
       "title": "Historial de reversiones",
@@ -483,13 +519,17 @@
       "descGit": "Las imágenes recientes se conservan igualmente, así un rollback puede omitir la compilación.",
       "decreaseAria": "Reducir historial de reversiones",
       "increaseAria": "Aumentar historial de reversiones",
-      "sizeEach": "~{size} cada una",
+      "sizeEach": "~{size} por imagen, incluidas las capas compartidas",
       "diskFree": "{size} libres",
       "autoBadge": "ajustado automáticamente",
       "manualBadge": "definido manualmente",
       "kindFiles": "archivos generados en disco",
       "kindImages": "imágenes en el host",
-      "descGitFiles": "Los archivos de las versiones recientes se conservan igualmente, así un rollback puede omitir la compilación."
+      "descGitFiles": "Los archivos de las versiones recientes se conservan igualmente, así un rollback puede omitir la compilación.",
+      "retentionHint": "Conserva los artefactos de los despliegues recientes para volver atrás rápidamente.",
+      "retentionDescription": "Número máximo de versiones anteriores que se conservan. Las versiones activas y fijadas no cuentan para este límite. Se eliminan los artefactos antiguos, pero el historial sigue disponible. Usa 0 para conservar solo las versiones activas y fijadas.",
+      "defaultBadge": "valor predeterminado de la instancia",
+      "loadFailed": "No se pudo cargar la configuración de reversión."
     },
     "commits": {
       "title": "Commits recientes",
@@ -679,12 +719,13 @@
       "active": "Activo",
       "failed": "Fallido",
       "removing": "Eliminando",
-      "pending": "Pendiente"
+      "pending": "Pendiente",
+      "waiting": "En espera"
     },
     "ssl": {
       "includedByHost": "Incluido por el host",
       "active": "Activo",
-      "provisioning": "Aprovisionando",
+      "provisioning": "Esperando certificado",
       "expired": "Caducado",
       "error": "Error",
       "inactive": "Inactivo"
@@ -731,8 +772,8 @@
       "mapsToPort": "Se asigna al puerto",
       "includeWww": "Incluir www",
       "dnsChallenge": "Usar desafío DNS-01",
-      "dnsChallengeDesc": "Emite y renueva el certificado mediante tu proveedor DNS conectado. Úsalo cuando el puerto 80 no sea accesible.",
-      "dnsChallengeWildcardDesc": "Los certificados comodín requieren DNS-01 y un proveedor DNS conectado.",
+      "dnsChallengeDesc": "Verifica mediante un proveedor DNS o un registro TXT temporal. Útil cuando el puerto 80 no está disponible.",
+      "dnsChallengeWildcardDesc": "Obligatorio para HTTPS con comodín. Usa un proveedor DNS conectado o añade un registro TXT temporal durante la configuración de HTTPS.",
       "includeWwwDesc": "También generar registros para www.{domain}",
       "includeWwwFallback": "tudominio.com",
       "adding": "Añadiendo...",
@@ -840,10 +881,28 @@
       "foreignProxyHint": "Otro proxy ocupa 80/443"
     },
     "diagnosis": {
-      "title": "Por qué no funciona",
+      "title": "Detalles del dominio",
       "noneYet": "Aún no se ha ejecutado ninguna comprobación, así que no hay resultado. Añade los registros DNS mostrados y luego pulsa Verificar.",
       "attempts": "{count} intento(s) fallido(s) hasta ahora.",
-      "pillHint": "Ver el motivo"
+      "pillHint": "Ver el motivo",
+      "lastChecked": "Última comprobación:",
+      "nextCheck": "Próxima comprobación programada:",
+      "scheduleHint": "Las comprobaciones se ejecutan mientras esta instancia está conectada. Las tareas en cola pueden retrasar el inicio.",
+      "automaticDisabled": "Las comprobaciones automáticas de dominios están desactivadas. Reintenta manualmente o actívalas en Tareas.",
+      "scheduleUnavailable": "El horario de comprobación automática no está disponible. Puedes reintentar manualmente.",
+      "retryNow": "Reintentar ahora",
+      "checking": "Comprobando…",
+      "reasons": {
+        "verification": "La verificación del dominio no ha terminado. Revisa los registros DNS antes de reintentar.",
+        "certificate": "Hay que comprobar HTTPS en el servidor que aloja el sitio. Se buscará un certificado existente antes de solicitar uno nuevo.",
+        "deployment": "Esta ruta espera un despliegue. Despliega el proyecto para aplicarla.",
+        "disabled": "Este proyecto o servicio está desactivado. Actívalo antes de comprobar la ruta.",
+        "removing": "Este dominio se está eliminando. No hay ninguna verificación programada.",
+        "manual_certificate": "Este dominio usa un certificado subido manualmente. Sube un reemplazo válido y compruébalo. Openship no lo renueva automáticamente.",
+        "managed_certificate": "TLS lo gestiona tu proxy externo u Openship Cloud. Revisa la configuración de ese proveedor.",
+        "route_missing": "Esta ruta configurada aún no se ha aplicado. Reintenta el enrutamiento para aplicarla. No hay reintentos automáticos de enrutamiento programados.",
+        "manual_dns": "Este certificado usa verificación TXT manual. Abre la configuración de HTTPS para confirmar un nuevo registro TXT o elige un proveedor DNS conectado para la renovación automática."
+      }
     },
     "records": {
       "failed": "No se pudieron cargar los registros DNS de este dominio.",
@@ -853,6 +912,51 @@
       "body": "No se encontró ninguna salida de compilación en {path} — revisa tu directorio de salida y vuelve a desplegar.",
       "noIndex": "Hay salida en {path} pero no hay ningún archivo index — las solicitudes devolverán 404. Revisa tu directorio de salida.",
       "notServed": "El proxy respondió HTTP {status} para {path} — esta ruta no se está sirviendo. Revisa tu directorio de salida y la ruta."
+    },
+    "wildcard": {
+      "title": "HTTPS con verificación DNS",
+      "scope": "Un comodín cubre un nivel de subdominios. Añade el dominio base por separado si también debe servir esta aplicación.",
+      "notice": "HTTPS con comodín requiere verificación DNS. Después de guardar, conecta un proveedor DNS o añade el registro TXT de la configuración de HTTPS.",
+      "automatic": "Proveedor automático",
+      "manual": "TXT manual",
+      "automaticHint": "Conecta Cloudflare en Ajustes → DNS para crear las verificaciones del certificado y renovar HTTPS automáticamente.",
+      "manualHint": "Añade un registro TXT temporal en tu proveedor DNS. Cada renovación necesita un registro TXT nuevo; Openship mostrará cuándo debes renovar.",
+      "routing": "1. Apunta el dominio a este servidor",
+      "certificate": "2. Habilita HTTPS",
+      "startAutomatic": "Habilitar HTTPS automáticamente",
+      "startManual": "Obtener registro TXT",
+      "renew": "Renovar certificado",
+      "check": "Comprobar TXT y habilitar HTTPS",
+      "cancel": "Cancelar verificación",
+      "refresh": "Actualizar estado",
+      "close": "Cerrar configuración",
+      "loading": "Cargando la configuración del certificado",
+      "loadFailed": "No se pudo cargar la configuración del certificado. Reintenta para ver su estado actual.",
+      "recordsFailed": "No se pudieron cargar los registros DNS de enrutamiento. La verificación del certificado guardada sigue disponible.",
+      "actionFailed": "No se pudo actualizar la configuración del certificado.",
+      "expires": "Completa esta verificación antes del {date}.",
+      "txtHint": "Añade exactamente este valor TXT. Conserva los demás valores TXT con el mismo nombre. Si tu proveedor añade el nombre de la zona, introduce solo la parte relativa.",
+      "cleanup": "Puedes eliminar el valor TXT de este intento. Conserva todos los demás registros TXT.",
+      "logs": "Registros del certificado",
+      "states": {
+        "preparing": "Preparando la verificación del certificado…",
+        "waiting": "Esperando tu registro TXT",
+        "checking": "Comprobando DNS y la titularidad del certificado…",
+        "installing": "Habilitando HTTPS…",
+        "cancelling": "Cancelando la verificación…",
+        "completed": "HTTPS está listo",
+        "failed": "La configuración del certificado requiere atención",
+        "cancelled": "Verificación cancelada",
+        "expired": "La verificación TXT ha caducado"
+      }
     }
+  },
+  "serviceEnvironment": {
+    "title": "Entorno de ejecución del servicio",
+    "description": "Estas variables solo se aplican a este servicio y sustituyen los valores coincidentes de Compose o del proyecto. Usa Aplicar cambios de entorno para activar los valores guardados.",
+    "overrides": "Estas claves tienen prioridad sobre los valores del proyecto para este servicio: {keys}.",
+    "buildArguments": "Los argumentos de compilación se configuran en el archivo Compose o en la configuración del código fuente y requieren recompilar.",
+    "projectLink": "Editar entorno compartido del proyecto",
+    "loadFailed": "No se pudieron cargar los nombres de las variables del proyecto para comprobar las sustituciones."
   }
 }

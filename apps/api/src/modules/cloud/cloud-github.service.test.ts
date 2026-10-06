@@ -32,29 +32,29 @@ vi.mock("@repo/db", () => ({
     auditEvent: { create: h.audit },
   },
 }));
-vi.mock("../../lib/auth", () => ({
+vi.mock("@repo/platform/engine/lib/auth", () => ({
   auth: { api: {} },
   COOKIE_PREFIX: "openship",
 }));
-vi.mock("../../config/env", () => ({
+vi.mock("@repo/platform/engine/config/env", () => ({
   cloudRuntimeTarget: { api: "https://api.openship.io" },
 }));
-vi.mock("../../lib/org-actor", () => ({
+vi.mock("@repo/platform/engine/lib/org-actor", () => ({
   resolveOrgOwner: vi.fn(),
 }));
-vi.mock("../github/github.auth", () => ({
+vi.mock("@repo/platform/engine/modules/github/github.auth", () => ({
   getInstallUrl: h.getInstallUrl,
   invalidateUserGitHubCache: h.invalidateUser,
   invalidateOrgGitHubCache: h.invalidateOrg,
 }));
-vi.mock("../github/github.installation-verification", () => ({
+vi.mock("@repo/platform/engine/modules/github/github.installation-verification", () => ({
   verifyGitHubInstallationForUser: h.verify,
 }));
 
 import {
   attributeGithubInstall,
   buildOrgScopedInstallUrl,
-} from "./cloud-github.service";
+} from "@repo/platform/engine/modules/cloud/cloud-github.service";
 
 const installation = {
   id: 42,

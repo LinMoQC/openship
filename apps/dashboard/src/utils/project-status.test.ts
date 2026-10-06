@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { DEPLOYMENT_HISTORY_STATUSES, type DeploymentHistoryFilter } from "@repo/core";
 
 import {
   PROJECT_STATUS_META,
@@ -16,6 +17,7 @@ import {
   calculateDeploymentStats,
   filterDeployments,
   getStatusConfig,
+  mapRowToDeployment,
 } from "@/app/(dashboard)/deployments/utils";
 import type { Deployment } from "@/app/(dashboard)/deployments/types";
 
@@ -217,6 +219,13 @@ describe("projectDisplayDomain — only a persisted route", () => {
 });
 
 describe("deployments list — a blocked deploy is visible and counted", () => {
+  it("uses the API's groups for every filter and page statistic", () => {
+    for (const [group, statuses] of Object.entries(DEPLOYMENT_HISTORY_STATUSES)) {
+      const rows = statuses.map((status) => mapRowToDeployment({ id: status, status }));
+      expect(filterDeployments(rows, { status: group as DeploymentHistoryFilter })).toHaveLength(statuses.length);
+      expect(calculateDeploymentStats(rows)[group as DeploymentHistoryFilter]).toBe(statuses.length);
+    }
+  });
   it("gets its own chip instead of falling through to Pending", () => {
     const config = getStatusConfig("action_required");
     expect(config.label).toBe("Action required");

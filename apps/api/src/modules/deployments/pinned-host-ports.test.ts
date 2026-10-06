@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { pickHostPort } from "@repo/adapters";
+import { HostPortClaimConflictError } from "@repo/db";
 import {
   allocateAndReservePinnedHostPort,
   convergeTargetHostPortClaims,
@@ -10,8 +11,8 @@ import {
   prepareTargetPinnedHostPorts,
   releaseNewPinnedHostPortClaims,
   type PinnedHostPort,
-} from "./pinned-host-ports";
-import type { HostPortTargetIdentity } from "../../lib/host-port-target";
+} from "@repo/platform/engine/modules/deployments/pinned-host-ports";
+import type { HostPortTargetIdentity } from "@repo/platform/engine/lib/host-port-target";
 
 const claimRepo = vi.hoisted(() => ({
   reserve: vi.fn(),
@@ -216,6 +217,9 @@ describe("pinnedHostPortsToAvoid", () => {
     const canonicalClaims = [quarantine];
     claimRepo.list.mockImplementation(async (targetKey: string) =>
       targetKey === remoteTarget.targetKey ? canonicalClaims : [],
+    );
+    claimRepo.reserve.mockRejectedValueOnce(
+      new HostPortClaimConflictError("port", remoteTarget.targetKey, 20008),
     );
     claimRepo.replaceQuarantine.mockImplementationOnce(async () => {
       canonicalClaims.splice(0, 1, replacement);

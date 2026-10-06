@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { generateGitHubAppJwt, githubAppFetch } from "./github.app-client";
+import { generateGitHubAppJwt, githubAppFetch } from "@repo/platform/engine/modules/github/github.app-client";
 
 const { privateKey, publicKey } = crypto.generateKeyPairSync("rsa", {
   modulusLength: 2048,

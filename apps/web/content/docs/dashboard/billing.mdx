@@ -4,8 +4,8 @@ description: The Billing area (Openship Cloud only) shows your plan, usage, and 
 ---
 
 <Callout title="Openship Cloud only">
-The Billing area appears only on **Openship Cloud**. A self-hosted install has
-nothing to bill, so the screen doesn't exist there.
+Billing manages **Openship Cloud** resources for the selected organization.
+Self-hosted resources are free; linked installations can manage Cloud billing.
 </Callout>
 
 ## Self-hosted has no billing
@@ -18,20 +18,28 @@ the Billing area simply doesn't appear. You only pay for your own infrastructure
 On Cloud, **Billing** is where you watch usage, change plan, and pull invoices.
 Plans, prices, and per-plan limits are published on the
 [pricing page](/pricing); the header strip on this screen shows how much of your
-plan's credits, bandwidth, build minutes, and capacity you've used in the current
-period.
+plan's credits, build minutes, and capacity you've used in the current period.
+Cloud traffic is measured, but an unknown traffic ceiling is not displayed as
+unlimited. Openship owns plan pricing and limits; each organization's purchased
+terms are kept for renewals.
 
 | Tab | What it does |
 | --- | --- |
 | **Overview** | Current plan, billing period, and credit balance. |
 | **Usage** | Metered usage over the period, charted. |
 | **Plans** | Upgrade or downgrade — starts a Stripe Checkout session. |
-| **Top-ups** | One-shot credit packs (coming to the dashboard). |
+| **Top-ups** | One-shot credits for an existing plan, without changing resource limits. |
 | **Payment Method** | Opens the Stripe portal to manage cards. |
 | **Invoices** | Opens the Stripe portal to download invoices. |
 
 Cancelling from **Plans** flips the subscription to end at the close of the
-period you've already paid for; the organisation then drops back to the free
-tier. Nothing is deleted.
+period you've already paid for; new billable work is then blocked. You can resume
+renewal before that period ends. Cancellation does not delete resources.
+
+Plan replacement starts a new full-price cycle without automatic proration.
+The return page verifies the specific checkout and credit delivery. It shows
+pending, refunded, disputed or failed states instead of inferring success from
+the browser URL. Invoices and payment methods open the selected organization's
+portal, isolated from other customers and the reseller account.
 
 For the endpoints behind this screen, see the [billing API](/docs/api/billing).

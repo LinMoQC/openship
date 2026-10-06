@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { mergeAdvanced } from "../../../src/modules/services/service.service";
+import { mergeAdvanced } from "@repo/platform/engine/modules/services/service.service";
 
 /**
  * `service.advanced` is one JSONB blob holding four independently-owned keys:

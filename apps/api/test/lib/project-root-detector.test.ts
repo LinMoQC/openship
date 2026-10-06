@@ -7,7 +7,7 @@ import {
   parseVercelRootDirectories,
   selectPreferredProjectRoot,
   selectPreferredSingleAppRoot,
-} from "../../src/lib/project-root-detector";
+} from "@repo/platform/engine/lib/project-root-detector";
 
 describe("selectPreferredProjectRoot", () => {
   it("prefers a vercel-configured frontend directory over a root backend package", () => {

@@ -9,7 +9,7 @@ vi.mock("@repo/db", () => ({
   withAdvisoryLock: async (_key: string, run: () => Promise<unknown>) => run(),
 }));
 
-import { withLiveProjectRuntimeMutation, withProjectRuntimeLock } from "./project-runtime-lock";
+import { withLiveProjectRuntimeMutation, withProjectRuntimeLock } from "@repo/platform/engine/lib/project-runtime-lock";
 
 describe("project runtime lock", () => {
   beforeEach(() => {

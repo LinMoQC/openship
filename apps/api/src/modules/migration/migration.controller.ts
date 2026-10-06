@@ -12,7 +12,7 @@ import { repos } from "@repo/db";
 import { safeErrorMessage } from "@repo/core";
 import { getRequestContext } from "../../lib/request-context";
 import { permission } from "../../lib/permission";
-import { parseRevealKeys, pickRevealed } from "../../lib/env-reveal";
+import { parseRevealKeys, pickRevealed } from "@repo/platform/engine/lib/env-reveal";
 import { isControlPlaneProject, isServerInOrg, param } from "../../lib/controller-helpers";
 import { streamRunSSE } from "../../lib/run-sse";
 import { streamSSE } from "../../lib/sse";
@@ -21,13 +21,13 @@ import {
   revealContainerEnv,
   type DiscoveredStack,
   type DiscoveredService,
-} from "./docker-inspect.service";
-import { adoptServerStack, reimportOpenshipProject, parseRepoCompose } from "./migrate.service";
-import { assertProjectMovable, ProjectMoveRefused, type ProjectMoveIntent } from "./project-move";
-import { maskEnv, maskServicesEnv } from "../../lib/secret-env";
-import { buildMigrationPreview } from "./migration-preflight";
-import { migrationOrchestrator } from "./migration.orchestrator";
-import { migrationRunBus } from "./migration.sse";
+} from "@repo/platform/engine/modules/migration/docker-inspect.service";
+import { adoptServerStack, reimportOpenshipProject, parseRepoCompose } from "@repo/platform/engine/modules/migration/migrate.service";
+import { assertProjectMovable, ProjectMoveRefused, type ProjectMoveIntent } from "@repo/platform/engine/modules/migration/project-move";
+import { maskEnv, maskServicesEnv } from "@repo/platform/engine/lib/secret-env";
+import { buildMigrationPreview } from "@repo/platform/engine/modules/migration/migration-preflight";
+import { migrationOrchestrator } from "@repo/platform/engine/modules/migration/migration.orchestrator";
+import { migrationRunBus } from "@repo/platform/engine/modules/migration/migration.sse";
 import {
   sanitizeVolumeStrategies,
   sanitizeSubpaths,
@@ -37,12 +37,12 @@ import {
   sanitizeCustomPaths,
   sanitizeRoutes,
   sanitizeConflictResolution,
-} from "./migration-input";
+} from "@repo/platform/engine/modules/migration/migration-input";
 import {
   getTransferPrefs,
   isValidTransferMode,
   isValidTransferCompression,
-} from "../settings/settings.service";
+} from "@repo/platform/engine/modules/settings/settings.service";
 
 const TERMINAL_MIGRATION = ["succeeded", "failed", "rolled_back"];
 
@@ -113,7 +113,9 @@ export async function repoCompose(c: Context) {
       repo.trim(),
       branch?.trim() || undefined,
     );
-    return c.json({ success: true, services: maskServicesEnv(services) });
+    // Template expressions stay server-side; they may contain secret defaults.
+    const display = services.map(({ environmentTemplates: _templates, ...service }) => service);
+    return c.json({ success: true, services: maskServicesEnv(display) });
   } catch (err) {
     return c.json({ error: `Failed to parse repo compose: ${safeErrorMessage(err)}` }, 502);
   }
@@ -666,7 +668,7 @@ export async function getMigration(c: Context) {
   const safeRun = maskMigrationRunEnv(run);
   return c.json({
     success: true,
-    run: liveLogs ? { ...safeRun, logs: liveLogs } : safeRun,
+    run: { ...safeRun, ...(liveLogs ? { logs: liveLogs } : {}), pendingPrompt: migrationOrchestrator.getPendingPrompt(run.id) },
     progress: migrationOrchestrator.getProgress(run.id),
   });
 }
@@ -741,7 +743,7 @@ export async function streamMigration(c: Context) {
   return streamRunSSE(c, {
     bus: migrationRunBus,
     id,
-    snapshot: { type: "snapshot", run: initial },
+    snapshot: { type: "snapshot", run: { ...maskMigrationRunEnv(initial), pendingPrompt: migrationOrchestrator.getPendingPrompt(id) } },
     terminalComplete: finished
       ? {
           type: "complete",
@@ -791,6 +793,24 @@ export async function cancelMigration(c: Context) {
   const result = await migrationOrchestrator.cancel(param(c, "id"), ctx.organizationId);
   if (!result.ok) return c.json({ error: result.error }, result.status as 400);
   return c.json({ success: true });
+}
+
+/** POST /migration/migrations/:id/respond — answer the current takeover prompt. */
+export async function respondMigration(c: Context) {
+  const ctx = getRequestContext(c);
+  const id = param(c, "id");
+  const run = await repos.dockerMigrationRun.findById(id);
+  if (!run || run.organizationId !== ctx.organizationId || !run.sourceServerId || !run.targetServerId) {
+    return c.json({ error: "Migration not found" }, 404);
+  }
+  const guard = await assertServersWritable(c, run.sourceServerId, run.targetServerId);
+  if (guard instanceof Response) return guard;
+  const body = await c.req.json<{ promptId?: string; action?: string }>();
+  if (typeof body.promptId !== "string" || typeof body.action !== "string") {
+    return c.json({ error: "promptId and action are required" }, 400);
+  }
+  const ok = await migrationOrchestrator.respondToPrompt(id, ctx.organizationId, body.promptId, body.action);
+  return ok ? c.json({ success: true }) : c.json({ error: "This prompt is no longer pending or the action is invalid." }, 409);
 }
 
 /**
@@ -862,7 +882,7 @@ export async function deleteMigration(c: Context) {
  * panel that has to ask for it knows about it only while it happens to be mounted. The project
  * payload carries it now (`readActiveMigration` in the projects module), which is the same
  * field the status pills read, so there is one answer and every surface sees it. Note the
- * gates differ: this route is `server:write` and returns the confirmation token; the project
+ * gates differ: this route is `server:read` and returns the confirmation token; the project
  * payload is `project:read` and returns id/status/mode only.
  */
 export async function getActiveMigration(c: Context) {
@@ -875,5 +895,5 @@ export async function getActiveMigration(c: Context) {
   const runs = await repos.dockerMigrationRun.findActiveForServer(serverId);
   // Org-scope: a run for a server outside this org won't match (IDOR guard).
   const run = runs.find((r) => r.organizationId === ctx.organizationId) ?? null;
-  return c.json({ success: true, run, confirmationToken: run?.confirmationToken ?? null });
+  return c.json({ success: true, run: run ? maskMigrationRunEnv(run) : null, confirmationToken: run?.confirmationToken ?? null });
 }

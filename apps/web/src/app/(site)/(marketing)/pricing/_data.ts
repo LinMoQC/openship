@@ -1,25 +1,12 @@
-import { CUSTOM_TIERS, FREE_TIER, UI, liveCampaigns, paidLadder } from "@/lib/pricing";
+import { UI, paidLadder, type CloudPricing } from "@/lib/pricing";
 
-/**
- * `/pricing`-specific copy. Every number comes from `@/lib/pricing`, which
- * resolves the `@repo/core` catalog — nothing here restates a price.
- *
- * The page and its JSON-LD both call `faq(now)` with the SAME instant (see
- * `renderNow`), so the answers Google indexes are byte-identical to the answers
- * a reader sees — including the prices, which move when a campaign is live.
- *
- * That is also why this is a function rather than the module const it used to
- * be: a const holding a campaign price would be evaluated once per process and
- * could never expire.
- */
 export interface FaqItem {
   q: string;
   a: string;
 }
 
-export function faq(now: Date): FaqItem[] {
-  const ladder = paidLadder(now);
-  const campaigns = liveCampaigns(now);
+export function faq(pricing: CloudPricing): FaqItem[] {
+  const ladder = paidLadder(pricing);
 
   return [
     {
@@ -29,21 +16,13 @@ export function faq(now: Date): FaqItem[] {
     {
       q: "How much does Openship Cloud cost?",
       a: [
-        FREE_TIER ? `The ${FREE_TIER.name} tier costs nothing.` : null,
+        pricing.freeTier ? `The ${pricing.freeTier.name} tier costs nothing.` : null,
         ladder ? `Paid plans are ${ladder}, ${UI.billedMonthly}.` : null,
-        // Quoting discounted prices without saying they are an offer would
-        // misrepresent the regular price, so the campaign is named here too.
-        // `endsDate` (not `ends`) because this sits mid-sentence and lowercasing
-        // the ready-made "Offer ends …" line would mangle the month name.
-        campaigns.length > 0
-          ? `Those prices include our current offer — ${campaigns
-              .map((c) => `${c.badge} until ${c.endsDate}`)
-              .join("; ")}.`
+        !pricing.available ? "See your dashboard for current Cloud plans and availability." : null,
+        pricing.customTiers.length > 0
+          ? `${pricing.customTiers.map((p) => p.name).join(" and ")} is priced per contract — talk to sales.`
           : null,
-        CUSTOM_TIERS.length > 0
-          ? `${CUSTOM_TIERS.map((p) => p.name).join(" and ")} is priced per contract — talk to sales.`
-          : null,
-        "Every plan includes unlimited team members, so the price you see covers your whole organization.",
+        "Plans are billed per organization. The checkout shows the final amount before payment.",
       ]
         .filter((s): s is string => s !== null)
         .join(" "),

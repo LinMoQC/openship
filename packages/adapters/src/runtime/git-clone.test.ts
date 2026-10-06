@@ -1,4 +1,8 @@
 import { describe, it, expect } from "vitest";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   sq,
   injectGitToken,
@@ -171,9 +175,52 @@ describe("assembleGitClone — relay (desktop credential helper) mode", () => {
   it("authenticates the first request instead of waiting for a GitHub challenge", () => {
     const command = gitShellCommand(inv, "clone 'https://github.com/owner/repo.git' '/tmp/repo'");
     expect(command).toContain("'/tmp/helper.sh' auth-header 'https' 'github.com' 'owner/repo.git'");
-    expect(command).toContain("GIT_CONFIG_KEY_3=http.extraHeader");
+    expect(command).toContain(
+      "GIT_CONFIG_KEY_3='http.https://github.com/owner/repo.git.extraHeader'",
+    );
     expect(command).toContain('GIT_CONFIG_VALUE_3="$OPENSHIP_GIT_AUTH_HEADER"');
     expect(command.indexOf("auth-header")).toBeLessThan(command.indexOf("git clone"));
+  });
+  it("Git scopes the relay header to the parent repo and excludes foreign submodules", () => {
+    // A CI checkout can carry its own host-wide authorization header. Use an
+    // empty repository and no host config so only the assembled config is read.
+    const cwd = mkdtempSync(join(tmpdir(), "openship-git-config-"));
+    const env = {
+      ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_"))),
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: "/dev/null",
+    };
+    // Replace only the out-of-process relay lookup, then let real Git parse the
+    // exact environment that a networked clone/submodule command would inherit.
+    const scoped = {
+      ...inv,
+      shellPrelude: "OPENSHIP_GIT_AUTH_HEADER='Authorization: Basic test-only'",
+    };
+    const lookup = (url: string) =>
+      execFileSync(
+        "sh",
+        [
+          "-c",
+          gitShellCommand(
+            scoped,
+            `config --get-urlmatch http.extraHeader ${sq(url)} || test $? -eq 1`,
+          ),
+        ],
+        { encoding: "utf8", cwd, env },
+      ).trim();
+    try {
+      execFileSync("git", ["init", "--quiet"], { cwd, env });
+      expect(lookup("https://github.com/owner/repo.git")).toBe("Authorization: Basic test-only");
+      expect(lookup("https://github.com/owner/repo.git/info/refs")).toBe(
+        "Authorization: Basic test-only",
+      );
+      expect(lookup("https://github.com/owner/other.git")).toBe("");
+      expect(lookup("https://github.com/owner/repo.git-evil")).toBe("");
+      expect(lookup("https://elsewhere.example/owner/repo.git")).toBe("");
+      expect(lookup("http://github.com/owner/repo.git")).toBe("");
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
   });
   it("does not put a credential or Authorization value in the assembled command", () => {
     const command = gitShellCommand(inv, "clone 'repo' 'target'");

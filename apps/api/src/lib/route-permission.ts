@@ -34,7 +34,7 @@ import {
   canUseGitHubRepo,
   checkSourceTier,
   type SourceTier,
-} from "../modules/github/github-access";
+} from "@repo/platform/engine/modules/github/github-access";
 import type { PolicyId } from "./rate-limit/policies";
 
 /* ------------------------------------------------------------------ */
@@ -76,7 +76,7 @@ export type PermissionTag = string; // keep wide; the parser validates structura
  * Resource → URL param-name convention. The middleware reads the id from
  * `c.req.param(paramName)`. Overridable per route.
  */
-const DEFAULT_ID_PARAMS: Record<string, string> = {
+export const DEFAULT_ID_PARAMS: Readonly<Record<string, string>> = {
   project: "id",
   deployment: "id",
   domain: "id",
@@ -127,7 +127,7 @@ export { ORG_SINGLETON_RESOURCES };
  * controller is still responsible for performing org-wide reasoning
  * safely (no implicit cross-tenant access).
  */
-const CONDITIONAL_SINGLETON_RESOURCES = new Set<string>([
+export const CONDITIONAL_SINGLETON_RESOURCES: ReadonlySet<string> = new Set([
   "domain",
   "mail_server",
 ]);
@@ -267,13 +267,8 @@ export type RateLimitPolicyId = PolicyId;
 export interface McpRouteMeta {
   /** Agent-facing tool description. */
   description: string;
-  /**
-   * @deprecated Declare the body schema ONCE via the top-level `spec.body`
-   * field instead — secureRouter auto-wires `tbValidator` from it AND the MCP
-   * layer reads it as the tool's body params, so there is a single source. This
-   * field is kept only as a fallback for the (now migrated) legacy call sites.
-   */
-  body?: TSchema;
+  /** Override the inferred hint for actions such as destructive migration cutover. */
+  destructive?: boolean;
 }
 
 export interface PermissionSpec {
@@ -364,8 +359,20 @@ export interface PermissionSpec {
    *   1. `body` declares `projectId` as REQUIRED — the auto-wired validator runs
    *      right after this middleware, so a missing id is a 400 before the handler.
    *   2. The handler asserts on that id before doing any work.
+   * Use `"query"` for GET collections: this middleware requires and authorizes
+   * the `projectId` query parameter itself before the handler runs.
    */
-  collectionProject?: boolean;
+  collectionProject?: boolean | "query";
+  /** The shared application operation emits this mutation's audit event for every transport. */
+  auditHandledByOperation?: boolean;
+  /**
+   * This adapter delegates every call to a shared authorized operation. Use for
+   * body/session-derived targets, where a wildcard pre-check would reject an
+   * otherwise valid exact resource grant. Authentication and request validation
+   * remain HTTP middleware; the operation resolves and authorizes the target.
+   * A successful adapter must apply its returned operation context.
+   */
+  authorizationHandledByOperation?: boolean;
   /**
    * Restrict this route to self-hosted instances. The secure router mounts the
    * `localOnly` middleware ahead of auth, so a request in CLOUD_MODE gets a 404
@@ -377,6 +384,14 @@ export interface PermissionSpec {
   localOnly?: boolean;
   /** Opt this route into the MCP tool surface. See {@link McpRouteMeta}. */
   mcp?: McpRouteMeta;
+  /** Why this HTTP endpoint is intentionally not an MCP tool (checked by docs:check). */
+  mcpExcluded?: string;
+  /**
+   * Decoded query parameters advertised to MCP clients. Reuse the operation's
+   * input schema; the HTTP adapter still parses strings and the shared operation
+   * validates them. This is not a second HTTP query validator.
+   */
+  query?: TSchema;
   /**
    * TypeBox schema for the JSON request body. Declared ONCE here and consumed
    * in two places — no duplication:
@@ -384,9 +399,11 @@ export interface PermissionSpec {
    *      handlers (so every body-carrying route validates by construction).
    *   2. The MCP layer emits it verbatim as the tool's `body` params (TypeBox
    *      *is* JSON Schema, so there's no second contract to keep in sync).
-   * Prefer this over the deprecated `mcp.body`.
    */
   body?: TSchema;
+  /** The shared operation validates this same schema. Keeps its optional-input
+   * semantics (including an empty JSON body) and MCP metadata in one contract. */
+  bodyValidatedByOperation?: boolean;
 }
 
 export interface PublicSpec {
@@ -436,8 +453,8 @@ export function isPublicSpec(spec: RouteSpec): spec is PublicSpec {
  * tell-tale `github '*' not found`.
  *
  * Deliberately limited to read/list. Write/admin GitHub routes (create or
- * delete repo, disconnect, instance-token) keep the org-wide check on
- * `{github,"*"}`, and MCP exposes no GitHub mutations.
+ * delete repo, disconnect, instance-token) use their existing route or shared
+ * operation authority; this helper does not authorize them.
  *
  * Be precise about what that org-wide check buys, because it is easy to misread as
  * a defense it is not: it is strict only for a RESTRICTED principal (a scoped
@@ -498,7 +515,11 @@ export function requirePermission(spec: PermissionSpec): MiddlewareHandler {
 
     const ghTarget = githubReadTarget(parsed, c);
 
-    if (ghTarget) {
+    if (spec.authorizationHandledByOperation) {
+      // The operation receives the authenticated context and performs the same
+      // target authorization as a native call, before invoking retained services.
+      leafId = "*";
+    } else if (ghTarget) {
       // Authorize against the caller's ACTUAL GitHub grant width instead of
       // the unsatisfiable {github,"*"} singleton check — see githubReadTarget.
       // `canUseGitHubRepo` gates membership itself and short-circuits to allow
@@ -558,12 +579,22 @@ export function requirePermission(spec: PermissionSpec): MiddlewareHandler {
 
       leafId = ghTarget.key;
     } else if (spec.collectionProject) {
-      // The body names the target project and the handler asserts on it — see
+      if (spec.collectionProject === "query") {
+        // GET collections carry the same explicit project scope in the query.
+        // Enforce it here; a missing id must never become a wildcard list.
+        const projectId = c.req.query("projectId");
+        if (!projectId?.trim()) return c.json({ error: "projectId query parameter required" }, 400);
+        await permission.assert(getRequestContext(c), {
+          resourceType: "project", resourceId: projectId,
+          action: parsed.isList ? "read" : parsed.action as Action,
+        });
+      }
+      // A body names the target project and the handler asserts on it — see
       // PermissionSpec.collectionProject for why the `"*"` pre-check is skipped
       // rather than kept as belt-and-braces. `leafId` stays "*" so the audit
       // record below is byte-identical to the collection branch's.
       leafId = "*";
-    } else if (parsed.isList) {
+    } else if (parsed.isList || (spec.collection && parsed.root !== parsed.leaf)) {
       if (parsed.root !== parsed.leaf) {
         // A nested collection belongs to the concrete parent named in the URL.
         // Authorizing `{service,"*"}` here made project-scoped tokens unable to
@@ -583,7 +614,7 @@ export function requirePermission(spec: PermissionSpec): MiddlewareHandler {
         await permission.assert(getRequestContext(c), {
           resourceType: parsed.root,
           resourceId: parentId,
-          action: "read",
+          action: parsed.isList ? "read" : parsed.action as Action,
         });
         leafId = "*";
       } else {
@@ -607,39 +638,18 @@ export function requirePermission(spec: PermissionSpec): MiddlewareHandler {
       });
       leafId = "*";
     } else if (spec.collection) {
-      if (parsed.root !== parsed.leaf) {
-        // A nested collection mutation belongs to the concrete parent named in
-        // the URL, just like a nested list. Authorizing `{service,"*"}` here
-        // made a project-scoped MCP token see the sync tool but receive
-        // `service '*' not found` when it called it. The parent grant is the
-        // collection scope and the route's write/admin action is preserved.
-        const parentParamName =
-          idsMap[parsed.root] ?? DEFAULT_ID_PARAMS[parsed.root] ?? "id";
-        const parentId = c.req.param(parentParamName);
-        if (!parentId) {
-          return c.json(
-            {
-              error: `Missing route param :${parentParamName} required by tag "${spec.tag}"`,
-            },
-            400,
-          );
-        }
-        await permission.assert(getRequestContext(c), {
-          resourceType: parsed.root,
-          resourceId: parentId,
-          action: parsed.action as Action,
-        });
-      } else {
-        // Top-level collection mutation has no concrete parent. Org scope comes
-        // from the request (X-Organization-Id header or session default).
-        await permission.assert(getRequestContext(c), {
-          resourceType: parsed.leaf,
-          resourceId: "*",
-          action: parsed.action as Action,
-          scope: "list",
-          projectCreate: spec.projectCreate,
-        });
-      }
+      // Collection-scoped write/admin (e.g. POST /deployments, POST
+      // /deployments/prepare). No :id in the URL; org scope comes from
+      // the request (X-Organization-Id header or session default).
+      // Same resolution path as list reads, just with the route's
+      // declared action so role/grants still apply.
+      await permission.assert(getRequestContext(c), {
+        resourceType: parsed.leaf,
+        resourceId: "*",
+        action: parsed.action as Action,
+        scope: "list",
+        projectCreate: spec.projectCreate,
+      });
       leafId = "*";
     } else {
       // Resolve the leaf resource's id from URL param. For resources
@@ -703,11 +713,16 @@ export function requirePermission(spec: PermissionSpec): MiddlewareHandler {
     // Run the handler.
     await next();
 
+    if (spec.authorizationHandledByOperation && c.res.status < 400 && !c.get("operationContextApplied"))
+      throw new Error("An operation-authorized route did not apply its authorized context");
+
     // After handler success: emit an audit event for write/admin/list-
     // -with-side-effects. Read/list are typically too noisy to log unless
     // the route opts in (TODO: per-route auditOnRead flag).
     const action = parsed.action;
-    if (action === "write" || action === "admin") {
+    // A cloud proxy may finish before reaching a migrated operation. Only skip
+    // this emitter when that operation actually recorded this invocation.
+    if ((!spec.auditHandledByOperation || !c.get("operationAuditRecorded")) && (action === "write" || action === "admin")) {
       const status = c.res.status;
       if (status >= 200 && status < 400) {
         // For CREATE flows, the handler stamps the new id via

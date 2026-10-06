@@ -2,11 +2,11 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { Duplex } from "node:stream";
 
 const withHostExecutor = vi.fn();
-vi.mock("../../../src/lib/ssh-manager", () => ({
+vi.mock("@repo/platform/engine/lib/ssh-manager", () => ({
   sshManager: { withHostExecutor: (fn: unknown) => withHostExecutor(fn) },
 }));
 
-import { probeDeployedReadiness } from "../../../src/modules/deployments/readiness-probe";
+import { probeDeployedReadiness } from "@repo/platform/engine/modules/deployments/readiness-probe";
 import type { CommandExecutor, RuntimeAdapter } from "@repo/adapters";
 
 /**

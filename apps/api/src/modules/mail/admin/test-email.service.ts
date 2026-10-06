@@ -46,20 +46,20 @@
  */
 
 import nodemailer, { type Transporter } from "nodemailer";
-import { sshManager } from "../../../lib/ssh-manager";
-import { readState } from "../mail-state";
+import { sshManager } from "@repo/platform/engine/lib/ssh-manager";
+import { readState } from "@repo/platform/engine/modules/mail/mail-state";
 import { safeErrorMessage } from "@repo/core";
 import {
   ensureOpenshipPlatformMailbox,
   type PlatformMailboxCreds,
-} from "./platform-mailbox.service";
+} from "@repo/platform/engine/modules/mail/admin/platform-mailbox.service";
 import { ensureOpenshipTestMailbox } from "./test-mailbox.service";
-import { isSmtpAuthFailure } from "../smtp-auth-error";
+import { isSmtpAuthFailure } from "@repo/platform/engine/modules/mail/smtp-auth-error";
 import {
   checkMailPortReachability,
   mailReachabilityFailureMessage,
   resolvePublicMailAddress,
-} from "../mail-port-reachability.service";
+} from "@repo/platform/engine/modules/mail/mail-port-reachability.service";
 
 const EMAIL_RE = /^[a-z0-9._+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
 

@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@repo/db", () => ({
   repos: {
+    deployment: { findById: async () => ({ id: "dep-live", projectId: "p1", organizationId: "org1" }) },
     service: {
       listByProject: vi.fn(async () => [
         { id: "svc-api", name: "api", enabled: true, advanced: null },
@@ -30,9 +31,9 @@ vi.mock("@repo/db", () => ({
     },
   },
 }));
-vi.mock("./build.service", () => ({ buildComposeImages: mocks.buildComposeImages }));
-vi.mock("./deploy.service", () => ({ deployComposeServices: mocks.deployComposeServices }));
-vi.mock("../deployment-lifecycle", () => ({
+vi.mock("@repo/platform/engine/modules/deployments/compose/build.service", () => ({ buildComposeImages: mocks.buildComposeImages }));
+vi.mock("@repo/platform/engine/modules/deployments/compose/deploy.service", () => ({ deployComposeServices: mocks.deployComposeServices }));
+vi.mock("@repo/platform/engine/modules/deployments/deployment-lifecycle", () => ({
   cleanupBuildArtifact: mocks.cleanupBuildArtifact,
   onCancelled: mocks.onCancelled,
   onFailure: mocks.onFailure,
@@ -41,12 +42,12 @@ vi.mock("../deployment-lifecycle", () => ({
   setDeploymentStatus: mocks.setDeploymentStatus,
   routeIssuesWarning: (issues: string[]) => issues.join(", "),
 }));
-vi.mock("../session-manager", () => ({
+vi.mock("@repo/platform/engine/modules/deployments/session-manager", () => ({
   broadcastServiceStatus: vi.fn(),
   broadcastInstallPhase: vi.fn(),
   promptUser: mocks.promptUser,
 }));
-vi.mock("../deployment-cancellation", () => ({
+vi.mock("@repo/platform/engine/modules/deployments/deployment-cancellation", () => ({
   deploymentCancellationKeepsProvisioned: () => mocks.keepProvisioned,
   raceDeploymentCancellation: <T>(task: Promise<T>) => task,
   throwIfDeploymentCancelled: (signal?: AbortSignal) => {
@@ -54,7 +55,7 @@ vi.mock("../deployment-cancellation", () => ({
   },
 }));
 
-import { executeComposePipeline } from "./pipeline";
+import { executeComposePipeline } from "@repo/platform/engine/modules/deployments/compose/pipeline";
 
 /**
  * `setDeploymentStatus` has NO terminal-state guard, so the cancel branch is the
@@ -99,13 +100,17 @@ async function run(
   await executeComposePipeline({
     project: {
       id: "p1",
+      organizationId: "org1",
       slug: "app",
       name: "app",
       webhookDomain: null,
       activeDeploymentId: options.activeDeploymentId ?? null,
     } as never,
     dep: { id: "d1", branch: "main", commitSha: null, trigger: "deploy", meta: null } as never,
-    runtime: { name: options.runtimeName ?? "docker" } as never,
+    runtime: {
+      name: options.runtimeName ?? "docker",
+      supports: () => false,
+    } as never,
     routing: {} as never,
     ssl: {} as never,
     system: null,

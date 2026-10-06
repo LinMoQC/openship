@@ -28,7 +28,7 @@
  */
 
 import { db, sql, type DatabaseTransaction } from "@repo/db";
-import { getJobRunner } from "../../../lib/job-runner";
+import { getJobRunner } from "@repo/platform/engine/lib/job-runner/index";
 
 export class MigrationAlreadyInProgressError extends Error {
   readonly code = "MIGRATION_IN_PROGRESS" as const;

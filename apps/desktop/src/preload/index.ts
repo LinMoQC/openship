@@ -8,17 +8,7 @@
 import { contextBridge, ipcRenderer } from "electron";
 // Type-only: erased at compile time, so this never becomes a runtime require.
 import type { RendererConfigKey } from "../main/security";
-let onboardingUtils: {
-  isPrivateIp?: typeof import("@repo/onboarding").isPrivateIp;
-  validateServerAddress?: typeof import("@repo/onboarding").validateServerAddress;
-  validateSshPayload?: typeof import("@repo/onboarding").validateSshPayload;
-  buildSshSettings?: typeof import("@repo/onboarding").buildSshSettings;
-} = {};
-try {
-  onboardingUtils = require("@repo/onboarding");
-} catch {
-  // Non-critical: utils won't be available but IPC bridge still works
-}
+import { isPrivateIp, validateServerAddress, validateSshPayload, buildSshSettings } from "@repo/onboarding";
 
 contextBridge.exposeInMainWorld("desktop", {
   /** Whether the app is running inside Electron */
@@ -100,9 +90,8 @@ contextBridge.exposeInMainWorld("desktop", {
 
   /** In-app updater (drives the update window). */
   updates: {
-    /** Re-check GitHub on demand and stage the result. Returns the check result
-     *  ({ available, version, ... } | { available: false }). */
-    check: () => ipcRenderer.invoke("update:check"),
+    /** Read the shared release snapshot, or refresh it on an explicit check. */
+    check: (force = false) => ipcRenderer.invoke("update:check", force === true),
     /** Begin download + install of the pending update (re-checks if none staged). */
     start: () => ipcRenderer.invoke("update:start"),
     /** Open the native update window (re-checks + stages if none pending). */
@@ -169,9 +158,9 @@ contextBridge.exposeInMainWorld("desktop", {
 
   /** Shared onboarding utilities from @repo/onboarding */
   utils: {
-    isPrivateIp: onboardingUtils.isPrivateIp ?? (() => false),
-    validateServerAddress: onboardingUtils.validateServerAddress ?? (() => ({ valid: false, error: "unavailable" })),
-    validateSshPayload: onboardingUtils.validateSshPayload ?? (() => ({ valid: false })),
-    buildSshSettings: onboardingUtils.buildSshSettings ?? (() => ({})),
+    isPrivateIp,
+    validateServerAddress,
+    validateSshPayload,
+    buildSshSettings,
   },
 });

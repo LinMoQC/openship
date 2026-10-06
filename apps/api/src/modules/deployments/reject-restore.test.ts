@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { planRejectRestore } from "./reject-restore";
+import { planRejectRestore } from "@repo/platform/engine/modules/deployments/reject-restore";
 
 describe("reject restore planning", () => {
+  it.each([undefined, [], [""]])("refuses an unknown exclusive scope instead of broadening it (%s)", targetServiceIds => {
+    expect(() => planRejectRestore({ deploymentId: "candidate", previousDeploymentId: "live",
+      activeDeploymentId: "candidate", strictServiceScope: true, targetServiceIds })).toThrow("no valid exclusive service scope");
+  });
   it("does nothing when a failed candidate left its predecessor active", () => {
     expect(
       planRejectRestore({

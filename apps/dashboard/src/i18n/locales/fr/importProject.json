@@ -106,7 +106,12 @@
     "modeStatic": "Statique",
     "workerModeDesc": "S'exécute en continu sans port ni URL publique — un consommateur de file, une tâche cron ou un bot.",
     "staticPathHint": "Servi en tant que fichiers statiques depuis l'edge — aucun processus ne s'exécute.",
-    "buildSettingsTitle": "Paramètres de compilation"
+    "buildSettingsTitle": "Paramètres de compilation",
+    "releaseTitle": "Avant activation",
+    "releaseDescription": "Commandes facultatives après le build. Un échec arrête le déploiement. Applications Docker et Bare uniquement.",
+    "releaseCommand": "Commande {number}",
+    "addReleaseCommand": "Ajouter une commande",
+    "removeReleaseCommand": "Supprimer la commande {number}"
   },
   "projectSettings": {
     "framework": "Framework",
@@ -124,6 +129,7 @@
     "noneSet": "Aucune définie",
     "pasteEnv": "Coller .env",
     "uploadEnv": "Téléverser .env",
+    "downloadEnv": "Télécharger .env",
     "edit": "Modifier",
     "cancel": "Annuler",
     "saving": "Enregistrement...",
@@ -145,6 +151,7 @@
       "interpolated": "Interpolée"
     },
     "toast": {
+      "downloadFailed": "Impossible de télécharger les variables d’environnement.",
       "title": "Variables d'environnement",
       "added": "{count} ajoutée(s)",
       "updated": "{count} mise(s) à jour",
@@ -208,9 +215,9 @@
       "volumes": "Volumes",
       "statefulWarnPart1": "Service avec état sur le cloud : les données résident sur le disque persistant de l'espace de travail (survivent aux redémarrages) mais ne sont ",
       "statefulWarnBold": "pas transférées d'une recompilation à l'autre",
-      "statefulWarnPart2": " sauf si les sauvegardes sont activées. Les montages de volumes Docker ne s'appliquent pas.",
+      "statefulWarnPart2": ". Sauvegardez et restaurez explicitement les données avant de remplacer l’espace de travail.",
       "volumeHint": "Volume nommé ou chemin de l'hôte → chemin du conteneur.",
-      "volumeCloudNote": "Sur le cloud, ces montages ne s'appliquent pas — les données persistent sur le disque de l'espace de travail (pas d'une recompilation à l'autre sans sauvegardes).",
+      "volumeCloudNote": "Openship Cloud ne prend pas en charge les montages de volumes persistants. Choisissez un serveur pour les charges qui nécessitent des volumes.",
       "sourcePlaceholder": "Source",
       "containerPathPlaceholder": "Chemin du conteneur",
       "readOnlyMount": "Montage en lecture seule",
@@ -318,7 +325,7 @@
       "successful": "Déploiement réussi",
       "deploying": "Déploiement..."
     },
-    "visitSite": "Visiter le site",
+    "openSite": "Ouvrir le site",
     "warningTitle": "Le déploiement est terminé, mais certains services nécessitent encore votre attention.",
     "productionLogs": "Journaux de production",
     "buildTerminal": "Terminal de compilation",
@@ -328,7 +335,7 @@
     "stopDeployment": "Arrêter le déploiement",
     "redeploy": "Redéployer",
     "goToProject": "Aller au projet",
-    "openDashboard": "Ouvrir le tableau de bord",
+    "openProject": "Ouvrir le projet",
     "edit": "Modifier",
     "status": {
       "cancelled": "Annulé",

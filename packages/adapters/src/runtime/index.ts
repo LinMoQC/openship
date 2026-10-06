@@ -9,6 +9,7 @@
 export type {
   RuntimeAdapter,
   RuntimeCapability,
+  ReleaseCommandOptions,
   MultiServiceRuntimeAdapter,
   MultiServiceGroupHandle,
   MultiServiceDeployConfig,
@@ -88,7 +89,7 @@ export async function createRuntime(opts: CreateRuntimeOptions): Promise<Runtime
       return new BareRuntime(opts.bare);
     }
     case "cloud": {
-      const { Oblien } = await import("oblien");
+      const { Oblien } = await import("../oblien");
       const { CloudRuntime } = await import("./cloud");
       const client = opts.cloudToken
         ? new Oblien({ token: opts.cloudToken })

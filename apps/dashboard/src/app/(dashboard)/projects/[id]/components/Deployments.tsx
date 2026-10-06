@@ -1,21 +1,25 @@
 "use client";
 
+import { Icon as UiIcon } from "@repo/ui/icons";
+
 import React from "react";
 import { useProjectSettings } from "@/context/ProjectSettingsContext";
 import { DeploymentsContent } from "@/app/(dashboard)/deployments/components";
-import { projectsApi, isAbortError } from "@/lib/api";
-import { triggerProjectDeployment } from "@/lib/project-deployment";
+import { deployApi, projectsApi, isAbortError, getApiErrorMessage } from "@/lib/api";
 import type { PendingAction } from "@/lib/api/projects";
 import { openTriggeredBuild } from "@/lib/deploy-nav";
-import { type Service } from "@/lib/api/services";
 import { useModal } from "@/context/ModalContext";
+import { useCloudDeployPricing } from "@/hooks/useCloudDeployPricing";
 import { useToast } from "@/context/ToastContext";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 import { useRouter } from "next/navigation";
-import { Rocket, ChevronDown, RefreshCw, Layers } from "lucide-react";
 import DropdownMenu from "@/components/ui/DropdownMenu";
 import WarningCallout from "@/components/shared/WarningCallout";
-
+import {
+  hasConnectedDomain,
+  isPotentiallyPublicService,
+  shouldWarnAboutUnreachableServices,
+} from "./redeploy-unreachable-warning";
 export const Deployments = () => {
   const {
     id,
@@ -24,9 +28,11 @@ export const Deployments = () => {
     servicesData,
     refreshServices,
     hasMultipleServices,
+    domainsData,
   } = useProjectSettings();
   const { t } = useI18n();
   const { showToast } = useToast();
+  const showCloudPricing = useCloudDeployPricing();
   const { showModal, hideModal } = useModal();
   const router = useRouter();
 
@@ -110,9 +116,7 @@ export const Deployments = () => {
       .getPendingActions(projectData.id)
       .then((res) => {
         if (cancelled) return;
-        setBlockedAction(
-          res?.data?.actions?.find((a) => a.kind === "deploy_blocked") ?? null,
-        );
+        setBlockedAction(res?.data?.actions?.find((a) => a.kind === "deploy_blocked") ?? null);
       })
       .catch(() => {
         /* best-effort — the status badge already says Action Required */
@@ -137,9 +141,19 @@ export const Deployments = () => {
       if (!projectData?.id) return;
       setIsRedeploying(true); // drive the loading state for menu paths too
       try {
-        const res = await triggerProjectDeployment(projectData, mode);
+        const body =
+          mode === "all"
+            ? { projectId: projectData.id, forceAll: true }
+            : mode === "refresh"
+              ? { projectId: projectData.id, refresh: true }
+              : { projectId: projectData.id, smartRoute: true };
+        const res = await deployApi.trigger(body);
         openTriggeredBuild(router, res, projectData.id);
       } catch (error) {
+        if (showCloudPricing(error)) {
+          setIsRedeploying(false);
+          return;
+        }
         // A timeout almost certainly means the server started the deploy but was
         // slow to return the id — show the deployments list so it's visible rather
         // than stranding the user on an error.
@@ -154,16 +168,19 @@ export const Deployments = () => {
         }
         console.error("Redeploy failed:", error);
         showToast(
-          mode === "refresh"
-            ? t.projects.redeploy.couldNotRefresh
-            : t.projects.redeploy.couldNotRedeploy,
+          getApiErrorMessage(
+            error,
+            mode === "refresh"
+              ? t.projects.redeploy.couldNotRefresh
+              : t.projects.redeploy.couldNotRedeploy,
+          ),
           "error",
           t.projects.redeploy.errorTitle,
         );
         setIsRedeploying(false); // success navigates away; only clear on failure
       }
     },
-    [projectData, router, showToast, t],
+    [projectData?.id, router, showToast, showCloudPricing, t],
   );
 
   const handleRedeploy = async () => {
@@ -174,8 +191,12 @@ export const Deployments = () => {
       if (hasMultipleServices) {
         const services =
           servicesData.services.length > 0 ? servicesData.services : await refreshServices();
-        if (shouldWarnAboutUnreachableServices(services)) {
-          const candidateServices = services.filter(isPotentiallyPublicService);
+        if (shouldWarnAboutUnreachableServices(services, domainsData.domains, projectData.port)) {
+          const candidateServices = services.filter(
+            (s) =>
+              isPotentiallyPublicService(s) &&
+              !hasConnectedDomain(s, domainsData.domains, projectData.port),
+          );
           let modalId = "";
           modalId = showModal({
             customContent: (
@@ -195,10 +216,10 @@ export const Deployments = () => {
                         className="rounded-lg bg-foreground/[0.06] px-3 py-1.5 text-[12px] font-medium text-foreground transition-colors hover:bg-foreground/[0.1]"
                         onClick={() => {
                           hideModal(modalId);
-                          setActiveTab("services");
+                          setActiveTab("domains");
                         }}
                       >
-                        {t.projects.redeploy.openServices}
+                        {t.projects.redeploy.openDomains}
                       </button>
                       <button
                         type="button"
@@ -372,7 +393,7 @@ export const Deployments = () => {
           <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex items-start gap-3">
               <div className="flex size-10 items-center justify-center rounded-xl bg-primary/10 text-primary">
-                <Rocket className="size-5" />
+                <UiIcon name="rocket" className="size-5" />
               </div>
               <div>
                 <h3 className="text-sm font-semibold text-foreground">
@@ -402,12 +423,12 @@ export const Deployments = () => {
                 align="right"
                 disabled={isRedeploying}
                 triggerClassName="inline-flex items-center justify-center rounded-xl border border-border/60 bg-muted/30 p-2.5 text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
-                trigger={<ChevronDown className="size-4" />}
+                trigger={<UiIcon name="chevron-down" className="size-4" />}
                 actions={[
                   {
                     id: "refresh",
                     label: t.projects.redeploy.refreshEnv,
-                    icon: <RefreshCw className="size-4" />,
+                    icon: <UiIcon name="refresh" className="size-4" />,
                     onClick: () => runRedeploy("refresh"),
                   },
                   ...(hasMultipleServices
@@ -415,7 +436,7 @@ export const Deployments = () => {
                         {
                           id: "rebuild",
                           label: t.projects.redeploy.rebuildAll,
-                          icon: <Layers className="size-4" />,
+                          icon: <UiIcon name="layers" className="size-4" />,
                           onClick: () => runRedeploy("all"),
                         },
                       ]
@@ -437,19 +458,3 @@ export const Deployments = () => {
     </div>
   );
 };
-
-function hasConnectedDomain(service: Service) {
-  if (!service.exposed) return false;
-  if (service.domainType === "custom") return Boolean(service.customDomain?.trim());
-  return Boolean(service.domain?.trim());
-}
-
-function isPotentiallyPublicService(service: Service) {
-  return service.enabled && (service.ports?.length ?? 0) > 0;
-}
-
-function shouldWarnAboutUnreachableServices(services: Service[]) {
-  const candidateServices = services.filter(isPotentiallyPublicService);
-  if (candidateServices.length === 0) return false;
-  return candidateServices.every((service) => !hasConnectedDomain(service));
-}

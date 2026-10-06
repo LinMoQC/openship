@@ -1,7 +1,8 @@
 "use client";
 
+import { Icon as UiIcon } from "@repo/ui/icons";
+
 import React from "react";
-import { Cloud } from "lucide-react";
 import { OptionCard } from "@/app/(dashboard)/(deployment)/deploy/[slug]/components/DeployTargetStep";
 import ServerSelector, { type ServerOption } from "@/components/shared/ServerSelector";
 import type { DeployTarget } from "@/context/deployment/types";
@@ -15,7 +16,7 @@ export interface AppDestination {
    * card for it (see below). Excluded rather than merely unused, so an install body
    * can't carry a value the API now rejects.
    */
-  deployTarget: Exclude<DeployTarget, "local">;
+  deployTarget: Exclude<DeployTarget, "local" | "cluster">;
   serverId?: string;
   /** Host of the selected server (sshHost) — lets the app wizard build a
    *  reachable `http://host:port` URL for a port-only (no-domain) install. */
@@ -90,7 +91,7 @@ export function AppDestinationPicker({
         value="cloud"
         selected={value?.deployTarget === "cloud"}
         onSelect={() => onChange({ deployTarget: "cloud" })}
-        icon={<Cloud className="size-4" />}
+        icon={<UiIcon name="cloud" className="size-4" />}
         label={opt.cloud}
         description={cloudConnected ? opt.cloudConnectedDesc : opt.cloudDisconnectedDesc}
       />

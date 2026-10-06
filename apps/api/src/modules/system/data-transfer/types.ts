@@ -1,36 +1,29 @@
 /**
- * Wire types for whole-instance data export / import.
+ * Wire types for instance and project data export / import.
  *
  * The export file wraps an UNCHANGED `DatabaseDump` (so restoreSubgraph's
- * format-version gate is untouched) plus a passphrase-sealed bundle of every
- * secret's plaintext. The dump payload itself carries NO secret ciphertext —
- * secrets live only inside `secrets`, encrypted under the user's passphrase.
+ * format-version gate is untouched) plus a portable bundle of secret values.
+ * Project files can carry these values as plain JSON; password-protected files
+ * retain their sealed bundle. Imports encrypt values with the destination key.
  */
 
 import type { DatabaseDump } from "@repo/db";
+import type { ExportSelection, TransferManifest } from "@repo/core";
+export type {
+  ExportHistoryCategory,
+  ExportSelection,
+  ExportPreview,
+  ImportSelection,
+  ImportPreview,
+  TransferManifest,
+  TransferProject,
+  TransferServer,
+} from "@repo/core";
 
 export type ImportMode = "wipe" | "merge";
 
-export type ExportHistoryCategory =
-  | "analytics"
-  | "activity"
-  | "backups"
-  | "incidents"
-  | "migrations";
-
-export interface ExportSelection {
-  /** Optional history groups. Durable configuration is always included. */
-  history: ExportHistoryCategory[];
-}
-
-export interface ExportPreview {
-  core: number;
-  history: Record<ExportHistoryCategory, number>;
-  total: number;
-}
-
 /** How a given column is encrypted at rest — drives decrypt/re-encrypt dispatch. */
-export type SecretScheme = "scalar" | "enc1" | "map" | "notification-config" | "plaintext";
+export type SecretScheme = "scalar" | "enc1" | "map" | "notification-config" | "plaintext" | "json";
 
 /** One secret cell's plaintext, keyed to its row. Only one payload field is set. */
 export interface SecretEntry {
@@ -42,8 +35,10 @@ export interface SecretEntry {
   value?: string;
   /** map — e.g. deployment.envVars */
   map?: Record<string, string>;
-  /** notification-config — decrypted secret sub-fields only (hmacSecret, webhookUrl) */
+  /** notification-config — decrypted secret sub-fields (hmacSecret, webhookUrl, botToken) */
   config?: Record<string, string>;
+  /** JSON configuration that can contain literal passwords or private keys. */
+  json?: unknown;
 }
 
 export interface SecretBundle {
@@ -62,24 +57,31 @@ export interface SealedSecrets {
   blob: string;
 }
 
+export interface PlaintextSecrets extends SecretBundle {
+  encoding: "plaintext";
+}
+
+export type TransferSecrets = SealedSecrets | PlaintextSecrets;
+
 export interface DataTransferFile {
-  kind: "openship-instance-export";
-  envelopeVersion: 1;
+  kind: "openship-instance-export" | "openship-project-export";
+  envelopeVersion: 1 | 2 | 3;
   createdAt: string;
   sourceDriver: "pg" | "pglite";
   /** Absent on legacy files, which always contained all history groups. */
   selection?: ExportSelection;
+  manifest?: TransferManifest;
   summary?: { rows: number; tables: number };
   dump: DatabaseDump;
-  /** null = the export carried no secrets (no passphrase given). */
-  secrets: SealedSecrets | null;
+  /** Version 3 project files support plaintext values. null omits credentials. */
+  secrets: TransferSecrets | null;
 }
 
 export interface ImportResult {
   mode: ImportMode;
   rowsRestored: number;
   secretsRehydrated: number;
-  /** true when the file had no secrets, or had secrets but no passphrase was supplied. */
+  /** true when the file had no secrets or restoring secrets was disabled. */
   secretsSkipped: boolean;
   /**
    * Projects whose source is a LOCAL FOLDER path (localPath / folder-upload).
@@ -90,6 +92,10 @@ export interface ImportResult {
    * — we never guess a rewrite. Empty when nothing needs attention.
    */
   localPathProjects: Array<{ slug: string; localPath: string }>;
+  warnings?: string[];
+  projectsCreated?: number;
+  projectsUpdated?: number;
+  projectsSkipped?: number;
 }
 
 /** One-time capability copied from the destination to the source instance. */

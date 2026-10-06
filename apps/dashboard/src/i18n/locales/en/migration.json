@@ -22,6 +22,11 @@
     "addProject": "Add project",
     "removeProject": "Remove project",
     "targetLabel": "Target server",
+    "edgeReview": {
+      "detected": "Detected {proxy} on the source server",
+      "handoff": "Review the matched domains below. Migration sets up the target server's edge and asks for confirmation if an existing proxy needs to be replaced.",
+      "warnings": "Review {count} discovery notices"
+    },
     "sameServer": "Same server (reuse volumes in place)",
     "crossServerBuiltInfo": "Locally-built images are streamed to the target as data (no registry, no rebuild). Large images take longer — a progress bar shows the transfer.",
     "killOriginals": "Stop & remove old containers once the new deployment is verified",

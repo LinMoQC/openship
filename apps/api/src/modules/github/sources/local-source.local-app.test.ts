@@ -5,7 +5,7 @@ const h = vi.hoisted(() => ({
   appHome: {} as any,
 }));
 
-vi.mock("../github.auth", () => ({
+vi.mock("@repo/platform/engine/modules/github/github.auth", () => ({
   getGitHubAuthMode: () => "app",
   resolveGitHubAuthMode: vi.fn(async () => "app"),
   getGitHubConnectionState: vi.fn(),
@@ -15,9 +15,9 @@ vi.mock("../github.auth", () => ({
   getUserStatus: vi.fn(),
   resolveInstallUrl: vi.fn(),
 }));
-vi.mock("../github.service", () => ({ listUserOwnedRepos: vi.fn() }));
-vi.mock("../github.token", () => ({ tokenFor: vi.fn(), canResolveTokenFor: vi.fn() }));
-vi.mock("./app-source", () => ({
+vi.mock("@repo/platform/engine/modules/github/github.service", () => ({ listUserOwnedRepos: vi.fn() }));
+vi.mock("@repo/platform/engine/modules/github/github.token", () => ({ tokenFor: vi.fn(), canResolveTokenFor: vi.fn() }));
+vi.mock("@repo/platform/engine/modules/github/sources/app-source", () => ({
   GitHubAppSource: class {
     mode = "app";
     listReposForOwner() { return Promise.resolve(h.appRepos); }
@@ -29,7 +29,7 @@ vi.mock("./app-source", () => ({
   },
 }));
 
-import { LocalGitHubSource } from "./local-source";
+import { LocalGitHubSource } from "@repo/platform/engine/modules/github/sources/local-source";
 
 const repo = (name: string, source: "app" | "cli") => ({
   full_name: `acme/${name}`,
@@ -70,7 +70,7 @@ describe("LocalGitHubSource with an operator-owned App", () => {
       listReposForOwner: vi.fn(async () => [repo("shared", "cli"), repo("cli-only", "cli")]),
       listAllRepos: vi.fn(),
       listOwners: vi.fn(),
-      status: vi.fn(),
+      status: vi.fn(async () => ({ available: true, login: "operator", method: "token" })),
     } as any;
     const source = new LocalGitHubSource({ userId: "u", organizationId: "o" } as any, gh);
 

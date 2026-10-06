@@ -1,5 +1,5 @@
+import { Icon as UiIcon, type IconName } from "@repo/ui/icons";
 import React, { useState } from "react";
-import { Inbox, Layers, ArrowRight, Pencil, KeyRound, Cpu } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { isServicesFramework } from "@repo/core";
 import { useProjectSettings } from "@/context/ProjectSettingsContext";
@@ -11,12 +11,9 @@ import { StorageSettings } from "./StorageSettings";
 import { ResourceSettings } from "./ResourceSettings";
 
 /**
- * Project → Runtime tab. READ-ONLY by design.
- *
- * Config (build/runtime/env) has a single edit owner: the deploy wizard. This
- * tab only DISPLAYS the project's current configuration and links to the wizard
- * (opened with ?projectId) for any change — so editing never lives in two
- * places and every change goes through the create-a-new-version flow.
+ * Configuration cards within project Settings. Build settings link to the deploy wizard; project
+ * environment, resources and storage use their existing focused editors.
+ * Shared project environment remains available for every workload type.
  *
  * Visual shell (SectionCard + ICON_TONES) mirrors the sibling settings tabs
  * (GitSettings / BackupSettings / DomainSettings) so the tab fills the same
@@ -41,7 +38,7 @@ function SectionCard({
   actions,
   children,
 }: {
-  icon: React.ComponentType<{ className?: string }>;
+  icon: IconName;
   iconTone?: keyof typeof ICON_TONES;
   title: string;
   description: string;
@@ -52,7 +49,7 @@ function SectionCard({
     <div className="overflow-hidden rounded-2xl border border-border/50 bg-card">
       <div className={`flex items-start gap-3 px-5 py-4 ${children ? "border-b border-border/40" : ""}`}>
         <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${ICON_TONES[iconTone]}`}>
-          <Icon className="size-4" />
+          <UiIcon name={Icon} className="size-4" />
         </div>
         <div className="min-w-0 flex-1">
           <h3 className="text-[14px] font-semibold text-foreground">{title}</h3>
@@ -91,7 +88,6 @@ export const BuildSettings = () => {
   const { buildData, projectData, servicesData, id } = useProjectSettings();
   const { t } = useI18n();
   const router = useRouter();
-  const [envOpen, setEnvOpen] = useState(false);
 
   const isWebmail = projectData?.framework === "webmail";
   const services = servicesData.services;
@@ -125,7 +121,7 @@ export const BuildSettings = () => {
         onClick={openWizard}
         className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-border/60 bg-muted/30 px-3 py-1.5 text-sm font-medium text-foreground transition-colors hover:bg-muted/50"
       >
-        <Pencil className="size-3.5" />
+        <UiIcon name="edit" className="size-3.5" />
         {t.projectSettings.build.edit}
       </button>
     ) : null;
@@ -135,7 +131,7 @@ export const BuildSettings = () => {
     return (
       <div className="space-y-5">
         <SectionCard
-          icon={Inbox}
+          icon={"inbox"}
           iconTone="muted"
           title={t.projectSettings.build.webmail.title}
           description={t.projectSettings.build.webmail.description}
@@ -165,7 +161,7 @@ export const BuildSettings = () => {
     return (
       <div className="space-y-5">
         <SectionCard
-          icon={Layers}
+          icon={"layers"}
           iconTone="primary"
           title={t.projectSettings.build.services.title}
           description={interpolate(t.projectSettings.build.services.descriptionTemplate, { serviceLabel })}
@@ -176,10 +172,11 @@ export const BuildSettings = () => {
               className="inline-flex items-center gap-1.5 rounded-xl bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
             >
               {t.projectSettings.build.services.open}
-              <ArrowRight className="size-3.5" />
+              <UiIcon name="arrow-right" className="size-3.5" />
             </button>
           }
         />
+        <ProjectEnvironmentSettings />
       </div>
     );
   }
@@ -205,7 +202,7 @@ export const BuildSettings = () => {
   return (
     <div className="space-y-5">
       <SectionCard
-        icon={Cpu}
+        icon={"cpu"}
         iconTone="orange"
         title={t.projectSettings.build.runtime.title}
         description={t.projectSettings.build.runtime.description}
@@ -251,10 +248,22 @@ export const BuildSettings = () => {
           meaningful for a project with a running container. */}
       {workload !== "static" && <StorageSettings />}
 
+      <ProjectEnvironmentSettings />
+    </div>
+  );
+};
+
+/** Shared project inputs remain editable for single apps, Compose and monorepos. */
+export function ProjectEnvironmentSettings() {
+  const { id } = useProjectSettings();
+  const { t } = useI18n();
+  const [envOpen, setEnvOpen] = useState(false);
+  return (
+    <>
       {/* Environment variables — edited in place via a safe per-variable editor
           (diff-merge; untouched secrets are never re-sent), NOT the wizard. */}
       <SectionCard
-        icon={KeyRound}
+        icon={"key"}
         iconTone="violet"
         title={t.projectSettings.build.env.title}
         description={t.projectSettings.build.env.description}
@@ -264,13 +273,13 @@ export const BuildSettings = () => {
             onClick={() => setEnvOpen(true)}
             className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-border/60 bg-muted/30 px-3 py-1.5 text-sm font-medium text-foreground transition-colors hover:bg-muted/50"
           >
-            <Pencil className="size-3.5" />
+            <UiIcon name="edit" className="size-3.5" />
             {t.projectSettings.build.env.edit}
           </button>
         }
       />
 
-      <EnvVarsEditor projectId={id} isOpen={envOpen} onClose={() => setEnvOpen(false)} />
-    </div>
+      <EnvVarsEditor key={id} projectId={id} isOpen={envOpen} onClose={() => setEnvOpen(false)} />
+    </>
   );
-};
+}

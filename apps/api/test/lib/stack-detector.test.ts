@@ -8,7 +8,7 @@ import {
   getStartCommand,
   resolvePackageJson,
   type RepoFile,
-} from "../../src/lib/stack-detector";
+} from "@repo/platform/engine/lib/stack-detector";
 
 /**
  * Helper: build a RepoFile[] from a flat string[] of filenames.
@@ -825,6 +825,18 @@ describe("getStartCommand", () => {
 // ─── Port detection ──────────────────────────────────────────────────────────
 
 describe("detectStack - port detection", () => {
+  it.each([
+    "PORT=4010 next start",
+    "cross-env NODE_ENV=production PORT=4010 next start",
+    "set PORT=4010 && next start",
+  ])("routes to the production script port from %s", (start) => {
+    const result = detectStack(files("package.json", "next.config.js"), {
+      dependencies: { next: "^15.0.0" },
+      scripts: { start, dev: "next dev --port 3001" },
+    });
+    expect(result.port).toBe(4010);
+  });
+
   it("falls back to STACKS[stack].defaultPort when no explicit port", () => {
     const result = detectStack(files("package.json", "next.config.js"), {
       dependencies: { next: "^15.0.0" },
@@ -1192,13 +1204,12 @@ describe("detectStack - smart port detection scenarios", () => {
     expect(result.port).toBe(3000);
   });
 
-  it("ignores single-digit port matches (regex requires 2-5 digits)", () => {
+  it("accepts a declared single-digit TCP port", () => {
     const result = detectStack(files("package.json"), {
       dependencies: { express: "^5.0.0" },
-      // Port 5 is < 10, regex requires \d{2,5}, so it's ignored.
       scripts: { start: "node server.js -p 5" },
     });
-    expect(result.port).toBe(3000);
+    expect(result.port).toBe(5);
   });
 
   it("Next.js dev with -p shorthand resolves correctly", () => {
@@ -1444,5 +1455,33 @@ describe("detectStack - recovers scripts when only the manifest text survives (#
       }),
     });
     expect(result.port).toBe(4321);
+  });
+});
+
+
+describe("Ruby runtime version detection", () => {
+  const railsFiles = files("Gemfile", ".ruby-version", "Gemfile.lock", "bin/rails");
+  it.each([
+    [{ ".ruby-version": "3.4.1", "Gemfile.lock": "RUBY VERSION\n   ruby 3.3.6p108\n", Gemfile: 'ruby "3.2.2"' }, "3.4.1"],
+    [{ "Gemfile.lock": "RUBY VERSION\n   ruby 3.3.6p108\n", Gemfile: 'ruby ">= 3.2"' }, "3.3.6"],
+    [{ Gemfile: 'ruby "3.2.2"' }, "3.2.2"],
+  ])("uses the project version before the language default", (content, version) => {
+    expect(detectStack(railsFiles, undefined, content).buildImage).toBe(`ruby:${version}-slim`);
+  });
+  it("keeps the pin when metadata changes the detected framework", () => {
+    expect(detectStack(railsFiles, undefined, {
+      Gemfile: 'gem "rails"', ".ruby-version": "3.4.1",
+      "openship.json": JSON.stringify({ framework: "sinatra" }),
+    })).toMatchObject({ stack: "sinatra", buildImage: "ruby:3.4.1-slim" });
+  });
+  it("applies the pin when metadata first identifies the Ruby framework", () => {
+    expect(detectStack(files("openship.json", ".ruby-version"), undefined, {
+      ".ruby-version": "3.4.1", "openship.json": JSON.stringify({ framework: "rails" }),
+    })).toMatchObject({ stack: "rails", buildImage: "ruby:3.4.1-slim" });
+  });
+  it("does not pin a Dockerfile-owned image", () => {
+    expect(detectStack(files("Dockerfile", ".ruby-version"), undefined, {
+      ".ruby-version": "3.4.1",
+    })).toMatchObject({ stack: "docker", buildImage: "ubuntu:22.04" });
   });
 });

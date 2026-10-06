@@ -26,7 +26,6 @@
     "staticOnly": "Yalnızca statik siteler — SSG, SPA ve düz HTML",
     "anyWorkload": "Her şeyi çalıştırın — container, Compose, worker, Postgres, Redis",
     "runningServices": "{runningServices} çalışan uygulama, veritabanı veya worker",
-    "computeMinutes": "Ayda {computeMinutes} hesaplama dakikası",
     "buildMinutes": "Ayda {buildMinutes} build dakikası",
     "power": "Uygulama başına en fazla {powerCpu} vCPU ve {powerRamGb} GB RAM",
     "projects": "{maxProjects} proje",
@@ -60,9 +59,9 @@
     "cta": "Kendi sunucunuzda başlayın"
   },
   "creditPacks": {
-    "pack_5k": "{computeMinutes} hesaplama dakikası",
-    "pack_25k": "{computeMinutes} hesaplama dakikası",
-    "pack_100k": "{computeMinutes} hesaplama dakikası"
+    "pack_5k": "{credits} kredi",
+    "pack_25k": "{credits} kredi",
+    "pack_100k": "{credits} kredi"
   },
   "ui": {
     "perMonth": "/ay",
@@ -80,6 +79,6 @@
     "campaignEnds": "Kampanya {date} tarihinde sona eriyor",
     "wasPrice": "eski fiyat {price}",
     "standardTitle": "Tüm planlarda",
-    "creditPackNote": "≈ Küçük bir uygulama için {appHours} saat veya {buildMinutes} derleme dakikası"
+    "creditPackNote": "Ölçülen bulut kullanımına uygulanır; süre iş yükünüze bağlıdır."
   }
 }

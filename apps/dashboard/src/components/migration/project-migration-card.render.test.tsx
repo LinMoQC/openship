@@ -173,7 +173,7 @@ describe("ProjectMigrationCard move vs duplicate", () => {
  */
 describe("the confirm dialog", () => {
   const src = readFileSync(new URL("./ProjectMigrationCard.tsx", import.meta.url), "utf8");
-  const confirm = src.slice(src.indexOf("const confirm ="), src.indexOf("return ("));
+  const confirm = src.slice(src.indexOf("const confirm ="), src.indexOf("return (", src.indexOf("const confirm =")));
 
   it("constrains its own width", () => {
     // The renderer's default is 80vw, sized for the WIDE content modals (a service table, a

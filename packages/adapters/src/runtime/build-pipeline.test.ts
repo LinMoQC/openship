@@ -191,7 +191,8 @@ describe("runBuildPipeline pinned clone failure boundaries", () => {
     expect(result.status).toBe("deploying");
     expect(commands.filter((command) => command.includes(" clone "))).toHaveLength(1);
     expect(commands.filter((command) => command.includes("--unshallow"))).toHaveLength(1);
-    expect(commands.at(-1)).toContain(" checkout ");
+    expect(commands.at(-2)).toContain(" checkout ");
+    expect(commands.at(-1)).toContain(" submodule update ");
     // Both network operations must obtain the relay header before invoking Git.
     for (const command of commands.filter(
       (entry) => entry.includes(" clone ") || entry.includes("--unshallow"),
@@ -210,6 +211,7 @@ describe("runBuildPipeline pinned clone failure boundaries", () => {
 
     expect(result.status).toBe("deploying");
     expect(commands.some((command) => command.includes("--unshallow"))).toBe(false);
-    expect(commands.at(-1)).toContain(" checkout ");
+    expect(commands.at(-2)).toContain(" checkout ");
+    expect(commands.at(-1)).toContain(" submodule update ");
   });
 });

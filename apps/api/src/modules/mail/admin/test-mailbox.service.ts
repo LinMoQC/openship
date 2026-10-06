@@ -36,14 +36,14 @@
 
 import type { CommandExecutor } from "@repo/adapters";
 import { safeErrorMessage, mailHostname } from "@repo/core";
-import { decrypt, encrypt } from "../../../lib/encryption";
-import { sshManager } from "../../../lib/ssh-manager";
+import { decrypt, encrypt } from "@repo/platform/engine/lib/encryption";
+import { sshManager } from "@repo/platform/engine/lib/ssh-manager";
 import {
   readState,
   mutateState,
   type MailServerState,
   type TestMailboxState,
-} from "../mail-state";
+} from "@repo/platform/engine/modules/mail/mail-state";
 import {
   buildCreds,
   buildUpsertMailboxSql,
@@ -55,14 +55,14 @@ import {
   randomPassword,
   rollbackMailbox,
   type PlatformMailboxCreds,
-} from "./platform-mailbox.service";
-import { transaction, queryOne, q } from "./psql-runner";
-import { hashPassword } from "./password";
+} from "@repo/platform/engine/modules/mail/admin/platform-mailbox.service";
+import { transaction, queryOne, q } from "@repo/platform/engine/modules/mail/admin/psql-runner";
+import { hashPassword } from "@repo/platform/engine/modules/mail/admin/password";
 import {
   createMaildirOnDisk,
   generateMaildir,
-} from "./maildir";
-import { recountDomain } from "./domains.service";
+} from "@repo/platform/engine/modules/mail/admin/maildir";
+import { recountDomain } from "@repo/platform/engine/modules/mail/admin/domains.service";
 
 export interface EnsureOpenshipTestMailboxOptions {
   /** Force a fresh password even if cached creds exist. */

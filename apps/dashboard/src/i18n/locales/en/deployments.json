@@ -1,4 +1,13 @@
 {
+  "loadFailed": "Could not load deployments.",
+  "retry": "Try again",
+  "pagination": {
+    "label": "Deployment pages",
+    "previous": "Previous page",
+    "next": "Next page",
+    "pageOf": "Page {page} of {total}",
+    "range": "{from}–{to} of {total} deployments"
+  },
   "time": {
     "secondsAgo": "{n}s ago",
     "minutesAgo": "{n}m ago",
@@ -29,6 +38,7 @@
   "sidebar": {
     "overview": {
       "title": "Overview",
+      "pageTitle": "On this page",
       "total": "Total",
       "successful": "Successful",
       "failed": "Failed",

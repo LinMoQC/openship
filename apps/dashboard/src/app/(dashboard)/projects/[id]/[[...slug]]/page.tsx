@@ -1,33 +1,22 @@
 "use client";
 
-import {
-  Check,
-  Plus,
-  ChevronDown,
-  ChevronLeft,
-  GitBranch,
-  Tag,
-  Loader2,
-  FilePlus2,
-  RefreshCw,
-  Trash2,
-} from "lucide-react";
+import { Icon as UiIcon } from "@repo/ui/icons";
 
 import { DomainSettings } from "../components/DomainSettings";
 import { GitSettings } from "../components/GitSettings";
 import { IncomingWebhooks } from "../components/IncomingWebhooks";
-import { BuildSettings } from "../components/BuildSettings";
 import { LogsSettings } from "../components/LogsSettings";
 import { BackupSettings } from "../components/BackupSettings";
 import { Deployments } from "../components/Deployments";
 import { HealthTab } from "../components/HealthTab";
 import { MonitoringTab } from "../components/MonitoringTab";
 import { AdvancedSettings } from "../components/AdvancedSettings";
+import { ReleaseTab } from "../components/ReleaseTab";
 import { OverviewTab } from "../components/OverviewTab";
-import { AppConfiguration } from "../components/AppConfiguration";
-import { isSchemaAppTemplate } from "@/components/app-settings/AppSettingsForm";
 import { ServicesTab } from "../components/ServicesTab";
+import { ProjectTopologyPage } from "@/components/topology/ProjectTopologyPage";
 import { ProjectSidebar, ProjectMobileTabs } from "../components/ProjectSidebar";
+import { ProjectTabSections } from "../components/ProjectTabSections";
 import { DraftProjectView } from "../components/DraftProjectView";
 import { environmentErrorMessage, environmentWizardHref } from "../components/environment-next";
 import { getProjectStatus } from "@/utils/project-status";
@@ -58,7 +47,7 @@ const branchToEnvironmentName = (branch: string) =>
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(" ") || branch;
 
-const EnvironmentSwitcher = () => {
+const EnvironmentSwitcher = ({ disabled = false }: { disabled?: boolean }) => {
   const { projectData, environments, createEnvironment, activeTab } = useProjectSettings();
   const { t } = useI18n();
   const router = useRouter();
@@ -321,12 +310,14 @@ const EnvironmentSwitcher = () => {
       onOpenChange={(open) => {
         if (!open) closeMenus();
       }}
-      className="relative flex items-center"
+      className="relative flex min-w-0 items-center"
     >
       <button
         type="button"
         onClick={openSwitcher}
-        className="inline-flex h-9 max-w-[260px] items-center gap-2 rounded-full border border-border/50 bg-card px-3 text-sm font-medium text-foreground transition-colors hover:bg-muted/40"
+        disabled={disabled}
+        title={disabled ? "Apply or discard pending topology changes before switching environments." : undefined}
+        className="inline-flex h-9 min-w-0 max-w-[260px] items-center gap-2 rounded-full border border-border/50 bg-card px-3 text-sm font-medium text-foreground transition-colors hover:bg-muted/40"
         aria-label={t.projects.env.switchAria}
         aria-expanded={isOpen}
         aria-haspopup="menu"
@@ -335,17 +326,17 @@ const EnvironmentSwitcher = () => {
         {currentEnvironment.isApp ? (
           currentEnvironment.version ? (
             <span className="inline-flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
-              <Tag className="size-3" />
+              <UiIcon name="tag" className="size-3" />
               <span className="truncate">{currentEnvironment.version}</span>
             </span>
           ) : null
         ) : (
           <span className="inline-flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
-            <GitBranch className="size-3" />
+            <UiIcon name="git-branch" className="size-3" />
             <span className="truncate">{currentEnvironment.gitBranch}</span>
           </span>
         )}
-        <ChevronDown className="size-4 shrink-0 text-muted-foreground" />
+        <UiIcon name="chevron-down" className="size-4 shrink-0 text-muted-foreground" />
       </button>
 
       {isOpen && !isAdding && (
@@ -381,18 +372,18 @@ const EnvironmentSwitcher = () => {
                     {env.isApp ? (
                       env.version ? (
                         <span className="mt-0.5 flex items-center gap-1 text-xs text-muted-foreground">
-                          <Tag className="size-3" />
+                          <UiIcon name="tag" className="size-3" />
                           <span className="truncate">{env.version}</span>
                         </span>
                       ) : null
                     ) : (
                       <span className="mt-0.5 flex items-center gap-1 text-xs text-muted-foreground">
-                        <GitBranch className="size-3" />
+                        <UiIcon name="git-branch" className="size-3" />
                         <span className="truncate">{env.gitBranch}</span>
                       </span>
                     )}
                   </span>
-                  {active && <Check className="size-4 shrink-0 text-primary" />}
+                  {active && <UiIcon name="check" className="size-4 shrink-0 text-primary" />}
                 </button>
               );
             })}
@@ -403,7 +394,7 @@ const EnvironmentSwitcher = () => {
               onClick={() => activateBranchCreator()}
               className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-start text-sm font-medium text-foreground transition-colors hover:bg-muted/50"
             >
-              <Plus className="size-4 text-muted-foreground" />
+              <UiIcon name="plus" className="size-4 text-muted-foreground" />
               {t.projects.env.newEnvironment}
             </button>
           </div>
@@ -423,7 +414,7 @@ const EnvironmentSwitcher = () => {
                 className="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
                 aria-label={t.projects.env.backToEnvironments}
               >
-                <ChevronLeft className="size-4" />
+                <UiIcon name="chevron-left" className="size-4" />
               </button>
               <span className="truncate text-sm font-medium text-foreground">
                 {t.projects.env.newEnvironment}
@@ -444,13 +435,13 @@ const EnvironmentSwitcher = () => {
                 aria-label={t.projects.env.refreshBranches}
                 title={t.projects.env.refreshBranches}
               >
-                <RefreshCw className={`size-4 ${loadingBranches ? "animate-spin" : ""}`} />
+                <UiIcon name="refresh" className={`size-4 ${loadingBranches ? "animate-spin" : ""}`} />
               </button>
             </div>
             <div className="max-h-[280px] overflow-y-auto">
               {loadingBranches && branches.length === 0 ? (
                 <div className="flex h-24 items-center justify-center text-muted-foreground">
-                  <Loader2 className="size-4 animate-spin" />
+                  <UiIcon name="spinner" className="size-4 animate-spin" />
                 </div>
               ) : visibleBranches.length > 0 ? (
                 visibleBranches.map((branchOption) => {
@@ -466,7 +457,7 @@ const EnvironmentSwitcher = () => {
                       className="flex w-full items-center justify-between gap-3 rounded-md px-3 py-2 text-start transition-colors hover:bg-muted/50 disabled:cursor-not-allowed disabled:opacity-60"
                     >
                       <span className="flex min-w-0 items-center gap-2">
-                        <GitBranch className="size-4 shrink-0 text-muted-foreground" />
+                        <UiIcon name="git-branch" className="size-4 shrink-0 text-muted-foreground" />
                         <span className="min-w-0">
                           <span className="block truncate text-sm font-medium text-foreground">
                             {branchOption.name}
@@ -479,11 +470,11 @@ const EnvironmentSwitcher = () => {
                         </span>
                       </span>
                       {creating ? (
-                        <Loader2 className="size-4 shrink-0 animate-spin text-primary" />
+                        <UiIcon name="spinner" className="size-4 shrink-0 animate-spin text-primary" />
                       ) : exists ? (
-                        <Check className="size-4 shrink-0 text-primary" />
+                        <UiIcon name="check" className="size-4 shrink-0 text-primary" />
                       ) : (
-                        <Plus className="size-4 shrink-0 text-muted-foreground" />
+                        <UiIcon name="plus" className="size-4 shrink-0 text-muted-foreground" />
                       )}
                     </button>
                   );
@@ -523,7 +514,7 @@ const EnvironmentSwitcher = () => {
                       disabled={!manualEnvironmentName.trim() || isCreating}
                       className="inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60"
                     >
-                      {isCreating ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
+                      {isCreating ? <UiIcon name="spinner" className="size-4 animate-spin" /> : <UiIcon name="plus" className="size-4" />}
                       {t.projects.env.create}
                     </button>
                   </div>
@@ -534,7 +525,7 @@ const EnvironmentSwitcher = () => {
                   onClick={() => setManualMode(true)}
                   className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-start text-sm font-medium text-foreground transition-colors hover:bg-muted/50"
                 >
-                  <FilePlus2 className="size-4 text-muted-foreground" />
+                  <UiIcon name="file-plus" className="size-4 text-muted-foreground" />
                   {t.projects.env.manualEnvironment}
                 </button>
               )}
@@ -553,6 +544,7 @@ const ProjectSettingsContent = () => {
     projectNotFound,
     errorType,
     activeTab,
+    activeTabGroup,
     tabs,
     id,
     // Read to tell the delete toast the truth: teardown drops THIS environment and
@@ -564,6 +556,7 @@ const ProjectSettingsContent = () => {
   // Analytics is per-card now; the page-level gate is about whether we
   // know enough about the project to even render its tabs.
   const { isLoading: isLoadingProjectInfo, error: projectInfoError } = useProjectInfo(id);
+  const [topologyHasPending, setTopologyHasPending] = useState(false);
 
   const { t } = useI18n();
   const { showToast } = useToast();
@@ -764,7 +757,7 @@ const ProjectSettingsContent = () => {
               <div className="p-6 space-y-5">
                 <div className="flex items-start gap-3">
                   <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-danger-bg text-danger">
-                    <Trash2 className="size-4" />
+                    <UiIcon name="trash" className="size-4" />
                   </div>
                   <div className="min-w-0">
                     <h3 className="text-base font-semibold text-foreground">
@@ -794,7 +787,7 @@ const ProjectSettingsContent = () => {
                     }}
                     className="inline-flex h-9 items-center gap-1.5 rounded-xl bg-danger-solid px-4 text-sm font-medium text-white transition-colors hover:bg-danger-solid/90"
                   >
-                    <Trash2 className="size-3.5" />
+                    <UiIcon name="trash" className="size-3.5" />
                     {t.projects.delete.forceModalConfirm}
                   </button>
                 </div>
@@ -822,10 +815,20 @@ const ProjectSettingsContent = () => {
     switch (activeTab) {
       case "overview":
         return <OverviewTab />;
+      case "topology":
+        return (
+          <ProjectTopologyPage
+            key={id}
+            environmentControl={<EnvironmentSwitcher disabled={topologyHasPending} />}
+            onPendingChange={setTopologyHasPending}
+          />
+        );
       case "services":
         return <ServicesTab />;
       case "domains":
         return <DomainSettings />;
+      case "release":
+        return <ReleaseTab />;
       case "deployments":
         return <Deployments />;
       case "health":
@@ -837,25 +840,12 @@ const ProjectSettingsContent = () => {
         return <GitSettings />;
       case "webhooks":
         return <IncomingWebhooks />;
-      case "runtime":
-      case "settings":
-        // Apps get the 2-mode Configuration surface (App settings | Deployment);
-        // regular projects get the raw build/runtime config.
-        return projectData.isApp && isSchemaAppTemplate(projectData.appTemplateId) ? (
-          <AppConfiguration />
-        ) : (
-          <BuildSettings />
-        );
       case "logs":
         return <LogsSettings />;
       case "backup":
         return <BackupSettings />;
       case "advanced":
-        return (
-          <div className="space-y-5">
-            <AdvancedSettings onDeleteProject={handleDeleteProject} />
-          </div>
-        );
+        return <AdvancedSettings onDeleteProject={handleDeleteProject} />;
       default:
         return <OverviewTab />;
     }
@@ -956,13 +946,9 @@ const ProjectSettingsContent = () => {
     // dashboard for the duration of the teardown. A never-deployed project
     // has no activeDeploymentId — that's the discriminator vs. a live delete.
     (status === "deleting" && !projectData.activeDeploymentId);
-  // A draft renders the focused screen for EVERY tab, not just overview:
-  // DraftProjectView is a draft's whole surface ("you never have to enter the
-  // production tabbed UI while a project is still draft"). Config editing lives
-  // in the deploy wizard, not an in-project tab — so a draft that lands on
-  // /runtime (e.g. via the wizard's post-save return, or a stale deep link)
-  // gets the draft screen, never the read-only Configuration tab.
-  if (isNeverDeployed) {
+  // Configured drafts can inspect their services in Topology before deploying.
+  // Other draft tabs keep the focused setup screen, including stale runtime links.
+  if (isNeverDeployed && activeTab !== "topology") {
     return (
       <PageContainer>
         <div className="mb-6">
@@ -975,12 +961,9 @@ const ProjectSettingsContent = () => {
           </div>
           {/* Logo intentionally omitted here — it lives in the DraftProjectView
               hero card below; showing it in both duplicates it. */}
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <h1 className="min-w-0 text-2xl font-semibold text-foreground truncate">
-              {projectData.name || t.projects.detail.projectFallback}
-            </h1>
-            <EnvironmentSwitcher />
-          </div>
+          <h1 className="text-2xl font-semibold text-foreground truncate">
+            {projectData.name || t.projects.detail.projectFallback}
+          </h1>
         </div>
         <DraftProjectView onDeleteProject={() => handleDeleteProject()} />
       </PageContainer>
@@ -988,7 +971,10 @@ const ProjectSettingsContent = () => {
   }
 
   return (
-    <PageContainer>
+    <PageContainer
+      outerClassName={activeTab === "topology" ? "flex min-h-full flex-col" : undefined}
+      className={activeTab === "topology" ? "flex w-full flex-1 flex-col" : undefined}
+    >
       {/* Compact Header */}
       <div className="mb-6">
         <div className="flex items-center space-x-2 rtl:space-x-reverse text-sm text-muted-foreground mb-2">
@@ -1006,21 +992,22 @@ const ProjectSettingsContent = () => {
             <>
               <span>/</span>
               <span className="text-foreground font-medium">
-                {tabs.find((tab) => tab.id === activeTab)?.label}
+                {tabs.find((tab) => tab.id === activeTabGroup)?.label}
               </span>
             </>
           )}
         </div>
 
-        <div className="flex items-center justify-between gap-4">
+        {/* Keep environment controls from squeezing the heading on phones. */}
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
           <div className="min-w-0">
             <h1 className="text-2xl font-semibold text-foreground truncate">
-              {tabs.find((tab) => tab.id === activeTab)?.label || t.projects.detail.overviewFallback}
+              {tabs.find((tab) => tab.id === activeTabGroup)?.label || t.projects.detail.overviewFallback}
             </h1>
           </div>
 
           <div className="flex items-center gap-2">
-            <EnvironmentSwitcher />
+            <EnvironmentSwitcher disabled={topologyHasPending} />
             {/* Shared definition — the same ⋮ the Apps page header carries. */}
             <HelpMenu />
           </div>
@@ -1028,10 +1015,11 @@ const ProjectSettingsContent = () => {
       </div>
 
       {/* Content */}
-      <div className="grid grid-cols-1 lg:grid-cols-[1fr_340px] gap-6">
+      <div className={`grid grid-cols-1 lg:grid-cols-[1fr_340px] gap-6 ${activeTab === "topology" ? "flex-1 lg:flex-none" : ""}`}>
         {/* ── LEFT COLUMN ── */}
-        <div className="space-y-6 min-w-0">
+        <div className={`min-w-0 ${activeTab === "topology" ? "flex flex-col gap-6" : "space-y-6"}`}>
           <ProjectMobileTabs />
+          <ProjectTabSections />
           {renderTabContent()}
         </div>
 

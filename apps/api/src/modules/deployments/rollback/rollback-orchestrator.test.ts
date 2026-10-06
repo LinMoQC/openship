@@ -24,6 +24,8 @@ const h = vi.hoisted(() => ({
   target: null as Record<string, unknown> | null,
   active: null as Record<string, unknown> | null,
   project: null as Record<string, unknown> | null,
+  runtimeName: "docker",
+  serviceImages: [] as Array<{ serviceId: string; serviceName: string; imageRef: string }>,
 }));
 
 vi.mock("@repo/db", () => ({
@@ -33,7 +35,8 @@ vi.mock("@repo/db", () => ({
         id === h.target?.id ? h.target : id === h.active?.id ? h.active : null,
     },
     project: { findById: async () => h.project },
-    service: { listByDeployment: async () => [] },
+    service: { listByDeployment: async () => h.serviceImages,
+      listByProject: async () => [{ id: "relay", name: "relay", enabled: true }, { id: "database", name: "database", enabled: true }] },
     serviceDeployment: { effectiveImagesAsOf: async () => new Map() },
     member: { listByOrganization: async () => [{ userId: "org-owner" }] },
   },
@@ -41,7 +44,7 @@ vi.mock("@repo/db", () => ({
 
 vi.mock("@repo/adapters", () => {
   class DockerRuntime {
-    name = "docker";
+    get name() { return h.runtimeName; }
 
     supports(): boolean {
       return false;
@@ -58,7 +61,7 @@ vi.mock("@repo/adapters", () => {
   return { DockerRuntime };
 });
 
-vi.mock("../../../lib/deployment-runtime", async () => {
+vi.mock("@repo/platform/engine/lib/deployment-runtime", async () => {
   const { DockerRuntime } = await import("@repo/adapters");
   return {
     // The production class intentionally has a private constructor; the mock
@@ -68,14 +71,17 @@ vi.mock("../../../lib/deployment-runtime", async () => {
   };
 });
 
-vi.mock("../build.service", () => ({
+vi.mock("@repo/platform/engine/modules/deployments/build.service", () => ({
   checkNoActiveBuild: vi.fn(),
   triggerDeployment: h.triggerDeployment,
 }));
 
-import { rollback } from "./rollback-orchestrator";
+import { rollback } from "@repo/platform/engine/modules/deployments/rollback/rollback-orchestrator";
+import { snapshotNeedsGitSource, withoutPinnedArtifacts } from "@repo/platform/engine/modules/deployments/pinned-artifacts";
 
 beforeEach(() => {
+  h.runtimeName = "docker";
+  h.serviceImages = [];
   h.imagePresent = false;
   h.inspectedImages = [];
   h.triggerDeployment.mockReset();
@@ -113,6 +119,7 @@ beforeEach(() => {
   };
   h.active = {
     id: "dep-active",
+    projectId: "project-1", organizationId: "org-1",
     commitSha: "newer-commit",
   };
   h.project = {
@@ -133,6 +140,58 @@ beforeEach(() => {
 });
 
 describe("rollback — reacquire a frozen release image", () => {
+  it("restores an exclusive candidate through its exact service boundary", async () => {
+    await rollback("dep-target", { serviceIds: ["relay"], strictServiceScope: true });
+    expect(h.triggerDeployment).toHaveBeenCalledTimes(1);
+    expect(h.triggerDeployment.mock.calls[0][1]).toMatchObject({
+      projectId: "project-1", serviceIds: ["relay"], strictServiceScope: true, forceAll: false,
+    });
+  });
+  it("refuses a stale or foreign service scope before triggering restoration", async () => {
+    await expect(rollback("dep-target", { serviceIds: ["foreign"], strictServiceScope: true }))
+      .rejects.toMatchObject({ code: "ROLLBACK_SCOPE_INVALID" });
+    expect(h.triggerDeployment).not.toHaveBeenCalled();
+  });
+  it("restores a cluster digest without changing the source used by a later redeploy", async () => {
+    h.runtimeName = "kubernetes";
+    h.target!.imageRef = FROZEN_RELEASE_IMAGE;
+    h.target!.commitSha = "abc1234";
+    h.target!.meta = {
+      deployTarget: "cluster", clusterId: "cluster-1", clusterRuntimeId: "runtime-1",
+      clusterProjectId: "project-1", clusterConfig: { replicas: 3 },
+      source: "git", repoUrl: "https://github.com/acme/app", branch: "main",
+      framework: "node", serviceDeploymentMode: "single",
+    };
+    await rollback("dep-target");
+    const [, request] = h.triggerDeployment.mock.calls[0] as [unknown, TriggerRequest];
+    expect(request.commitSha).toBeUndefined();
+    expect(request.reuseSnapshot.meta).toMatchObject({
+      clusterId: "cluster-1", clusterRuntimeId: "runtime-1", clusterConfig: { replicas: 3 },
+      source: "git", handoverAppImage: FROZEN_RELEASE_IMAGE,
+    });
+    expect(request.reuseSnapshot.meta.releaseImageRef).toBeUndefined();
+    expect(snapshotNeedsGitSource(request.reuseSnapshot.meta)).toBe(false);
+    expect(snapshotNeedsGitSource(withoutPinnedArtifacts(request.reuseSnapshot.meta))).toBe(true);
+    expect(request.reuseSnapshot.envVars).toEqual({ API_KEY: "encrypted-frozen" });
+  });
+
+  it("pins Cloud Docker service images while retaining the original shared workspace and volume configuration", async () => {
+    h.runtimeName = "cloud";
+    h.imagePresent = true;
+    h.serviceImages = [{ serviceId: "web", serviceName: "web", imageRef: "openship/app-web:bld_v1" }];
+    const binding = { projectId: "project-1", workspaceId: "shared-vm" };
+    const services = [{ id: "web", name: "web", volumes: ["data:/data"] }];
+    h.target!.imageRef = "compose";
+    h.target!.meta = { deployTarget: "cloud", runtimeMode: "docker", buildStrategy: "server",
+      serviceDeploymentMode: "services", workspaceId: "shared-vm", cloudDockerWorkspace: binding, composeServices: services };
+    await rollback("dep-target");
+    const [, request] = h.triggerDeployment.mock.calls[0] as [unknown, TriggerRequest];
+    expect(request.reuseSnapshot.meta).toMatchObject({
+      cloudDockerWorkspace: binding, workspaceId: "shared-vm", composeServices: services,
+      handoverImages: { web: "openship/app-web:bld_v1" }, buildStrategy: "server", deployTarget: "cloud",
+    });
+    expect(request.reuseSnapshot.envVars).toEqual({ API_KEY: "encrypted-frozen" });
+  });
   it("replays the immutable snapshot without a commit, repository, or stale local pin", async () => {
     await rollback("dep-target");
 
@@ -153,22 +212,5 @@ describe("rollback — reacquire a frozen release image", () => {
     expect(request.reuseSnapshot.meta.releaseTag).toBe("v1.2.3");
     expect(request.reuseSnapshot.meta.handoverAppImage).toBeUndefined();
     expect(JSON.stringify(request.reuseSnapshot.meta)).not.toContain("changed-{tag}");
-  });
-
-  it("replays an exclusive reject through the same exact service boundary", async () => {
-    await rollback("dep-target", {
-      serviceIds: ["svc-relay"],
-      strictServiceScope: true,
-    });
-
-    expect(h.triggerDeployment).toHaveBeenCalledTimes(1);
-    const [, request] = h.triggerDeployment.mock.calls[0] as [unknown, TriggerRequest];
-    expect(request).toMatchObject({
-      projectId: "project-1",
-      trigger: "rollback",
-      forceAll: false,
-      serviceIds: ["svc-relay"],
-      strictServiceScope: true,
-    });
   });
 });

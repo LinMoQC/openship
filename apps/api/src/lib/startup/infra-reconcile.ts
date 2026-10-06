@@ -29,9 +29,9 @@
 
 import { safeErrorMessage } from "@repo/core";
 import { repos } from "@repo/db";
-import { registerStartupHook } from "./index";
-import { readApiVersion } from "../release-resolver";
-import { scanInstanceContainers } from "../../modules/system/server-containers.service";
+import { registerStartupHook } from "@repo/platform/engine/lib/startup/index";
+import { readApiVersion } from "@repo/platform/engine/lib/release-resolver";
+import { scanInstanceContainers } from "@repo/platform/engine/modules/system/server-containers.service";
 
 export function registerInfraReconcile(): void {
   registerStartupHook({

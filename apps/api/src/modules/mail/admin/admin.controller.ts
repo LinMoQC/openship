@@ -10,7 +10,7 @@
  */
 
 import type { Context } from "hono";
-import { env } from "../../../config";
+import { env } from "@repo/platform/engine/config/index";
 import { repos } from "@repo/db";
 import { getRequestContext, type RequestContext } from "../../../lib/request-context";
 import { permission } from "../../../lib/permission";
@@ -26,7 +26,7 @@ import {
   listDomains,
   updateDomain,
   validateDomain,
-} from "./domains.service";
+} from "@repo/platform/engine/modules/mail/admin/domains.service";
 import {
   createMailbox,
   hardDeleteMailbox,
@@ -37,11 +37,11 @@ import {
   PlatformMailboxProtectedError,
   softDeleteMailbox,
   updateMailbox,
-} from "./mailboxes.service";
+} from "@repo/platform/engine/modules/mail/admin/mailboxes.service";
 import {
   ensureOpenshipPlatformMailbox,
   PlatformMailboxError,
-} from "./platform-mailbox.service";
+} from "@repo/platform/engine/modules/mail/admin/platform-mailbox.service";
 import {
   createAlias,
   deleteAlias,
@@ -67,7 +67,7 @@ import {
   acknowledgeDomainDns,
   getDomainDnsState,
   listPendingDomainDns,
-} from "./domain-dns.service";
+} from "@repo/platform/engine/modules/mail/admin/domain-dns.service";
 import {
   applyMailDomainDns,
   planMailDomainDns,
@@ -77,11 +77,11 @@ import {
   disableOutboundRelay,
   getOutboundRelay,
   type ConfigureRelayInput,
-} from "./outbound-relay.service";
-import { sshManager } from "../../../lib/ssh-manager";
-import { decrypt } from "../../../lib/encryption";
-import { readState } from "../mail-state";
-import { invalidatePlatformTransport } from "../../../lib/mail";
+} from "@repo/platform/engine/modules/mail/admin/outbound-relay.service";
+import { sshManager } from "@repo/platform/engine/lib/ssh-manager";
+import { decrypt } from "@repo/platform/engine/lib/encryption";
+import { readState } from "@repo/platform/engine/modules/mail/mail-state";
+import { invalidatePlatformTransport } from "@repo/platform/engine/lib/mail";
 
 /**
  * Org-scoped guard: confirms the path's :serverId belongs to the caller's
