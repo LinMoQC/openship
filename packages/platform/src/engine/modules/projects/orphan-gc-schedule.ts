@@ -30,6 +30,7 @@ import { releaseManagedHostnames } from "@repo/platform/engine/lib/managed-edge-
 import { connectionHostPortTargetKey } from "@repo/platform/engine/lib/host-port-target";
 import { ORPHAN_CLEANUP_LOCK } from "../../lib/orphan-cleanup-lock";
 import { withKeyedMutex } from "../../lib/provision-lock";
+import { assertDeploymentsAvailable } from "../../../deployment-maintenance";
 
 interface ProjectTargetSweepPayload {
   slug: string;
@@ -424,10 +425,12 @@ async function runOrphanSweepLocked(): Promise<{ reclaimed: number; deferred: nu
 let sweepInProgress = false;
 
 export async function runOrphanSweep(): Promise<{ reclaimed: number; deferred: number }> {
+  assertDeploymentsAvailable();
   if (sweepInProgress) return { reclaimed: 0, deferred: 0 };
   sweepInProgress = true;
   try {
     return await withKeyedMutex(ORPHAN_CLEANUP_LOCK, async () => {
+      assertDeploymentsAvailable();
       const lock = await tryAcquireAdvisoryLock(ORPHAN_CLEANUP_LOCK);
       if (!lock) return { reclaimed: 0, deferred: 0 };
       try {

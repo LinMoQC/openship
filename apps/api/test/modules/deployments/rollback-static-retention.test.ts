@@ -11,7 +11,9 @@ vi.mock("@repo/platform/engine/lib/deployment-runtime", async (original) => ({
   ...await original<typeof import("@repo/platform/engine/lib/deployment-runtime")>(),
   resolveDeploymentRuntime: async () => ({ runtime: h.runtime!, serverId: null }),
 }));
-import { reconcileProjectRetention, setPin } from "@repo/platform/engine/modules/deployments/rollback/rollback-orchestrator";
+import { reconcileProjectRetention, prune, setPin } from "@repo/platform/engine/modules/deployments/rollback/rollback-orchestrator";
+import { reapProjectImages } from "@repo/platform/engine/modules/deployments/image-gc";
+import { runOrphanSweep } from "@repo/platform/engine/modules/projects/orphan-gc-schedule";
 import { updateProject } from "@repo/platform/engine/modules/projects/project-crud.service";
 
 let root: string;
@@ -81,4 +83,24 @@ it("keeps pinned files and retries a failed real directory cleanup", async () =>
   await setPin(rows[1]!.id, false);
   expect(await exists(paths[1]!)).toBe(false);
   expect(await exists(paths[0]!)).toBe(true);
+});
+
+it("keeps real recovery files and retained records while maintenance blocks background cleanup", async () => {
+  const marker = join(root, "maintenance");
+  await writeFile(marker, "control-platform-upgrade");
+  vi.stubEnv("OPENSHIP_DEPLOYMENT_FREEZE_FILE", marker);
+  try {
+    for (const action of [
+      () => reconcileProjectRetention(project.id),
+      () => prune(project.id),
+      () => reapProjectImages(project),
+      () => runOrphanSweep(),
+    ]) await expect(action()).rejects.toMatchObject({ code: "DEPLOYMENT_MAINTENANCE" });
+    for (const path of paths) expect(await exists(path)).toBe(true);
+    for (const row of rows) expect((await repos.deployment.findById(row.id))!.artifactRetainedAt).not.toBeNull();
+    await rm(marker);
+    expect((await reconcileProjectRetention(project.id)).purged).toBe(3);
+    expect(await exists(paths[1]!)).toBe(false);
+    expect(await readFile(join(paths[0]!, "index.html"), "utf8")).toBe("release-8");
+  } finally { vi.unstubAllEnvs(); }
 });

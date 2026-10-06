@@ -1,0 +1,88 @@
+---
+title: release
+description: Commands, arguments, and options for openship release.
+cliGroup: openship release
+---
+
+See the [workflow guide](/docs/api/releases) for examples. Global flags such as `--json` go before the command; see [global options](/docs/cli/reference#global-options).
+
+## openship release
+
+Inspect and submit frozen GitOps release plans
+
+```text
+openship release [options] [command]
+```
+
+| Subcommand | Purpose |
+| --- | --- |
+| [`capabilities`](/docs/cli/reference/release#openship-release-capabilities) |  |
+| [`state [options]`](/docs/cli/reference/release#openship-release-state) |  |
+| [`plan [options]`](/docs/cli/reference/release#openship-release-plan) |  |
+| [`show <plan-id>`](/docs/cli/reference/release#openship-release-show) |  |
+| [`start [options] <plan-id>`](/docs/cli/reference/release#openship-release-start) |  |
+| [`run <run-id>`](/docs/cli/reference/release#openship-release-run) |  |
+
+## openship release capabilities
+
+Use this command with the arguments below.
+
+```text
+openship release capabilities [options]
+```
+
+## openship release plan
+
+Use this command with the arguments below.
+
+```text
+openship release plan [options]
+```
+
+| Option | Meaning |
+| --- | --- |
+| `--project <id>` | Bound project ID |
+| `--event-key <key>` | Exact pending release event |
+| `--manifest-commit <sha>` | Exact accepted production candidate or PRT base |
+
+## openship release run
+
+Use this command with the arguments below.
+
+```text
+openship release run [options] <run-id>
+```
+
+## openship release show
+
+Use this command with the arguments below.
+
+```text
+openship release show [options] <plan-id>
+```
+
+## openship release start
+
+Use this command with the arguments below.
+
+```text
+openship release start [options] <plan-id>
+```
+
+| Option | Meaning |
+| --- | --- |
+| `--idempotency-key <key>` | Stable key for this submission; preserve it on retry |
+| `--confirm <environment>` | Type production for a production plan |
+
+## openship release state
+
+Use this command with the arguments below.
+
+```text
+openship release state [options]
+```
+
+| Option | Meaning |
+| --- | --- |
+| `--project <id>` | Bound project ID |
+| `--fresh` | Read latest GitOps and runtime state |

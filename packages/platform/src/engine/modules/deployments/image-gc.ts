@@ -25,6 +25,7 @@ import { resolveDeploymentRuntime, createServerDockerRuntime, type DeploymentMet
 import { refreshRollbackCapacity } from "./release-retention";
 import { computeKeepSet } from "./retained-artifacts";
 import { withRetentionLock } from "./retention-lock";
+import { assertDeploymentsAvailable } from "../../../deployment-maintenance";
 
 export interface ImageGcSummary {
   projectsScanned: number;
@@ -87,11 +88,13 @@ export function selectImageRemovalRefs(
  * every rollback-eligible image, and volumes/backups aren't images.
  */
 export async function reapProjectImages(project: Project): Promise<ReapResult> {
+  assertDeploymentsAvailable();
   return await withRetentionLock(project.id, reapProjectImagesUnlocked)
     ?? { removed: 0, bytes: 0, skippedInUse: 0, errors: 0 };
 }
 
 async function reapProjectImagesUnlocked(project: Project): Promise<ReapResult> {
+  assertDeploymentsAvailable();
   const out: ReapResult = { removed: 0, bytes: 0, skippedInUse: 0, errors: 0 };
   if ((await repos.releases.journals(project.id)).some(row => !["committed", "restored"].includes(row.stage))) return out;
   if (!project.activeDeploymentId) return out; // no host to resolve

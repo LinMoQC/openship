@@ -605,9 +605,9 @@
     "deploymentNumber": "رقم النشر",
     "adaptationPending": "تكييف الإصدار الأصلي قيد الانتظار",
     "customRuntime": "بيئة تشغيل مخصصة: الترقية باستخدام حزمة متوافقة تم التحقق منها",
-    "githubConnect": "Connect my GitHub account",
-    "githubLinking": "Connecting",
-    "githubSetup": "GitHub OAuth is not configured on this platform. Ask an administrator to configure it before connecting.",
-    "githubLinkError": "Could not connect your GitHub account"
+    "githubConnect": "ربط حسابي على GitHub",
+    "githubLinking": "جارٍ الربط",
+    "githubSetup": "لم يُضبط GitHub OAuth على هذه المنصة. اطلب من المسؤول ضبطه قبل ربط حسابك.",
+    "githubLinkError": "تعذّر ربط حسابك على GitHub"
   }
 }

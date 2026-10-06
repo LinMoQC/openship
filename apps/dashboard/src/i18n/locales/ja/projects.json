@@ -605,9 +605,9 @@
     "deploymentNumber": "デプロイ番号",
     "adaptationPending": "上流バージョンへの対応待ち",
     "customRuntime": "カスタム実行環境：検証済みの対応パッケージでアップグレードしてください",
-    "githubConnect": "Connect my GitHub account",
-    "githubLinking": "Connecting",
-    "githubSetup": "GitHub OAuth is not configured on this platform. Ask an administrator to configure it before connecting.",
-    "githubLinkError": "Could not connect your GitHub account"
+    "githubConnect": "自分の GitHub アカウントを接続",
+    "githubLinking": "接続中",
+    "githubSetup": "このプラットフォームでは GitHub OAuth が設定されていません。接続する前に管理者に設定を依頼してください。",
+    "githubLinkError": "GitHub アカウントを接続できませんでした"
   }
 }

@@ -24,6 +24,7 @@ Upgrade the control platform and validate Admin, Web, then Core PRT. Business pr
 - Stateless candidate opt-in uses isolated candidate DNS/ports and immutable local image IDs, durable journal recovery and retained incumbents; Core completion jobs and stateful services do not inherit parallel candidate or database rollback behavior
 - Legacy scoped failure/reject fixes preserve the incumbent and exclusive scope, including the public build-access/source-upload contract
 - Maintenance freezes shared deployment admission and existing GitOps workflows, drains every project environment, saves a consistent matching database/key/runtime backup and refuses database downgrade after any ambiguous unfreeze
+- Maintenance also refuses orphan, retained-artifact and image cleanup before entering their runtime locks; verification with real retained files confirms cleanup resumes after unfreeze
 
 ## Compatibility audit
 
@@ -70,6 +71,9 @@ These are actual local executions, distinct from GitHub CI or live rollout evide
 | Release OAuth connection | Four rendered cases passed; matching Dashboard production build passed |
 | Database ownership/export | Full database suite: 545 tests / 61 files passed; instance exports preserve all four release tables and project/organization transfers refuse to drop GitOps ownership |
 | Public deployment contract | 15 tests passed, including registered release identity, exclusive scope and rejection of conflicting rebuild controls |
+| Maintenance cleanup | 31 regressions passed, including unchanged real recovery files and retention records while frozen, followed by successful cleanup after unfreeze |
+| CLI | All 586 tests / 49 files passed with loopback permission for local probe fixtures |
+| Public documentation | 165 MDX pages, 457 SDK methods, 672 HTTP routes, 428 MCP tools, 221 CLI paths and 121 typed SDK examples passed; OAuth copy parity passed without raising baselines |
 | SDK | 182 tests passed; final source scope subset 19 passed |
 | GitOps controller/maintenance/inventory | 81 tests passed |
 | Scoped status/reject/retention/build regressions | 140 tests passed |

@@ -605,9 +605,9 @@
     "deploymentNumber": "Numéro de déploiement",
     "adaptationPending": "Adaptation à la version amont en attente",
     "customRuntime": "Environnement personnalisé : mise à niveau avec un ensemble compatible vérifié",
-    "githubConnect": "Connect my GitHub account",
-    "githubLinking": "Connecting",
-    "githubSetup": "GitHub OAuth is not configured on this platform. Ask an administrator to configure it before connecting.",
-    "githubLinkError": "Could not connect your GitHub account"
+    "githubConnect": "Connecter mon compte GitHub",
+    "githubLinking": "Connexion en cours",
+    "githubSetup": "GitHub OAuth n’est pas configuré sur cette plateforme. Demandez à un administrateur de le configurer avant de connecter votre compte.",
+    "githubLinkError": "Impossible de connecter votre compte GitHub"
   }
 }

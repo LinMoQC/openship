@@ -13,6 +13,7 @@
     "config",
     "deploy",
     "deployment",
+    "release",
     "logs",
     "---Applications---",
     "project",

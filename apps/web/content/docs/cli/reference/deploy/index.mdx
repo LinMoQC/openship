@@ -22,6 +22,8 @@ openship deploy [options]
 | `--env <environment>` | Variable set: production \| preview (project ID selects the runtime) (default: "production") |
 | `--force-all` | Rebuild every enabled service (skip smart per-service routing) |
 | `--service-ids <ids>` | Comma-separated service IDs to deploy (smart routing) |
+| `--release-run <id>` | Registered GitOps controller run ID |
+| `--strict-service-scope` | Refuse deployment outside the exact selected service set |
 | `--smart-route` | Rebuild only services changed since the active deploy |
 | `--refresh` | Re-apply current env to the active deploy (no git pull, no rebuild) |
 | `--folder` | Upload the current folder as source (also works inside a Git repository) |

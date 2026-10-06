@@ -55,6 +55,7 @@ import { retainedArtifacts, effectiveServiceArtifacts } from "../retained-artifa
 import { withRetentionLock } from "../retention-lock";
 import { withoutPinnedArtifacts } from "../pinned-artifacts";
 import { assertExactServiceTargets } from "../exact-service-targets";
+import { assertDeploymentsAvailable } from "../../../../deployment-maintenance";
 import {
   planRestore,
   planNeedsRepository,
@@ -571,10 +572,12 @@ async function revertUnitSwap(
  * Called after every successful deploy, and exposed for admin tooling.
  */
 export async function prune(projectId: string): Promise<{ purged: number; failed: number }> {
+  assertDeploymentsAvailable();
   return await withRetentionLock(projectId, pruneUnlocked) ?? { purged: 0, failed: 0 };
 }
 
 async function pruneUnlocked(project: Project): Promise<{ purged: number; failed: number }> {
+  assertDeploymentsAvailable();
   const keep = await retainedArtifacts(project);
   let purged = 0;
   let failed = 0;
@@ -640,6 +643,9 @@ async function pruneUnlocked(project: Project): Promise<{ purged: number; failed
 /** Reconcile the row, its artifacts, and leftover build tags under one lock.
  * Used by deploy completion, settings, unpinning, and the scheduled backstop. */
 export async function reconcileProjectRetention(projectId: string) {
+  // The migration window preserves recovery material as well as admission.
+  // Scheduled cleanup retries after the root-owned maintenance marker is gone.
+  assertDeploymentsAvailable();
   return await withRetentionLock(projectId, async (project) => {
     if ((await repos.releases.journals(project.id)).some(row => !["committed", "restored"].includes(row.stage)))
       return { purged: 0, removed: 0, bytes: 0, skippedInUse: 0, errors: 0 };

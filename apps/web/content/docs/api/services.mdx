@@ -429,5 +429,6 @@ organization. List the project's services with `GET /api/projects/:id/services` 
 | Restart the service runtime. | `services.restart(parentId, id, input?)` | `POST /api/projects/:id/services/:serviceId/restart`<br />`project:service:write` |
 | Read recent service runtime logs. | `services.runtimeLogs(parentId, id, input?)` | `GET /api/projects/:id/services/:serviceId/logs`<br />`project:service:read` |
 | Execute an authorized command in the service runtime. | `services.exec(parentId, id, input)` | `POST /api/projects/:id/services/:serviceId/exec`<br />`project:service:write` |
+| Synchronize an exact Compose document using a registered GitOps controller context; server environment files stay on the host. | `services.syncDocument(id, input)` | `POST /api/projects/:id/services/sync-compose`<br />`project:service:write` |
 
 {/* api-operations:end */}

@@ -2687,6 +2687,60 @@
       "section": "Operations",
       "description": "Read a recorded run, result, and captured output.",
       "route": "GET /api/jobs/runs/:runId"
+    },
+    "services.syncDocument": {
+      "page": "services",
+      "section": "Operations",
+      "description": "Synchronize an exact Compose document using a registered GitOps controller context; server environment files stay on the host.",
+      "route": "POST /api/projects/:id/services/sync-compose"
+    },
+    "releases.state": {
+      "page": "releases",
+      "section": "Operations",
+      "description": "Read actual and target versions with environment-specific checks; request fresh inspection explicitly.",
+      "route": "GET /api/projects/:id/release-state"
+    },
+    "releases.bind": {
+      "page": "releases",
+      "section": "Operations",
+      "description": "Register explicit GitOps ownership and bound controller Token IDs; requires project administration.",
+      "route": "PUT /api/projects/:id/release-binding"
+    },
+    "releases.plan": {
+      "page": "releases",
+      "section": "Operations",
+      "description": "Persist a fixed target and read-only preflight with a ten-minute expiry.",
+      "route": "POST /api/projects/:id/release-plans"
+    },
+    "releases.getPlan": {
+      "page": "releases",
+      "section": "Operations",
+      "description": "Read a saved release plan through its stored project permission.",
+      "route": "GET /api/release-plans/:id"
+    },
+    "releases.start": {
+      "page": "releases",
+      "section": "Operations",
+      "description": "Submit using the current user’s GitHub OAuth identity and a stable idempotency key; token and MCP submissions are refused.",
+      "route": "POST /api/release-plans/:id/runs"
+    },
+    "releases.latest": {
+      "page": "releases",
+      "section": "Operations",
+      "description": "Read the latest persisted run for the bound project and environment.",
+      "route": "GET /api/projects/:id/release-run"
+    },
+    "releases.getRun": {
+      "page": "releases",
+      "section": "Operations",
+      "description": "Read workflow, recovery and acceptance state; an ambiguous submission is reconciled without redispatch.",
+      "route": "GET /api/release-runs/:id"
+    },
+    "releases.capabilities": {
+      "page": "releases",
+      "section": "Operations",
+      "description": "Read runtime provenance and GitOps contract capabilities within the optional project scope.",
+      "route": "GET /api/releases/capabilities"
     }
   },
   "http": {
@@ -3554,6 +3608,26 @@
       "page": "servers",
       "section": "Legacy network URLs",
       "description": "Compatibility alias for `PATCH /api/system/networks/preparations/:preparationId/connections`."
+    },
+    "POST /api/projects/:id/controller-releases": {
+      "page": "releases",
+      "section": "Controller and events",
+      "description": "Register an automatic PRT execution using its bound authenticated controller token and exact workflow/event/manifest."
+    },
+    "POST /api/release-runs/:id/register-workflow": {
+      "page": "releases",
+      "section": "Controller and events",
+      "description": "Bind the real GitHub Run and verify workflow identity, actor and fixed plan. Internal controller endpoint; excluded from SDK and MCP."
+    },
+    "POST /api/release-runs/:id/progress": {
+      "page": "releases",
+      "section": "Controller and events",
+      "description": "Record authenticated controller progress and validate actual deployment, immutable receipt and external probes before acceptance. Excluded from SDK and MCP."
+    },
+    "GET /api/release-runs/:id/events": {
+      "page": "releases",
+      "section": "Controller and events",
+      "description": "Subscribe to persisted release state over SSE; reconnect by reading the same Run ID."
     }
   }
 }

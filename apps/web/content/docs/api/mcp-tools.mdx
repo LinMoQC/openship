@@ -5,7 +5,7 @@ description: Generated tool descriptions, API mappings, availability, and intent
 
 This catalog is generated from the route metadata used by MCP discovery. Run `tools/list` against your instance for its current input schemas and the tools available to your credential. See [MCP setup](/docs/mcp), [protocol and arguments](/docs/api/mcp), and the [cluster/scaling workflow](/docs/guides/mcp-clusters-and-scaling).
 
-The current API has **424 unique tools**. Permission tags below describe the route's initial authority; shared operations also enforce workspace, resource, source-access and instance-admin requirements. Self-hosted tools are unavailable on the hosted Cloud controller.
+The current API has **428 unique tools**. Permission tags below describe the route's initial authority; shared operations also enforce workspace, resource, source-access and instance-admin requirements. Self-hosted tools are unavailable on the hosted Cloud controller.
 
 ## Tools
 
@@ -420,6 +420,20 @@ The current API has **424 unique tools**. Permission tags below describe the rou
 | `post_projects_scan`<br />`POST /api/projects/scan` | Inspect a source directory accessible to the Openship controller and detect build or Compose configuration. For a folder on the MCP client machine, use the folder-upload workflow. | `project:write`<br />Self-hosted |
 | `put_projects_by_id_release_image_source`<br />`PUT /api/projects/:id/release-image-source` | Atomically configure this single-app project to track and deploy a prebuilt container image from GitHub releases or a version URL. | `project:write` |
 
+### release-capabilities
+
+| Tool and HTTP route | Description | Access |
+| --- | --- | --- |
+| `get_releases_capabilities`<br />`GET /api/releases/capabilities` | Read immutable runtime and GitOps contract capabilities within the optional project scope | `updates:read` |
+
+### releases
+
+| Tool and HTTP route | Description | Access |
+| --- | --- | --- |
+| `get_projects_by_id_release_run`<br />`GET /api/projects/:id/release-run` | Read the latest persisted GitOps release run for this project | `project:read` |
+| `get_projects_by_id_release_state`<br />`GET /api/projects/:id/release-state` | Read actual and target GitOps versions with preflight state | `project:read` |
+| `post_projects_by_id_release_plans`<br />`POST /api/projects/:id/release-plans` | Create a frozen ten-minute GitOps release plan with read-only preflight | `project:write` |
+
 ### services
 
 | Tool and HTTP route | Description | Access |
@@ -683,8 +697,10 @@ Every remaining route has an explicit boundary: browser authorization, streaming
 | `PATCH /api/projects/:id/clone-token` | Git credential management is kept in the authenticated dashboard; MCP deploys through the configured credentials. |
 | `GET /api/projects/:id/cluster/databases/stream` | SSE transport for live progress. Use the resource’s JSON status/log tools over MCP, or an authenticated HTTP client for streaming. |
 | `GET /api/projects/:id/cluster/volumes/stream` | SSE transport for live volume status. Use the JSON list tool over MCP. |
+| `POST /api/projects/:id/controller-releases` | Bound automatic PRT controller registration |
 | `POST /api/projects/:id/deployment-session` | Browser deployment-session handoff. MCP starts deployments through /api/deployments/build/access. |
 | `GET /api/projects/:id/logs/stream` | SSE transport for live progress. Use the resource’s JSON status/log tools over MCP, or an authenticated HTTP client for streaming. |
+| `PUT /api/projects/:id/release-binding` | Explicit operator configuration of GitOps ownership and controller identities |
 | `POST /api/projects/:id/resources` | Compatibility alias; use PATCH /api/projects/:id/resources. |
 | `POST /api/projects/:id/routing/ensure-edge/respond` | Response to the browser’s ensure-edge SSE session. Use routing/retry and the project pending-actions tool for routing repair; interactive edge setup and proxy takeover remain in the dashboard. |
 | `POST /api/projects/:id/routing/ensure-edge/stream` | SSE transport for live progress. Use the resource’s JSON status/log tools over MCP, or an authenticated HTTP client for streaming. |
@@ -693,8 +709,15 @@ Every remaining route has an explicit boundary: browser authorization, streaming
 | `GET /api/projects/:id/server-logs/stream-token` | Browser streaming credential. MCP reads the bounded server-logs endpoint with its own bearer. |
 | `POST /api/projects/:id/services/:serviceId/env-reveal` | Explicit dashboard secret reveal. MCP reads masked effective environment and saves named overrides without retrieving plaintext. |
 | `GET /api/projects/:id/services/:serviceId/logs/stream` | SSE transport for live progress. Use the resource’s JSON status/log tools over MCP, or an authenticated HTTP client for streaming. |
+| `POST /api/projects/:id/services/sync-compose` | Server-side CI Compose synchronization |
 | `POST /api/projects/folder/scan/:sessionId/env-reveal` | Explicit dashboard secret reveal. MCP passes uploadSessionId to project ensure so real values stay server-side. |
 | `POST /api/projects/folder/upload/:sessionId` | Binary tarball upload; use the authenticated upload URL from folder/session outside JSON-RPC. |
+| `GET /api/release-plans/:id` | Saved release operations authorize their stored parent project |
+| `POST /api/release-plans/:id/runs` | Saved release operations authorize their stored parent project |
+| `GET /api/release-runs/:id` | Saved release operations authorize their stored parent project |
+| `GET /api/release-runs/:id/events` | Saved release operations authorize their stored parent project |
+| `POST /api/release-runs/:id/progress` | Saved release operations authorize their stored parent project |
+| `POST /api/release-runs/:id/register-workflow` | Saved release operations authorize their stored parent project |
 | `POST /api/services/terminal/ticket` | Single-use browser WebSocket terminal ticket. Use the service exec tool for bounded commands over MCP. |
 | `GET /api/services/terminal/ws/:serviceId` | WebSocket upgrade — auth happens inside upgradeWebSocket via ticket subprotocol or session-cookie fallback (HTTP middleware blocks the handshake) |
 | `PUT /api/settings` | Compatibility settings update; use the dedicated build-mode tool for this preference. |

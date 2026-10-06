@@ -605,9 +605,9 @@
     "deploymentNumber": "Dağıtım numarası",
     "adaptationPending": "Üst kaynak uyarlaması bekleniyor",
     "customRuntime": "Özel çalışma ortamı: doğrulanmış uyumlu bir paketle yükseltin",
-    "githubConnect": "Connect my GitHub account",
-    "githubLinking": "Connecting",
-    "githubSetup": "GitHub OAuth is not configured on this platform. Ask an administrator to configure it before connecting.",
-    "githubLinkError": "Could not connect your GitHub account"
+    "githubConnect": "GitHub hesabımı bağla",
+    "githubLinking": "Bağlanıyor",
+    "githubSetup": "Bu platformda GitHub OAuth yapılandırılmamış. Hesabınızı bağlamadan önce bir yöneticiden yapılandırmasını isteyin.",
+    "githubLinkError": "GitHub hesabınız bağlanamadı"
   }
 }
