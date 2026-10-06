@@ -63,7 +63,7 @@ These are actual local executions, distinct from GitHub CI or live rollout evide
 
 | Proof | Result |
 | --- | --- |
-| API full regression before final scoped compatibility additions | 7,311 tests / 591 files passed |
+| Final API full regression | 7,334 tests / 594 files passed |
 | Shared Platform | 227 tests / 30 files passed |
 | Dashboard | 2,227 tests / 210 files passed; production build passed |
 | SDK | 182 tests passed; final source scope subset 19 passed |
