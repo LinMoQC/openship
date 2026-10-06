@@ -16,9 +16,11 @@ describe("deployment contract", () => {
       "forceAll",
       "projectId",
       "refresh",
+      "releaseRunId",
       "serverId",
       "serviceIds",
       "smartRoute",
+      "strictServiceScope",
     ]);
     expect(
       Value.Check(CreateDeploymentSchema, {
@@ -39,6 +41,20 @@ describe("deployment contract", () => {
         handoverImages: [],
       }),
     ).toEqual({ projectId: "p1" });
+  });
+
+  it("preserves registered release identity and exclusive service scope", () => {
+    expect(parseCreateDeploymentInput({
+      projectId: "p1", releaseRunId: "run-a", serviceIds: ["s1"], strictServiceScope: true,
+      controllerToken: "untrusted", reuseSnapshot: {},
+    })).toEqual({
+      projectId: "p1", releaseRunId: "run-a", serviceIds: ["s1"], strictServiceScope: true,
+    });
+    expect(() => parseCreateDeploymentInput({ projectId: "p1", strictServiceScope: true })).toThrow();
+    expect(() => parseCreateDeploymentInput({
+      projectId: "p1", strictServiceScope: true, serviceIds: ["s1"], forceAll: true,
+    })).toThrow();
+    expect(() => parseCreateDeploymentInput({ projectId: "p1", releaseRunId: "" })).toThrow();
   });
 
   it("accepts complete deployment records and compatible ID-only responses", () => {

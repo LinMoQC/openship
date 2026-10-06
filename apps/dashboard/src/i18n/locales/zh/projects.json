@@ -604,6 +604,10 @@
     "rollbackCommit": "历史验收清单的完整提交 SHA",
     "deploymentNumber": "部署次数",
     "adaptationPending": "上游版本待适配",
-    "customRuntime": "定制运行时，使用已验证的配套发布包升级"
+    "customRuntime": "定制运行时，使用已验证的配套发布包升级",
+    "githubConnect": "连接我的 GitHub 账号",
+    "githubLinking": "正在连接",
+    "githubSetup": "平台尚未配置 GitHub OAuth，请管理员配置后再连接",
+    "githubLinkError": "无法连接 GitHub 账号"
   }
 }

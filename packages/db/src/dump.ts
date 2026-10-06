@@ -29,7 +29,7 @@ import { getTableConfig, type PgTable } from "drizzle-orm/pg-core";
 import { db, getDriver, type DatabaseTransaction } from "./client";
 import * as schema from "./schema";
 import { SERVICE_SECRET_FIELDS, DEPLOYMENT_SECRET_FIELDS } from "./configuration-secrets";
-import { deploymentBelongsToProject } from "@repo/core";
+import { AppError, deploymentBelongsToProject } from "@repo/core";
 
 export const DUMP_FORMAT_VERSION = 1;
 
@@ -191,6 +191,13 @@ export interface TableSpec {
 }
 
 const TABLES: ReadonlyArray<TableSpec> = [
+  // Preserve release ownership and crash-recovery evidence together with the
+  // whole instance. A tenant/project move cannot carry the host or controller
+  // authority and is refused below instead of silently dropping these rows.
+  { sqlName: "release_binding", table: schema.releaseBinding, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: true },
+  { sqlName: "release_plan", table: schema.releasePlan, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: true },
+  { sqlName: "release_run", table: schema.releaseRun, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: true },
+  { sqlName: "service_cutover_journal", table: schema.serviceCutoverJournal, scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: false },
   {
     sqlName: "external_identity", table: schema.externalIdentity,
     scopes: [{ in: "instance", via: "all-rows" }], hasOrganizationId: false,
@@ -1042,6 +1049,18 @@ export async function dumpSubgraph(
   scope: SubgraphScope,
   opts: DumpOptions = {},
 ): Promise<DatabaseDump> {
+  if (scope.kind !== "instance") {
+    const projects = await db.select({ id: schema.project.id }).from(schema.project).where(
+      scope.kind === "project" ? eq(schema.project.id, scope.projectId) : eq(schema.project.organizationId, scope.organizationId),
+    );
+    const ids = projects.map(row => row.id);
+    // Independent of exclusion/history options: removing ownership from the
+    // export must never turn a managed project into an unrestricted one.
+    if (ids.length) for (const table of [schema.releaseBinding, schema.releasePlan, schema.releaseRun, schema.serviceCutoverJournal]) {
+      if ((await db.select({ id: table.id }).from(table).where(inArray(table.projectId, ids)).limit(1)).length)
+        throw new AppError("GitOps release ownership and recovery records require a whole-instance export with matched runtime ownership", 409, "GITOPS_TRANSFER_UNSUPPORTED");
+    }
+  }
   const tables: DatabaseDump["tables"] = {};
   const excludedTables = new Set(opts.excludeTables ?? []);
 

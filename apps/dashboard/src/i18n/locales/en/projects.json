@@ -604,6 +604,10 @@
     "rollbackCommit": "Full commit SHA of the accepted manifest",
     "deploymentNumber": "Deployment number",
     "adaptationPending": "Upstream adaptation pending",
-    "customRuntime": "Custom runtime: upgrade with a verified matched bundle"
+    "customRuntime": "Custom runtime: upgrade with a verified matched bundle",
+    "githubConnect": "Connect my GitHub account",
+    "githubLinking": "Connecting",
+    "githubSetup": "GitHub OAuth is not configured on this platform. Ask an administrator to configure it before connecting.",
+    "githubLinkError": "Could not connect your GitHub account"
   }
 }

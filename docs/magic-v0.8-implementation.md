@@ -15,6 +15,7 @@ Upgrade the control platform and validate Admin, Web, then Core PRT. Business pr
 - Incremental migration `0151_gitops_releases.sql` creates ReleaseBinding, ReleasePlan, ReleaseRun and ServiceCutoverJournal records; credentials remain in existing encrypted stores
 - Plans expire after ten minutes; submission revalidates the target, current deployment, environment hash, authorization and blockers; atomic admission consumes one plan and permits one active run per project
 - Workflow dispatch uses the current user's GitHub OAuth identity; a timeout becomes submission-unknown and reconciles the existing run without automatic retransmission
+- The release workspace explicitly links the current user's GitHub account with repository scope; a missing OAuth provider shows configuration guidance rather than falling back to server clone credentials
 - Controller registration verifies authenticated Token ID, repository, workflow/ref/SHA, actor, Run, manifest and exact services; controller registration is not exposed through MCP
 - Bound projects reject ordinary Update, Redeploy, Rollback, source upload, webhook and direct deploy mutations without the registered execution context
 - Acceptance requires the immutable GitOps receipt, active deployment, actual image digests/topology/configuration and external probes; GitHub success alone does not mean accepted
@@ -66,6 +67,9 @@ These are actual local executions, distinct from GitHub CI or live rollout evide
 | Final API full regression | 7,334 tests / 594 files passed |
 | Shared Platform | 227 tests / 30 files passed |
 | Dashboard | 2,227 tests / 210 files passed; production build passed |
+| Release OAuth connection | Four rendered cases passed; matching Dashboard production build passed |
+| Database ownership/export | Full database suite: 545 tests / 61 files passed; instance exports preserve all four release tables and project/organization transfers refuse to drop GitOps ownership |
+| Public deployment contract | 15 tests passed, including registered release identity, exclusive scope and rejection of conflicting rebuild controls |
 | SDK | 182 tests passed; final source scope subset 19 passed |
 | GitOps controller/maintenance/inventory | 81 tests passed |
 | Scoped status/reject/retention/build regressions | 140 tests passed |
@@ -95,3 +99,5 @@ A macOS sleep interrupted one literal-kill run. The unchanged suite subsequently
 - Observe at least 24 hours after actual rollout; show missing production activation, migration rehearsal, backup, environment and topology evidence separately
 
 No live upgrade, runtime publication, six-project binding or PRT acceptance is implied by local code tests. Backups, database contents, live environment values and encryption keys must stay outside the repository, release packages and public CI artifacts.
+
+The intermediate source `5a21c5d9f812e50b18cdf9e5c5acd31aa60cd42a` passed real Docker fast/heavy, real ACME/DNS, scaling application/storage/databases and installed SDK Node 22/24 in [GitHub run 37536827537](https://github.com/LinMoQC/openship/actions/runs/37536827537). Its unit gate exposed missing dump catalogue classification; the local correction also prevents partial exports from silently losing release ownership. The complete final committed-tree gate must still pass before assets can be published.

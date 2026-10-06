@@ -604,6 +604,10 @@
     "rollbackCommit": "SHA complet du commit du manifeste validé",
     "deploymentNumber": "Numéro de déploiement",
     "adaptationPending": "Adaptation à la version amont en attente",
-    "customRuntime": "Environnement personnalisé : mise à niveau avec un ensemble compatible vérifié"
+    "customRuntime": "Environnement personnalisé : mise à niveau avec un ensemble compatible vérifié",
+    "githubConnect": "Connect my GitHub account",
+    "githubLinking": "Connecting",
+    "githubSetup": "GitHub OAuth is not configured on this platform. Ask an administrator to configure it before connecting.",
+    "githubLinkError": "Could not connect your GitHub account"
   }
 }

@@ -48,6 +48,10 @@ export const PROJECT_TRANSFER_TABLES = new Set([
 
 /** These project children require their instance's runtime ownership to travel with them. */
 export const PROJECT_TRANSFER_UNSUPPORTED_TABLES: Readonly<Record<string, string>> = {
+  release_binding: "GitOps release ownership requires a whole-instance export with matched controller and host ownership.",
+  release_plan: "Fixed release plans require a whole-instance export with matched controller and host ownership.",
+  release_run: "Release execution and acceptance records require a whole-instance export with matched controller and host ownership.",
+  service_cutover_journal: "Container cutover recovery requires a whole-instance export with matched controller and host ownership.",
   cluster_database:
     "Projects with cluster databases cannot be transferred individually yet. Use a whole-instance export to preserve cluster and database ownership.",
 };
@@ -249,7 +253,7 @@ export async function selectProjectTransfer(
   const projectIds = ids(tables.project!);
   for (const [table, reason] of Object.entries(PROJECT_TRANSFER_UNSUPPORTED_TABLES)) {
     if ((await read(table, "projectId", projectIds)).length) {
-      throw new AppError(reason, 409, "CLUSTER_TRANSFER_UNSUPPORTED");
+      throw new AppError(reason, 409, table === "cluster_database" ? "CLUSTER_TRANSFER_UNSUPPORTED" : "GITOPS_TRANSFER_UNSUPPORTED");
     }
   }
   const projectSet = new Set(projectIds);

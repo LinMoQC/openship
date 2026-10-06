@@ -209,6 +209,9 @@ describe("whole-instance dump → restore round trip", () => {
     }
     const restoredRuntime = (await dumpSubgraph({ kind: "instance" })).tables.cluster_runtime;
     expect(JSON.parse(JSON.stringify(restoredRuntime))).toEqual(overTheWire.tables.cluster_runtime);
+    const restoredRelease = await dumpSubgraph({ kind: "instance" });
+    for (const name of ["release_binding", "release_plan", "release_run", "service_cutover_journal"])
+      expect(JSON.parse(JSON.stringify(restoredRelease.tables[name])), `${name} ownership or recovery evidence changed`).toEqual(overTheWire.tables[name]);
 
     // Spot-check the exact edge that broke in production: a domain bound to a
     // service, restored with its binding intact rather than nulled or dropped.
@@ -217,6 +220,18 @@ describe("whole-instance dump → restore round trip", () => {
     )) as Array<Record<string, unknown>>;
     expect(domain?.serviceId).toBe(seeded.get("domain")?.serviceId);
     expect(domain?.serviceId).toBeTruthy();
+  });
+
+  it.each(["project", "organization"] as const)("refuses %s exports that would drop release ownership", async kind => {
+    const project = seeded.get("project")!;
+    const scope = kind === "project" ? { kind, projectId: String(project.id) } : { kind, organizationId: String(project.organizationId) };
+    await expect(dumpSubgraph(scope, { excludeTables: ["release_binding", "release_plan", "release_run", "service_cutover_journal"] }))
+      .rejects.toMatchObject({ statusCode: 409, code: "GITOPS_TRANSFER_UNSUPPORTED" });
+  });
+
+  it("does not block an unrelated tenant because release records exist elsewhere", async () => {
+    const dump = await dumpSubgraph({ kind: "organization", organizationId: "unrelated-tenant" });
+    expect(dump.tables.project).toEqual([]);
   });
 
   it("lets callers include follow-up work in the same atomic restore transaction", async () => {

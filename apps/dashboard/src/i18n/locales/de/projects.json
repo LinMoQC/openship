@@ -604,6 +604,10 @@
     "rollbackCommit": "Vollständiger Commit-SHA des abgenommenen Manifests",
     "deploymentNumber": "Bereitstellungsnummer",
     "adaptationPending": "Anpassung an die Upstream-Version ausstehend",
-    "customRuntime": "Angepasste Laufzeit: Upgrade mit einem geprüften, abgestimmten Paket"
+    "customRuntime": "Angepasste Laufzeit: Upgrade mit einem geprüften, abgestimmten Paket",
+    "githubConnect": "Connect my GitHub account",
+    "githubLinking": "Connecting",
+    "githubSetup": "GitHub OAuth is not configured on this platform. Ask an administrator to configure it before connecting.",
+    "githubLinkError": "Could not connect your GitHub account"
   }
 }

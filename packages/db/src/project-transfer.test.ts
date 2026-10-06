@@ -22,6 +22,15 @@ function reader(databaseProjectId: string): TransferRowReader {
 }
 
 describe("project transfer runtime ownership", () => {
+  it.each(["release_binding", "release_plan", "release_run", "service_cutover_journal"])(
+    "refuses to drop %s even when explicitly excluded", async table => {
+      const read: TransferRowReader = async (name, column, values) => {
+        const rows = name === table ? [{ id: "ownership", projectId: "project-a" }] : name === "project" ? [{ id: "project-a", organizationId: "org-a" }] : [];
+        return rows.filter(row => values.includes(row[column as keyof typeof row]));
+      };
+      await expect(selectProjectTransfer(read, selection, [table])).rejects.toMatchObject({ statusCode: 409, code: "GITOPS_TRANSFER_UNSUPPORTED" });
+    },
+  );
   it.each([{ excluded: [] }, { excluded: ["cluster_database"] }])(
     "refuses to drop cluster database ownership with exclusions $excluded",
     async ({ excluded }) => {
