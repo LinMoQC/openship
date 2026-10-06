@@ -100,6 +100,9 @@ export interface UpdateState {
   currentVersion: string;
   latestVersion: string | null;
   updateAvailable: boolean;
+  /** Upstream notices are independent of verified custom-runtime bundles. */
+  customRuntime?: boolean;
+  adaptationRequired?: boolean;
   /** Advisories that apply to the current version, most severe first. */
   advisories: Advisory[];
   /** Link to the public website changelog. */

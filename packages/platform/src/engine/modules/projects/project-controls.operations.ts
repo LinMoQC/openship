@@ -1,3 +1,4 @@
+import { requireGitopsRelease, requireEditableReleaseConfiguration } from "../releases/release-gate";
 import { repos } from "@repo/db";
 import { ProjectControlSchemas } from "@repo/contracts";
 import { presentProject, type ProjectDependencies } from "../../../projects";
@@ -74,6 +75,7 @@ export function createProjectControls(
       );
     },
     async createEnvironment(ctx, id, input) {
+      await requireGitopsRelease(id);
       const data = await (await service()).createProjectEnvironment(id, ctx, input);
       updated(ctx, id, {
         action: "environment.created",
@@ -89,6 +91,7 @@ export function createProjectControls(
       return (await service()).listEnvVars(id, ctx.organizationId, input?.environment);
     },
     async mergeEnvVars(ctx, id, input) {
+      await requireEditableReleaseConfiguration(id);
       const data = await (await service()).mergeEnvVars(id, ctx.organizationId, input);
       // Names only: values must never enter audit history, including non-secrets.
       updated(ctx, id, {
@@ -103,6 +106,7 @@ export function createProjectControls(
       return (await service()).getResources(id, ctx.organizationId);
     },
     async updateResources(ctx, id, input) {
+      await requireGitopsRelease(id);
       const data = await (await service()).updateResources(id, input, ctx.organizationId);
       updated(ctx, id, {
         action: "resources.updated",
@@ -114,11 +118,13 @@ export function createProjectControls(
       return data;
     },
     async setSleepMode(ctx, id, input) {
+      await requireGitopsRelease(id);
       const data = await (await service()).setSleepMode(id, input.sleep_mode, ctx.organizationId);
       updated(ctx, id, { action: "sleepMode.set", sleepMode: input.sleep_mode });
       return data;
     },
     async setOptions(ctx, id, input) {
+      await requireGitopsRelease(id);
       const data = presentProject(
         await (await service()).updateOptions(id, input, ctx.organizationId),
       );
@@ -126,16 +132,19 @@ export function createProjectControls(
       return data;
     },
     async setBranch(ctx, id, input) {
+      await requireGitopsRelease(id);
       const data = await (await service()).setBranch(id, input.branch, ctx.organizationId);
       updated(ctx, id, { action: "branch.set", gitBranch: input.branch });
       return data;
     },
     async enable(ctx, id) {
+      await requireGitopsRelease(id);
       const data = await (await service()).enableProject(id, ctx.organizationId);
       updated(ctx, id, { action: "enabled" });
       return data;
     },
     async disable(ctx, id) {
+      await requireGitopsRelease(id);
       const data = await (await service()).disableProject(id, ctx.organizationId);
       updated(ctx, id, { action: "disabled" });
       return data;

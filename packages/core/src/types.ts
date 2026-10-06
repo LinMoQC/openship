@@ -206,12 +206,16 @@ export type OpenshipReadiness = {
   stabilization?: boolean;
   /** How long to watch for a restart loop. Default 15. */
   stabilizationSeconds?: number;
+  /** Docker services only: explicitly allow a second, temporary stateless process
+   * with no published ports. Requires a Docker healthcheck, no volumes or shared
+   * namespaces, and no completion job. Failure vetoes cutover. Defaults off. */
+  preflight?: boolean;
   /**
    * What a failed check does.
    *   "warn" (default) — the deploy stays `ready` and carries an
    *                      action-required warning. Never destroys anything.
-   *   "fail"           — the deploy fails and reverts to the previous
-   *                      deployment, which keeps serving.
+   *   "fail"           — veto the deployment. Single-app deploys attempt a revert;
+   *                      Compose needs explicit stateless preflight for retained-container recovery.
    */
   onFailure?: OpenshipReadinessFailureAction;
 };
@@ -239,6 +243,21 @@ export type ComposeAdvancedPatch = {
 };
 
 export type ComposeAdvanced = {
+  /** Long-form Compose dependency semantics keyed by sibling service name. */
+  dependsOnConditions?: Record<
+    string,
+    {
+      condition: "service_started" | "service_healthy" | "service_completed_successfully";
+      required?: boolean;
+    }
+  >;
+  /** Docker volume names that Compose resolved explicitly (external/name).
+   * These pass through without the Openship project prefix. */
+  externalVolumeNames?: string[];
+  /** Existing Docker network selected by an imported single-network Compose stack. */
+  externalNetworkName?: string;
+  /** This service is a one-shot task whose successful exit is its healthy state. */
+  runToCompletion?: boolean;
   /**
    * Provenance for a Compose `image:` expression. `resolved` remains in the
    * service's ordinary `image` column for display and rollback snapshots; this

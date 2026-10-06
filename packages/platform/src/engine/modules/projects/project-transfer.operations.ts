@@ -1,3 +1,4 @@
+import { requireGitopsRelease } from "../releases/release-gate";
 import { AppError, NotFoundError, safeErrorMessage } from "@repo/core";
 import { OperationError, ProjectTransferSchemas } from "@repo/contracts";
 import type { ResourceServices } from "../../../resource-operations";
@@ -35,6 +36,7 @@ export function createProjectTransferOperations(recordAudit: ProjectDependencies
   });
   return {
     async transferToCloud(ctx, id) {
+      await requireGitopsRelease(id);
       assertTransferScope(ctx);
       try {
         const result = await (await import("./transfer.service")).promoteProjectToCloud(ctx, id);
@@ -48,6 +50,7 @@ export function createProjectTransferOperations(recordAudit: ProjectDependencies
       } catch (error) { return transferFailure(error, "Project transfer to cloud failed"); }
     },
     async transferToSelfHosted(ctx, id) {
+      await requireGitopsRelease(id);
       assertTransferScope(ctx);
       try {
         const result = await (await import("./transfer.service")).transferProjectToSelfHosted({ projectId: id, organizationId: ctx.organizationId });

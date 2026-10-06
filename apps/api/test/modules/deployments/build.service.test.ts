@@ -31,6 +31,7 @@ const {
   requireClusterDeploymentTarget: vi.fn(),
   kickoffBuild: vi.fn(),
   repos: {
+    releases: { binding: vi.fn(async () => null), pendingJournals: vi.fn(async () => []), journals: vi.fn(async () => []) },
     projectConnection: { listByTarget: vi.fn(async () => []) },
     project: {
       findById: vi.fn(),
@@ -827,6 +828,23 @@ describe("triggerDeployment", () => {
     expect(resolveProjectInfo).toHaveBeenCalledOnce();
   });
 
+  it("refuses forceAll overriding an exclusive service scope before any deployment is queued", async () => {
+    await expect(triggerDeployment(ctx, { projectId: "project-1", serviceIds: ["svc-api"],
+      strictServiceScope: true, forceAll: true })).rejects.toThrow("cannot be combined");
+    expect(repos.deployment.create).not.toHaveBeenCalled();
+    expect(kickoffBuild).not.toHaveBeenCalled();
+  });
+  it("refuses a router broadening the exclusive target before any deployment is queued", async () => {
+    repos.service.listByProject.mockResolvedValue([
+      { id: "svc-api", name: "api", enabled: true, advanced: null },
+      { id: "svc-db", name: "db", enabled: true, advanced: null },
+    ]);
+    resolveSmartRoute.mockResolvedValue({ forceAll: true, serviceIds: undefined });
+    await expect(triggerDeployment(ctx, { projectId: "project-1", serviceIds: ["svc-api"], strictServiceScope: true }))
+      .rejects.toMatchObject({ code: "DEPLOYMENT_SCOPE_CHANGED" });
+    expect(repos.deployment.create).not.toHaveBeenCalled();
+    expect(kickoffBuild).not.toHaveBeenCalled();
+  });
   it("persists exact scope and force-pull intent for an incoming multi-service hook", async () => {
     const targets = ["svc-api", "svc-worker"];
     repos.service.listByProject.mockResolvedValue([
@@ -1976,6 +1994,31 @@ describe("requestBuildAccess — folder-upload compose services", () => {
     resolveProjectSourceEnv.mockResolvedValue(undefined);
   });
 
+  it("persists the public exclusive folder scope without broadening the service set", async () => {
+    const uploadSessionId = seedSession();
+    repos.service.listByProject.mockResolvedValue([
+      { id: "api-id", name: "api", enabled: true, advanced: null },
+      { id: "db-id", name: "database", enabled: true, advanced: null },
+    ]);
+    await requestBuildAccess(ctx, { projectId: "project-1", uploadSessionId,
+      serviceIds: ["api-id"], strictServiceScope: true });
+    expect(repos.deployment.create.mock.calls.at(-1)?.[0]?.meta).toMatchObject({
+      targetServiceIds: ["api-id"], strictServiceScope: true,
+    });
+  });
+  it("refuses a stale public folder scope without queuing or starting deployment", async () => {
+    const uploadSessionId = seedSession();
+    await expect(requestBuildAccess(ctx, { projectId: "project-1", uploadSessionId,
+      serviceIds: ["missing"], strictServiceScope: true })).rejects.toThrow("missing, disabled, or cross-project");
+    expect(repos.deployment.create).not.toHaveBeenCalled();
+    expect(kickoffBuild).not.toHaveBeenCalled();
+  });
+  it("refuses an empty exclusive folder scope before source reconciliation", async () => {
+    await expect(requestBuildAccess(ctx, { projectId: "project-1", serviceIds: [], strictServiceScope: true }))
+      .rejects.toThrow("at least one service ID");
+    expect(repos.service.syncFromCompose).not.toHaveBeenCalled();
+    expect(repos.deployment.create).not.toHaveBeenCalled();
+  });
   it("rejects a foreign folder target before service or deployment writes", async () => {
     const uploadSessionId = seedSession();
     repos.server.getInOrganization.mockResolvedValue(null);

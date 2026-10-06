@@ -12,6 +12,9 @@ async function setup() {
   const rows = [storedDeployment(), storedDeployment("project-b", "org-b")];
   const authorization = createAuthorization(state);
   const audit = vi.fn();
+  const admit = vi.fn(async () => {});
+  const forward = vi.fn(async () => null);
+  const trigger = vi.fn(async () => ({ deployment: rows[0]! }));
   let writer: ((event: string, data: string) => boolean) | undefined;
   const unsubscribe = vi.fn();
   const resources: DeploymentResourceDependencies = {
@@ -36,13 +39,21 @@ async function setup() {
     subscribe: vi.fn((_id, callback) => { writer = callback; return { success: true, unsubscribe }; }),
   };
   const platform = createPlatform({ authorization, resources, recordAudit: audit,
-    trigger: async () => ({ deployment: rows[0]! }), present: (row) => JSON.parse(JSON.stringify(row)),
+    admit, forward, trigger, present: (row) => JSON.parse(JSON.stringify(row)),
   });
   const ctx = await authorization.resolveScope(alice, "org-a");
-  return { platform, ctx, state, resources, rows, audit, unsubscribe, send: (event: string, data: string) => writer?.(event, data) };
+  return { platform, ctx, state, resources, rows, audit, admit, forward, trigger, unsubscribe, send: (event: string, data: string) => writer?.(event, data) };
 }
 
 describe("shared deployment lifecycle", () => {
+  it("enforces release admission before both the cloud gateway and local engine", async () => {
+    const s = await setup();
+    s.admit.mockRejectedValue(Object.assign(new Error("Create a release plan"), { code: "GITOPS_RELEASE_REQUIRED" }));
+    await expect(s.platform.deployments.create(s.ctx, { projectId: "project-a" }, { projectSource: "cloud" })).rejects.toMatchObject({ code: "GITOPS_RELEASE_REQUIRED" });
+    expect(s.forward).not.toHaveBeenCalled();
+    expect(s.trigger).not.toHaveBeenCalled();
+    expect(s.audit).not.toHaveBeenCalled();
+  });
   it("passes history filters and complete project options through the shared contract", async () => {
     const s = await setup();
     vi.mocked(s.resources.list).mockResolvedValue({ rows: s.rows.slice(0, 1), total: 41, page: 3, perPage: 20,

@@ -45,7 +45,11 @@ export function proxy(req: NextRequest) {
   // enforced by the API process, which returns 401 rather than a redirect.
   if (pathname.startsWith("/api/")) return NextResponse.next();
 
-  const isPublic = PUBLIC_ROUTES.some((r) => pathname.startsWith(r));
+  // The isolated preview uses an injected fixture client and is never served
+  // by a production build. Keep this exception exact so other dev routes
+  // cannot accidentally become unauthenticated.
+  const isReleasePreview = process.env.NODE_ENV !== "production" && pathname === "/dev/release";
+  const isPublic = isReleasePreview || PUBLIC_ROUTES.some((r) => pathname.startsWith(r));
   const hasCookie = req.cookies.getAll().some((c) => c.name.endsWith(SESSION_COOKIE_SUFFIX));
 
   if (!hasCookie && !isPublic) {

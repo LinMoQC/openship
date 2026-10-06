@@ -16,8 +16,10 @@ const h = vi.hoisted(() => ({
   audit: vi.fn(),
   available: vi.fn(),
 }));
-vi.mock("@repo/db", () => ({
+vi.mock("@repo/db", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@repo/db")>(),
   repos: {
+    releases: { binding: vi.fn(async () => null), pendingJournals: vi.fn(async () => []), journals: vi.fn(async () => []) },
     project: { findById: h.find },
     clusterRuntime: { bindProject: h.bind },
     clusterDatabase: { list: vi.fn(async () => []) },

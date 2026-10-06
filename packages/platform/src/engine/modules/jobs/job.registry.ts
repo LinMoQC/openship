@@ -25,7 +25,7 @@ import { runReconcileSweep } from "@repo/platform/engine/modules/deployments/rec
 import { runImageGcSweep } from "@repo/platform/engine/modules/deployments/image-gc";
 import { verifyPendingDomains } from "@repo/platform/engine/modules/domains/domain.service";
 import { runEdgeVerifySweep } from "@repo/platform/engine/modules/domains/edge-verify-schedule";
-import { scanInstanceUpdates } from "@repo/platform/engine/modules/updates/updates.service";
+import { scanInstanceUpdates, scanGitopsReleaseStates } from "@repo/platform/engine/modules/updates/updates.service";
 import { scanInstanceModules } from "@repo/platform/engine/modules/system/server-modules.service";
 import { scanInstanceContainers } from "@repo/platform/engine/modules/system/server-containers.service";
 import { runHealthWatch, pruneResolvedIncidents } from "@repo/platform/engine/modules/monitoring/health-watch";
@@ -272,6 +272,13 @@ export const SYSTEM_JOB_DEFS: SystemJobDef[] = [
         failed: r.failed,
       };
     },
+  },
+  {
+    key: "releases:scan",
+    label: "GitOps release state verification",
+    defaultCron: "*/5 * * * *",
+    available: () => platform().target !== "cloud",
+    run: async () => { const r = await scanGitopsReleaseStates(); return { scanned: r.scanned, supported: r.supported }; },
   },
   {
     key: "updates:scan",

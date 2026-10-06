@@ -86,16 +86,12 @@ jobs:
           workflow: .github/workflows/release-gate.yml
           job-id: test
 
-      # `latest`, matching what CI has always run these suites on. Deliberately NOT
-      # switched to the pinned .bun-version here: these two jobs now block releases,
-      # and changing their runtime in the same move that made them blocking is how you
-      # get a gate whose first red run nobody can attribute. Worth revisiting as its
-      # own change — a gate arguably should be reproducible.
+      # Execute release proof with the same pinned Bun used to build artifacts.
       - name: Setup Bun
         if: steps.resume.outputs.reused != 'true'
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version-file: .bun-version
 
       - name: Cache bun install
         if: steps.resume.outputs.reused != 'true'
@@ -207,7 +203,7 @@ jobs:
         if: steps.resume.outputs.reused != 'true'
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version-file: .bun-version
 
       - name: Cache bun install
         if: steps.resume.outputs.reused != 'true'
@@ -230,7 +226,14 @@ jobs:
           docker info
           docker version
 
-      - name: Run real-daemon E2E
+      - name: Pull the immutable isolated PostgreSQL fixture
+        # This database fixture is mandatory; a missing image fails the suite.
+        # It runs with no published container port, credentials or host socket.
+        # Install it explicitly so the gate cannot silently skip the drill.
+        if: steps.resume.outputs.reused != 'true'
+        run: docker pull postgres@sha256:3d0f7584ed7d04e27fa050d6683a74746608faf21f202be78460d679cc56461f
+
+      - name: Validate real Docker recovery and isolated database upgrades
         if: steps.resume.outputs.reused != 'true'
         env:
           RUN_DOCKER_E2E: "1"

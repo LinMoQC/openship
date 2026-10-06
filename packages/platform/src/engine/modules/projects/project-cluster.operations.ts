@@ -1,3 +1,4 @@
+import { requireGitopsRelease } from "../releases/release-gate";
 import { repos } from "@repo/db";
 import {
   AppError,
@@ -77,6 +78,7 @@ export function createProjectClusterOperations(
   return {
     getClusterWorkload: read,
     async setClusterTarget(ctx, id, input) {
+      await requireGitopsRelease(id);
       await fleetAdmin(ctx);
       const changed = await withLiveProjectRuntimeMutation(id, async (project) => {
         assertResourceInOrg(project, "Project", ctx.organizationId, id);
@@ -145,6 +147,7 @@ export function createProjectClusterOperations(
       return read(ctx, id);
     },
     async scaleClusterWorkload(ctx, id, input) {
+      await requireGitopsRelease(id);
       assertClusterManagementAvailable();
       const result = await withLiveProjectRuntimeMutation(id, async (project) => {
         assertResourceInOrg(project, "Project", ctx.organizationId, id);

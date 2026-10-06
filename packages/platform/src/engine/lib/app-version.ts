@@ -1,14 +1,14 @@
-import apiPackage from "../../../package.json";
+import platformPackage from "../../../package.json";
 
 /**
- * The running self-hosted app version, from `apps/api/package.json`. Single
+ * The running self-hosted app version, from `packages/platform/package.json`. Single
  * source of truth — surfaced by `/api/health` and sent to Openship Cloud on
  * every self-hosted → SaaS request (see the version header below).
  *
  * Desktop reports this same API version; the dashboard shell separately knows
  * its own bundle version via `window.desktop.app.version()`.
  */
-export const APP_VERSION: string = apiPackage.version;
+export const APP_VERSION: string = platformPackage.version;
 
 /**
  * Header carrying `APP_VERSION` on every self-hosted → SaaS call (set in

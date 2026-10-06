@@ -55,6 +55,8 @@ import {
   type UpstreamDrift,
 } from "@repo/platform/engine/modules/projects/project-crud.service";
 import { redeployBuildSession } from "@repo/platform/engine/modules/deployments/build.service";
+import type { ProjectUpdate } from "@repo/contracts";
+import { releaseStore } from "../releases/release-store";
 import { listAuthorizedProjects } from "../../lib/authorized-projects";
 
 // ─── Display labels ──────────────────────────────────────────────────────────
@@ -124,7 +126,7 @@ function presentation(status: DriftStatus) {
     return {
       currentLabel: status.currentVersion ?? null,
       latestLabel: status.latestVersion ?? null,
-      detail: { pinned: status.pinned },
+      detail: { pinned: status.pinned, customRuntime: status.customRuntime === true, adaptationRequired: status.adaptationRequired === true },
     };
   }
   return {
@@ -398,6 +400,10 @@ async function scanProjects(ctx: RequestContext | null, rows: Project[]): Promis
       // sweeping it would spend a round-trip on an answer nobody compares.
       if (!hasDeployedSide(project)) return;
       const actor = ctx ?? (await backgroundCtxFor(project.organizationId, ctxByOrg));
+      if (await releaseStore.binding(project.id)) {
+        if (actor) { const { getPlatformKernel } = await import("../../lib/platform"); await getPlatformKernel().releases.state(actor, project.id, { fresh: true }); supported += 1; }
+        return;
+      }
       const upstream = await pollUpstream(actor, project);
       if (upstream.supported) supported += 1;
     } catch {
@@ -425,6 +431,13 @@ export async function scanInstanceUpdates(): Promise<ScanSummary> {
   return scanProjects(null, rows);
 }
 
+/** Refresh only explicitly bound GitOps projects every five minutes. */
+export async function scanGitopsReleaseStates(): Promise<ScanSummary> {
+  const bindings = await repos.releases.bindings();
+  const projects = (await Promise.all(bindings.map(row => repos.project.findById(row.projectId)))).filter((row): row is Project => !!row);
+  return scanProjects(null, projects);
+}
+
 // No invalidation entry point, deliberately, and none is missing. Deployments
 // can't stale this cache (the deployed side is read live); repointing a project
 // can't either (the cached upstream stops matching the source, so the reader
@@ -433,7 +446,7 @@ export async function scanInstanceUpdates(): Promise<ScanSummary> {
 
 // ─── Reads ───────────────────────────────────────────────────────────────────
 
-export type UpdateItem = NonNullable<Awaited<ReturnType<typeof driftItem>>>;
+export type UpdateItem = Omit<ProjectUpdate, "checkedAt"> & { checkedAt: Date };
 
 /**
  * One project's drift, as the dashboard renders it. Null when the project has no
@@ -445,6 +458,21 @@ async function driftItem(
   project: Project,
   row: UpdateStatus | undefined,
 ) {
+  if (await releaseStore.binding(project.id)) {
+    const context = actor ?? await backgroundCtxFor(project.organizationId, new Map());
+    if (!context) return null;
+    const { getPlatformKernel } = await import("../../lib/platform");
+    const state = (await getPlatformKernel().releases.state(context, project.id)).data;
+    const running = await releaseStore.active(project.id);
+    const label = (images: typeof state.current.images, oss: string | null) => {
+      const versions = [...new Set(Object.values(images).flatMap(i => i.gitSha ? [i.gitSha.slice(0, 12)] : []))];
+      return [versions.join(" / "), ...(oss ? [`OSS ${oss.slice(0, 12)}`] : [])].filter(Boolean).join(" · ") || null;
+    };
+    return { projectId: project.id, name: `${project.name} · ${state.binding.environment === "preview" ? "PRT" : "生产"}`, slug: project.slug ?? null, isApp: project.isApp ?? false, appTemplateId: project.appTemplateId ?? null, kind: "release" as const,
+      behind: state.kind === "available" || state.kind === "configuration", latestInProgress: !!running,
+      currentLabel: label(state.current.images, state.current.ossGitSha), latestLabel: state.target ? label(state.target.images, state.target.ossGitSha) : null,
+      detail: { gitops: true, releaseState: state.kind, stale: state.stale, environment: state.binding.environment, error: state.error, checks: state.checks, planHref: `/projects/${project.id}/release` }, checkedAt: new Date(state.checkedAt) };
+  }
   const resolved = await upstreamFor(actor, project, row);
   if (!resolved) return null;
   const status: DriftStatus = await evaluateDrift(project, resolved.upstream, actor).catch(
@@ -526,6 +554,7 @@ export async function getProjectDrift(
 ): Promise<DriftStatus> {
   const project = await repos.project.findById(projectId);
   assertResourceInOrg(project, "Project", ctx.organizationId, projectId);
+  if (await releaseStore.binding(projectId)) return { supported: false };
   if (!hasDeployedSide(project)) return { supported: false };
   return withTimeout(
     pollUpstream(ctx, project).then((upstream) => evaluateDrift(project, upstream, ctx)),

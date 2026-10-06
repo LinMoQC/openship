@@ -1,3 +1,6 @@
+import { inspectRegistryImage, inspectContainerImage } from "./release-inspection";
+import { inspectHostConfiguration } from "./host-config-inspection";
+import { createHostExecutor } from "../system/executor";
 /**
  * Docker runtime - manages containers via the Docker Engine API (dockerode).
  *
@@ -30,6 +33,8 @@
 // `.d.ts` files (#448).
 /// <reference path="./tar-fs.d.ts" />
 import Dockerode from "dockerode";
+import { deployPreflightedService } from "./docker-preflight";
+import { settleServiceCutover, type ServiceCutoverRecord, type CutoverPersistence } from "./docker-cutover";
 import * as tarFs from "tar-fs";
 import { randomUUID } from "node:crypto";
 import { createGzip } from "node:zlib";
@@ -4023,6 +4028,36 @@ export class DockerRuntime implements RuntimeAdapter {
     };
   }
 
+  async waitForServiceCondition(
+    containerId: string,
+    condition: "service_started" | "service_healthy" | "service_completed_successfully",
+    timeoutMs = 120_000,
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    const container = this.docker.getContainer(containerId);
+    while (Date.now() < deadline) {
+      const state = (await container.inspect()).State;
+      if (condition === "service_started") {
+        if (state.Running) return;
+        throw new Error(`Dependency container exited before it reached service_started`);
+      }
+      if (condition === "service_healthy") {
+        const health = state.Health?.Status;
+        if (health === "healthy") return;
+        if (!state.Running) {
+          throw new Error(`Dependency container exited before it became healthy`);
+        }
+        if (!health) throw new Error(`Dependency declares service_healthy without a healthcheck`);
+        if (health === "unhealthy") throw new Error(`Dependency container became unhealthy`);
+      } else if (!state.Running) {
+        if (state.ExitCode === 0) return;
+        throw new Error(`Dependency task exited with code ${state.ExitCode ?? "unknown"}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    throw new Error(`Timed out waiting for dependency condition ${condition}`);
+  }
+
   /**
    * Containers labeled for this deployment, with live state — the reconcile
    * read-back. `State` is dockerode's `running | exited | paused | ...`; map it
@@ -4519,6 +4554,27 @@ export class DockerRuntime implements RuntimeAdapter {
   }
 
   // ── Observability ──────────────────────────────────────────────────────
+
+  async inspectReleaseImage(ref: string) {
+    const host = await this.docker.info();
+    const auth = this.connectionOptions?.resolveRegistryAuth ? await this.connectionOptions.resolveRegistryAuth(ref) : await resolveDockerAuth(ref);
+    return inspectRegistryImage(ref, host.Architecture, auth);
+  }
+  async inspectPrismaMigrations(containerId: string): Promise<Array<{ name: string; checksum: string; failed: boolean }>> {
+    // Fixed read-only query in the registered PostgreSQL container. No connection string leaves the host.
+    const query = `SELECT COALESCE(json_agg(json_build_object('name', migration_name, 'checksum', checksum, 'failed', finished_at IS NULL AND rolled_back_at IS NULL)), '[]'::json) FROM "_prisma_migrations" WHERE rolled_back_at IS NULL;`;
+    const result = await this.execInContainer(containerId, `exec psql -X -A -t -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c ${sq(query)}`, { timeout: 15_000 });
+    if (result.exitCode !== 0) throw new Error("Prisma migration ledger is unavailable");
+    const rows: unknown = JSON.parse(result.stdout.trim());
+    if (!Array.isArray(rows) || rows.some(row => !row || typeof row.name !== "string" || typeof row.checksum !== "string" || typeof row.failed !== "boolean")) throw new Error("Invalid Prisma migration ledger");
+    return rows;
+  }
+  async inspectReleaseContainer(id: string, image: string) { return inspectContainerImage(this.docker, id, image); }
+  async inspectReleaseHostConfiguration(root: string, files: string[]) {
+    const executor = this.connectionOptions?.executor ?? (this.transport.kind === "socket" ? createHostExecutor() : null);
+    if (!executor) throw new Error("Actual target-host filesystem cannot be inspected through this transport");
+    return inspectHostConfiguration(executor, root, files);
+  }
 
   async getContainerInfo(containerId: string): Promise<ContainerInfo> {
     const container = this.docker.getContainer(containerId);
@@ -5114,8 +5170,8 @@ export class DockerRuntime implements RuntimeAdapter {
    * All services in a compose project share this network and can
    * reach each other by service name as hostname.
    */
-  async ensureNetwork(slug: string, signal?: AbortSignal): Promise<string> {
-    const networkName = `openship-${slug}`;
+  async ensureNetwork(slug: string, signal?: AbortSignal, externalNetworkName?: string): Promise<string> {
+    const networkName = externalNetworkName || `openship-${slug}`;
     // list-then-create is check-then-act: two concurrent deploys for the same
     // slug would both miss and both create, yielding two networks with the same
     // name (Docker allows it) and ambiguous name lookups. Serialize per server.
@@ -5129,6 +5185,7 @@ export class DockerRuntime implements RuntimeAdapter {
       // listNetworks does substring matching, verify exact name
       const existing = networks.find((n) => n.Name === networkName);
       if (existing) return existing.Id;
+      if (externalNetworkName) throw new Error(`Required external Docker network "${externalNetworkName}" does not exist`);
 
       signal?.throwIfAborted();
       const network = await this.docker.createNetwork({
@@ -5146,9 +5203,10 @@ export class DockerRuntime implements RuntimeAdapter {
     deploymentId: string;
     projectId: string;
     slug: string;
+    externalNetworkName?: string;
   }): Promise<MultiServiceGroupHandle> {
     void config.deploymentId;
-    const networkId = await this.ensureNetwork(config.slug);
+    const networkId = await this.ensureNetwork(config.slug, undefined, config.externalNetworkName);
     // Self-heal network membership. A container joins the network only at
     // CREATE time (see deployServiceWorkload). Normal/partial/smart redeploys
     // are fine — the network is reused by name so its id is stable and
@@ -5466,6 +5524,17 @@ export class DockerRuntime implements RuntimeAdapter {
   ): Promise<MultiServiceDeployResult> {
     const log = onLog ?? (() => {});
     const containerName = `openship-${config.slug}-${config.serviceName}`;
+    if (
+      config.healthcheckPreflight &&
+      (config.volumes.length > 0 ||
+        config.namespaces?.network ||
+        config.namespaces?.pid ||
+        config.advanced?.runToCompletion)
+    ) {
+      throw new Error(
+        "Health preflight supports only stateless services without volumes, shared namespaces, or completion jobs",
+      );
+    }
 
     // Resolve and validate the complete create payload before any irreversible
     // action. A malformed later port/volume/health setting must not be discovered
@@ -5494,7 +5563,12 @@ export class DockerRuntime implements RuntimeAdapter {
     if (!config.namespaceVolumes) {
       await this.assertNoForeignNamedVolumeCollision(config);
     }
-    const scopedBinds = scopeVolumeBinds(config.slug, config.volumes, config.namespaceVolumes);
+    const scopedBinds = scopeVolumeBinds(
+      config.slug,
+      config.volumes,
+      config.namespaceVolumes,
+      config.advanced?.externalVolumeNames,
+    );
     const binds = scopedBinds.length > 0 ? scopedBinds : undefined;
     const restartPolicy = resolveRestartPolicy(config.restart);
     const healthcheck = toDockerHealthcheck(config.advanced?.healthcheck);
@@ -5523,18 +5597,6 @@ export class DockerRuntime implements RuntimeAdapter {
         });
         throw err;
       }
-    }
-
-    // Stop and remove any existing container with the same name. A container that
-    // declared a shutdown grace period (compose stop_grace_period, #388) gets a
-    // graceful stop first so a redeploy of e.g. Postgres flushes instead of being
-    // SIGKILLed mid-write; those that didn't opt in skip straight to force-remove.
-    try {
-      const existing = this.docker.getContainer(containerName);
-      await gracefulStopForGrace(existing);
-      await existing.remove({ force: true });
-    } catch {
-      // Does not exist - fine
     }
 
     // Environment variables. Inject PORT=<service port> (like the single-app
@@ -5581,7 +5643,7 @@ export class DockerRuntime implements RuntimeAdapter {
       });
     }
 
-    const container = await this.docker.createContainer({
+    const createPayload: Dockerode.ContainerCreateOptions = {
       name: containerName,
       Image: config.image,
       Cmd: cmd,
@@ -5631,43 +5693,79 @@ export class DockerRuntime implements RuntimeAdapter {
             },
           }
         : {}),
-    });
+    };
 
-    try {
-      await container.start();
-    } catch (startErr) {
-      // Clean up the created container so it doesn't become orphaned
+    let container: Dockerode.Container;
+    let activation: MultiServiceDeployResult["activation"];
+    if (config.healthcheckPreflight) {
+      log({
+        timestamp: new Date().toISOString(),
+        level: "info",
+        message: `Checking stateless candidate before replacing ${containerName}...\n`,
+      });
+      const transaction = await deployPreflightedService(
+        this.docker,
+        createPayload,
+        config.healthcheckPreflight,
+        (message) => log({ timestamp: new Date().toISOString(), level: "warn", message }),
+      );
+      container = transaction.container;
+      activation = { commit: transaction.commit, rollback: transaction.rollback };
+    } else {
+      // Stop and remove any existing container with the same name. A container that
+      // declared a shutdown grace period (compose stop_grace_period, #388) gets a
+      // graceful stop first so a redeploy of e.g. Postgres flushes instead of being
+      // SIGKILLed mid-write; those that didn't opt in skip straight to force-remove.
       try {
-        await container.remove({ force: true });
+        const existing = this.docker.getContainer(containerName);
+        await gracefulStopForGrace(existing);
+        await existing.remove({ force: true });
       } catch {
-        /* best effort */
+        // Does not exist - fine
       }
-      throw startErr;
+
+      container = await this.docker.createContainer(createPayload);
+      try {
+        await container.start();
+      } catch (startErr) {
+        await container.remove({ force: true }).catch(() => undefined);
+        throw startErr;
+      }
     }
 
-    // Get container IP on the project network
-    const data = await container.inspect();
-    const { ip, hostPort, hostPortByContainerPort } = extractNetworkInfo(data);
+    try {
+      // Get container IP on the project network
+      const data = await container.inspect();
+      const { ip, hostPort, hostPortByContainerPort } = extractNetworkInfo(data);
 
-    // Record the content-addressable digest actually running so the update
-    // scanner can later detect a moved mutable tag. Best-effort: a locally-built
-    // image has no RepoDigests, and any inspect failure must not fail the deploy.
-    const imageDigest = await this.resolveImageDigest(config.image).catch(() => undefined);
+      // Record the content-addressable digest actually running so the update
+      // scanner can later detect a moved mutable tag. Best-effort: a locally-built
+      // image has no RepoDigests, and any inspect failure must not fail the deploy.
+      const imageDigest = await this.resolveImageDigest(config.image).catch(() => undefined);
 
-    log({
-      timestamp: new Date().toISOString(),
-      message: `Service ${config.serviceName} started (${container.id.slice(0, 12)})${ip ? ` at ${ip}` : ""}.\n`,
-      level: "info",
-    });
+      log({
+        timestamp: new Date().toISOString(),
+        message: `Service ${config.serviceName} started (${container.id.slice(0, 12)})${ip ? ` at ${ip}` : ""}.\n`,
+        level: "info",
+      });
 
-    return {
-      containerId: container.id,
-      status: "running",
-      ip,
-      hostPort,
-      ...(hostPortByContainerPort ? { hostPortByContainerPort } : {}),
-      imageDigest,
-    };
+      return {
+        ...(activation ? { activation } : {}),
+        containerId: container.id,
+        status: "running",
+        ip,
+        hostPort,
+        ...(hostPortByContainerPort ? { hostPortByContainerPort } : {}),
+        imageDigest,
+      };
+    } catch (error) {
+      await activation?.rollback();
+      throw error;
+    }
+  }
+
+  async settleServiceCutover(record: ServiceCutoverRecord, decision: "commit" | "restore", save: CutoverPersistence["save"]) {
+    return settleServiceCutover(this.docker, record, decision, save);
   }
 
   /**

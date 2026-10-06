@@ -42,6 +42,8 @@ export const deployCommand = new Command("deploy")
   .option("--env <environment>", "Variable set: production | preview (project ID selects the runtime)", "production")
   .option("--force-all", "Rebuild every enabled service (skip smart per-service routing)")
   .option("--service-ids <ids>", "Comma-separated service IDs to deploy (smart routing)")
+  .option("--release-run <id>", "Registered GitOps controller run ID")
+  .option("--strict-service-scope", "Refuse deployment outside the exact selected service set")
   .option("--smart-route", "Rebuild only services changed since the active deploy")
   .option("--refresh", "Re-apply current env to the active deploy (no git pull, no rebuild)")
   .option("--folder", "Upload the current folder as source (also works inside a Git repository)")
@@ -73,6 +75,10 @@ export const deployCommand = new Command("deploy")
       exitCommand(1);
     }
     const folderUpload = opts.folder || (!inGitRepo && !gitOnlyFlags && opts.name);
+    if (folderUpload && opts.releaseRun) {
+      err("Folder uploads cannot execute a registered release. Use --project without --folder or --name.");
+      exitCommand(1);
+    }
     const targetProjectId: string | undefined = opts.project || link?.projectId;
     if (!inGitRepo && !gitOnlyFlags && !folderUpload && !targetProjectId) {
       err(
@@ -101,6 +107,7 @@ export const deployCommand = new Command("deploy")
           environment: env as "production" | "preview",
           serverId: opts.server,
           serviceIds,
+          strictServiceScope: opts.strictServiceScope || undefined,
           onStep: (m) => {
             if (spinner) spinner.text = m;
           },
@@ -145,6 +152,8 @@ export const deployCommand = new Command("deploy")
         environment: env,
         serverId: opts.server || undefined,
         forceAll: opts.forceAll || undefined,
+        strictServiceScope: opts.strictServiceScope || undefined,
+        releaseRunId: opts.releaseRun || undefined,
         serviceIds,
         smartRoute: opts.smartRoute || undefined,
         refresh: opts.refresh || undefined,

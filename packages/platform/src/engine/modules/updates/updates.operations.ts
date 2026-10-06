@@ -1,6 +1,7 @@
 import type { UpdateDependencies } from "../../../updates";
 import { audit, operationAuditContext } from "../../lib/audit-emitter";
 import * as service from "./updates.service";
+import { requireGitopsRelease } from "../releases/release-gate";
 export const updatesDependencies: UpdateDependencies = {
   collection: {
     list: service.listOrganizationUpdates,
@@ -11,6 +12,7 @@ export const updatesDependencies: UpdateDependencies = {
     },
   },
   projects: { async apply(ctx, id) {
+    await requireGitopsRelease(id);
     const result = await service.applyProjectUpdate(ctx, id);
     audit.recordAsync(operationAuditContext(ctx), { eventType: "project:write", resourceType: "project", resourceId: id, after: { operation: "applyUpdate", deploymentId: result.deployment_id } });
     return result;

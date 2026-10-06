@@ -42,7 +42,7 @@ export function UpdatesTab() {
     setTimeout(() => setChecking(false), 1200);
   }, [refresh]);
 
-  const upToDate = state && !state.updateAvailable;
+  const upToDate = state && !state.updateAvailable && !state.adaptationRequired && !!state.latestVersion;
 
   return (
     <div className="space-y-6">
@@ -61,13 +61,17 @@ export function UpdatesTab() {
               <p className="text-[14px] font-medium text-foreground">
                 {!state
                   ? t.settings.updates.checking
+                  : state.adaptationRequired
+                    ? `${t.projects.release.adaptationPending} · ${state.latestVersion ?? ""}`
+                  : !state.latestVersion
+                    ? t.projects.release.status.unknown
                   : state.updateAvailable
                     ? interpolate(t.settings.updates.available, { version: state.latestVersion ?? "" })
                     : t.settings.updates.upToDate}
               </p>
               <p className="text-[12px] text-muted-foreground">
                 {state?.currentVersion ? interpolate(t.settings.updates.current, { version: state.currentVersion }) : ""}
-                {state?.updateAvailable && !desktop ? t.settings.updates.rerunToUpdate : ""}
+                {state?.customRuntime ? ` · ${t.projects.release.customRuntime}` : state?.updateAvailable && !desktop ? t.settings.updates.rerunToUpdate : ""}
               </p>
             </div>
           </div>

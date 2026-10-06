@@ -229,6 +229,9 @@ describe("service configuration at rest (GH-844)", () => {
     await expect(wrongRepos.service.findById(service.id)).rejects.toThrow(
       "Unable to decrypt stored configuration",
     );
+    const before = await storedService(service.id);
+    await expect(wrongRepos.configurationSecrets.backfillLegacy()).rejects.toThrow("Unable to decrypt existing configuration");
+    expect(await storedService(service.id)).toEqual(before);
     const raw = await storedService(service.id);
     const broken = String(raw!.environment).slice(0, -8) + "tampered";
     await connection.db
@@ -238,6 +241,7 @@ describe("service configuration at rest (GH-844)", () => {
     await expect(repos.service.findById(service.id)).rejects.toThrow(
       "Unable to decrypt stored configuration",
     );
+    await expect(repos.configurationSecrets.backfillLegacy()).rejects.toThrow("Unable to decrypt existing configuration");
     expect((await storedService(service.id))!.environment).toBe(broken);
   });
 

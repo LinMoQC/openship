@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
+import { createServer } from "node:http";
 import { createShip, OperationError, type OwnedShip, type VerifiedIdentity } from "../src/native";
 
 const execute = promisify(execFile);
@@ -14,6 +15,47 @@ beforeAll(async () => {
 }, 60_000);
 
 describe("owned native platform on Node", () => {
+  it("persists GitOps ownership across native restart and rejects ordinary deploy and configuration mutations", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "openship-native-gitops-"));
+    let identity: VerifiedIdentity | null = null, ship: OwnedShip<string> | undefined;
+    const options = {
+      instanceId: "gitops", stateDirectory: directory,
+      storage: { driver: "pglite" as const, dataDir: join(directory, "database") },
+      encryptionKey: key, runtime: "bare" as const, routing: "none" as const,
+      administration: true, identity: { resolve: async () => identity },
+    };
+    try {
+      ship = await createShip(options);
+      const alice = await ship.operator!.ensureIdentity({ issuer: "gitops", subject: "alice", email: "alice@example.test" });
+      identity = { user: alice.user, sessionId: "gitops" };
+      await ship.start();
+      let scope = await ship.scope({ identity: "verified", organizationId: alice.personalOrganizationId });
+      const project = await scope.projects.create({ name: "Admin PRT", slug: "admin-prt", gitProvider: "upload" });
+      await scope.projects.update(project.id, { startCommand: "initial" });
+      const binding = await scope.releases.bind(project.id, {
+        environment: "preview", stack: "admin", repository: "example/config",
+        manifestPath: "stacks/admin/release.yaml", targetBranch: "deploy/prt", workflowRef: "main",
+        workflows: { preview: "receive.yml", production: "promote-production.yml", rollback: "rollback.yml" },
+        controllerTokenIds: ["fixture-controller"], expectedServices: ["admin"], probes: ["https://example.invalid/health"],
+      });
+      expect(binding.projectId).toBe(project.id);
+      expect("register" in scope.releases).toBe(false);
+      expect("progress" in scope.releases).toBe(false);
+      await ship.close(); ship = await createShip(options); await ship.start();
+      scope = await ship.scope({ identity: "verified", organizationId: alice.personalOrganizationId });
+      const state = await scope.releases.state(project.id);
+      expect(state.binding.id).toBe(binding.id);
+      expect(state.kind).toBe("unknown");
+      expect(state.current.verified).toBe(false);
+      expect(await scope.releases.latest(project.id)).toBeNull();
+      await expect(scope.deployments.create({ projectId: project.id })).rejects.toMatchObject({ code: "GITOPS_RELEASE_REQUIRED" });
+      await expect(scope.projects.update(project.id, { startCommand: "changed" })).rejects.toMatchObject({ code: "GITOPS_RELEASE_REQUIRED" });
+      await expect(scope.projects.setBranch(project.id, { branch: "other" })).rejects.toMatchObject({ code: "GITOPS_RELEASE_REQUIRED" });
+      expect((await scope.projects.get(project.id)).startCommand).toBe("initial");
+      expect((await scope.deployments.list()).total).toBe(0);
+    } finally { await ship?.close(); await rm(directory, { recursive: true, force: true }); }
+  }, 60_000);
+
   it("streams shared file status and routes storage status through the native worker", async () => {
     const directory = await mkdtemp(join(tmpdir(), "openship-native-storage-"));
     let identity: VerifiedIdentity | null = null;
@@ -66,6 +108,15 @@ describe("owned native platform on Node", () => {
 
   it("persists operator notices while ordinary scopes only read public announcements", async () => {
     const directory = await mkdtemp(join(tmpdir(), "openship-native-notices-"));
+    const catalogRequests: string[] = [];
+    const catalog = createServer((request, response) => {
+      catalogRequests.push(request.url!);
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ data: { locale: "ar", annual: { enabled: false, monthsFree: 0 }, ui: {}, plans: [] } }));
+    });
+    await new Promise<void>((resolve, reject) => { catalog.once("error", reject); catalog.listen(0, "127.0.0.1", () => { catalog.off("error", reject); resolve(); }); });
+    const address = catalog.address();
+    if (!address || typeof address === "string") throw new Error("Missing fixture catalog address");
     let identity: VerifiedIdentity | null = null;
     let ship: OwnedShip<string> | undefined;
     const options = {
@@ -73,6 +124,7 @@ describe("owned native platform on Node", () => {
       storage: { driver: "pglite" as const, dataDir: join(directory, "database") },
       encryptionKey: key, runtime: "bare" as const, routing: "none" as const,
       administration: true, identity: { resolve: async () => identity },
+      environment: { OPENSHIP_CLOUD_API_URL: `http://127.0.0.1:${address.port}` },
     };
     try {
       ship = await createShip(options);
@@ -85,6 +137,7 @@ describe("owned native platform on Node", () => {
       expect(Object.keys(scope.notices)).toEqual(["list"]);
       expect((await scope.notices.list()).advisories.map(row => row.id)).toEqual([notice.id]);
       expect((await scope.billing.listPlans({ locale: "ar" })).locale).toBe("ar");
+      expect(catalogRequests).toEqual(["/api/billing/plans?locale=ar"]);
       await expect(scope.billing.getState()).rejects.toMatchObject({ code: "CLOUD_SCOPE_UNAVAILABLE" });
       await ship.close();
       ship = await createShip(options);
@@ -99,6 +152,8 @@ describe("owned native platform on Node", () => {
       expect(await scope.notices.list()).toEqual({ advisories: [] });
     } finally {
       await ship?.close();
+      catalog.closeAllConnections();
+      await new Promise<void>((resolve, reject) => catalog.close(error => error ? reject(error) : resolve()));
       await rm(directory, { recursive: true, force: true });
     }
   }, 60_000);

@@ -54,6 +54,7 @@ import { buildBackgroundContext } from "../../../lib/background-context";
 import { retainedArtifacts, effectiveServiceArtifacts } from "../retained-artifacts";
 import { withRetentionLock } from "../retention-lock";
 import { withoutPinnedArtifacts } from "../pinned-artifacts";
+import { assertExactServiceTargets } from "../exact-service-targets";
 import {
   planRestore,
   planNeedsRepository,
@@ -65,6 +66,10 @@ import {
 
 export { ROLLBACK_ERROR_CODES, planNeedsRepository, shouldRetainArtifact } from "./restore-plan";
 export type { RestorePlan } from "./restore-plan";
+export interface RollbackScope {
+  serviceIds: string[];
+  strictServiceScope: true;
+}
 
 /** Project the DB Deployment row down to the minimal DeploymentRef the
  *  runtime primitives consume. Keeps the adapter layer free of
@@ -269,8 +274,19 @@ async function hostPathExists(target: Deployment, path: string): Promise<boolean
 /**
  * User-triggered rollback. Resolves the plan, then executes it.
  */
-export async function rollback(targetDeploymentId: string): Promise<void> {
+export async function rollback(targetDeploymentId: string, scope?: RollbackScope): Promise<void> {
   const { target, project, plan } = await resolveRestorePlan(targetDeploymentId);
+
+  if (scope) {
+    if (scope.strictServiceScope !== true || !scope.serviceIds.length) {
+      throw new AppError("Rollback requires an exact nonempty service scope", 409, "ROLLBACK_SCOPE_UNKNOWN");
+    }
+    try { assertExactServiceTargets(await repos.service.listByProject(project.id), scope.serviceIds, "Rollback"); }
+    catch (error) { throw new AppError(safeErrorMessage(error), 409, "ROLLBACK_SCOPE_INVALID"); }
+    if (plan.mode === "unit-swap") {
+      throw new AppError("A service-scoped rollback cannot swap an entire runtime unit", 409, "ROLLBACK_SCOPE_UNSUPPORTED");
+    }
+  }
 
   if (plan.mode === "ineligible") {
     throw new AppError(plan.message, 409, plan.code);
@@ -287,7 +303,7 @@ export async function rollback(targetDeploymentId: string): Promise<void> {
     });
     return;
   }
-  await restoreViaRedeploy(target, project, plan);
+  await restoreViaRedeploy(target, project, plan, scope);
 }
 
 /**
@@ -304,6 +320,7 @@ async function restoreViaRedeploy(
   target: Deployment,
   project: NonNullable<Awaited<ReturnType<typeof repos.project.findById>>>,
   plan: Extract<RestorePlan, { mode: "redeploy-pinned" | "reacquire-image" | "rebuild" }>,
+  scope?: RollbackScope,
 ): Promise<void> {
   // Where are we rolling back FROM? The currently-active release's commit —
   // recorded so this restore is itself reversible.
@@ -374,10 +391,10 @@ async function restoreViaRedeploy(
       (target.commitSha ? `Rollback to ${target.commitSha.slice(0, 7)}` : "Rollback"),
     environment: target.environment,
     trigger: "rollback",
-    // A restore brings the WHOLE release back — smart per-service targeting
-    // would leave half the stack on the newer version.
-    serviceIds: undefined,
-    forceAll: true,
+    // An exclusive rejected candidate must restore only the services it changed.
+    serviceIds: scope?.serviceIds,
+    strictServiceScope: scope?.strictServiceScope,
+    forceAll: scope ? false : true,
     commitShaBefore: prevSha,
     reuseSnapshot: { meta, envVars: (target.envVars as Record<string, string> | null) ?? null },
   });
@@ -624,6 +641,8 @@ async function pruneUnlocked(project: Project): Promise<{ purged: number; failed
  * Used by deploy completion, settings, unpinning, and the scheduled backstop. */
 export async function reconcileProjectRetention(projectId: string) {
   return await withRetentionLock(projectId, async (project) => {
+    if ((await repos.releases.journals(project.id)).some(row => !["committed", "restored"].includes(row.stage)))
+      return { purged: 0, removed: 0, bytes: 0, skippedInUse: 0, errors: 0 };
     const result = await pruneUnlocked(project);
     // A failed purge keeps its retry marker; don't let a second collector
     // remove more of that release while its cleanup is incomplete.

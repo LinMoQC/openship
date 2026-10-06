@@ -148,6 +148,8 @@ export function UpdateCenter() {
                       <UiIcon name="download" className="size-3.5" />
                       {advisory.action.label}
                     </button>
+                  ) : advisory.action?.kind === "update" && mode === "selfhosted" && state?.customRuntime ? (
+                    <ExternalLinkBtn href={changelog}>{t.projects.release.adaptationPending}</ExternalLinkBtn>
                   ) : advisory.action?.kind === "update" && mode === "selfhosted" ? (
                     // A server can't be updated from the browser — the control
                     // plane upgrades itself through the CLI. Show the command

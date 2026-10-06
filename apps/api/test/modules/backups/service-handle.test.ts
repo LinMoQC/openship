@@ -280,6 +280,15 @@ describe("serviceHandleFor", () => {
     expect(handle.containerId).toBeNull();
     expect(handle.projectSlug).toBe("shop");
   });
+
+  it("carries Compose-resolved external volume names to the backup executor", async () => {
+    const handle = await serviceHandleFor(
+      serviceRow({ advanced: { externalVolumeNames: ["magic_prod_postgres"] } }),
+      TARGET,
+    );
+
+    expect(handle.externalVolumeNames).toEqual(["magic_prod_postgres"]);
+  });
 });
 
 describe("withContainerEnv — the env the DB never recorded", () => {

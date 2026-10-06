@@ -21,6 +21,7 @@ export function createRemoteServiceOperations(http: HttpClient): ServiceOperatio
     ...createRemoteResourceOperations(http, ServiceCollectionSchemas, {
       list: { method: "GET", path: collection, envelope: "services" },
       create: { method: "POST", path: collection, envelope: "service" },
+      syncDocument: { method: "POST", path: (id) => `${collection(id)}/sync-compose`, envelope: "services" },
       sync: { method: "POST", path: (id) => `${collection(id)}/sync`, envelope: "services" },
       activeContainers: {
         method: "GET",

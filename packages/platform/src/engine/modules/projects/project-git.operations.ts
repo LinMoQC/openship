@@ -1,3 +1,4 @@
+import { requireGitopsRelease } from "../releases/release-gate";
 import { findActiveDeployment } from "@repo/platform/engine/lib/active-deployment";
 import type { ProjectControlSchemas } from "@repo/contracts";
 import type { ResourceServices } from "../../../resource-operations";
@@ -258,6 +259,7 @@ export function createProjectGitOperations(
       };
     },
     async linkRepo(ctx, id, input) {
+      await requireGitopsRelease(id);
       const { owner, repo, branch, installationId } = input;
       const result = await projectService.linkProjectRepo(ctx, id, {
         owner,
@@ -303,6 +305,7 @@ export function createProjectGitOperations(
       };
     },
     async setReleaseImageSource(ctx, id, input) {
+      await requireGitopsRelease(id);
       const before = await repos.project.findById(id);
       const body = input;
       const project = await projectService.setProjectReleaseImageSource(
@@ -339,6 +342,7 @@ export function createProjectGitOperations(
       return presentProject(project);
     },
     async setAutoDeploy(ctx, id, input) {
+      await requireGitopsRelease(id);
       const userId = ctx.userId;
       const organizationId = ctx.organizationId;
       const { enabled } = input;
@@ -500,6 +504,7 @@ export function createProjectGitOperations(
       return response ?? failOperation({ error: "Project is being deleted" }, 409);
     },
     async setWebhookDomain(ctx, id, input) {
+      await requireGitopsRelease(id);
       const { userId, organizationId } = ctx;
       const { domain: hostname } = input;
       const initialProject = await repos.project.findById(id);

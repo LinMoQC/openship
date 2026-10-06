@@ -15,7 +15,9 @@ export const CreateDeploymentSchema = Type.Object({
     description: "Variable set within the target project (default production). Preview values require a non-production project; projectId selects the runtime.",
   })),
   forceAll: Type.Optional(Type.Boolean({ description: "Rebuild every enabled service." })),
-  serviceIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
+  strictServiceScope: Type.Optional(Type.Boolean()),
+  releaseRunId: Type.Optional(Type.String({ minLength: 1, maxLength: 200, description: "Registered GitOps controller run; requires its bound token and exact target." })),
+  serviceIds: Type.Optional(Type.Array(Type.String({ minLength: 1 }), { minItems: 1, maxItems: 100, uniqueItems: true })),
   smartRoute: Type.Optional(
     Type.Boolean({ description: "Rebuild services changed since the active deployment." }),
   ),
@@ -48,6 +50,10 @@ export function parseCreateDeploymentInput(value: unknown): CreateDeploymentInpu
       (details[error.path || "/"] ??= []).push(error.message);
     }
     throw new ValidationError("Invalid deployment input", details);
+  }
+  const command = snapshot as CreateDeploymentInput;
+  if (command.strictServiceScope && (!command.serviceIds?.length || command.forceAll)) {
+    throw new ValidationError("Exclusive scope requires serviceIds and cannot be combined with forceAll");
   }
   return snapshot;
 }

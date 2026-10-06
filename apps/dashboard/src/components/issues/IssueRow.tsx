@@ -51,7 +51,8 @@ export function IssueRow({
   const c = t.issues;
   const tone = SEVERITY_TONE[issue.severity] ?? "warning";
   const Icon = KIND_ICON[issue.kind] ?? UNKNOWN_KIND_ICON;
-  const kindLabel = c.kinds[issue.kind] ?? issue.kind;
+  const adapting = issue.details?.adaptationRequired === true;
+  const kindLabel = adapting ? t.projects.release.adaptationPending : c.kinds[issue.kind] ?? issue.kind;
   const compact = density === "compact";
   const actionSize = !compact && "h-8 px-3 text-[13px]";
   const actionClass = cn(ACTION_TONE[tone], actionSize);
@@ -106,7 +107,11 @@ export function IssueRow({
       }
       label={kindLabel}
       action={
-        selfUpdate ? (
+        issue.details?.gitops === true ? (
+          <Link href={issue.target.href} className={linkClass} aria-label={`${t.projects.release.plan} · ${issue.target.name}`}>{t.projects.release.plan}</Link>
+        ) : adapting ? (
+          <Link href={issue.target.href} className={linkClass}>{t.projects.release.adaptationPending}</Link>
+        ) : selfUpdate ? (
           <CopyCommand
             command={SELF_UPDATE_COMMAND}
             className={cn("shrink-0", !compact && "h-8 max-w-full")}

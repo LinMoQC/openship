@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@repo/db", async (original) => ({
   ...(await original<typeof import("@repo/db")>()),
   repos: {
+    releases: { binding: vi.fn(async () => null), pendingJournals: vi.fn(async () => []), journals: vi.fn(async () => []) },
     project: mocks.project,
     deployment: mocks.deployment,
     server: mocks.server,

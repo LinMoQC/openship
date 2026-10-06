@@ -182,11 +182,9 @@ export const DeploymentCard: React.FC<DeploymentCardProps> = ({
           {deployment.version != null && (
             <span
               className="shrink-0 rounded-md bg-muted/60 px-1.5 py-0.5 font-mono text-[10px] font-medium text-muted-foreground"
-              title={interpolate(t.deployments.card.versionTitle, {
-                version: String(deployment.version),
-              })}
+              title={`${t.projects.release.deploymentNumber} · ${deployment.version}`}
             >
-              v{deployment.version}
+              #{deployment.version}
             </span>
           )}
           <span

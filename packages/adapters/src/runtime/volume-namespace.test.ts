@@ -8,9 +8,7 @@ import {
 
 describe("scopedVolumeName", () => {
   it("prefixes with openship-<slug>-", () => {
-    expect(scopedVolumeName("clincai", "postgres_data")).toBe(
-      "openship-clincai-postgres_data",
-    );
+    expect(scopedVolumeName("clincai", "postgres_data")).toBe("openship-clincai-postgres_data");
   });
 });
 
@@ -93,6 +91,17 @@ describe("scopeVolumeBinds", () => {
   it("is idempotent — does not double-scope an already-scoped source", () => {
     const once = scopeVolumeBinds(slug, ["postgres_data:/data"], true);
     expect(scopeVolumeBinds(slug, once, true)).toEqual(once);
+  });
+
+  it("preserves only explicitly resolved Compose volume names", () => {
+    expect(
+      scopeVolumeBinds(
+        slug,
+        ["magic-prod_postgres:/var/lib/postgresql/data", "cache:/cache"],
+        true,
+        ["magic-prod_postgres"],
+      ),
+    ).toEqual(["magic-prod_postgres:/var/lib/postgresql/data", "openship-clincai-cache:/cache"]);
   });
 
   it("scopes each named volume in a mixed list independently", () => {

@@ -9,6 +9,7 @@ export interface DeploySourceInput {
   environment?: "production" | "preview";
   serverId?: string;
   serviceIds?: string[];
+  strictServiceScope?: boolean;
   signal?: AbortSignal;
   onStep?: (message: string) => void;
 }
@@ -30,6 +31,10 @@ export function snapshotSourceInput(input: DeploySourceInput): DeploySourceInput
     throw new ValidationError("Invalid deployment environment");
   if (input.serviceIds !== undefined && (!Array.isArray(input.serviceIds) || input.serviceIds.some((id) => typeof id !== "string" || !id)))
     throw new ValidationError("serviceIds must contain nonempty identifiers");
+  if (input.strictServiceScope !== undefined && typeof input.strictServiceScope !== "boolean")
+    throw new ValidationError("strictServiceScope must be a boolean");
+  if (input.strictServiceScope && !input.serviceIds?.length)
+    throw new ValidationError("An exact deployment scope requires at least one service ID");
   let snapshot: DeploySourceInput["source"];
   if (source?.type === "directory" && typeof source.path === "string" && source.path.trim()) {
     snapshot = { type: "directory", path: source.path };
@@ -43,5 +48,5 @@ export function snapshotSourceInput(input: DeploySourceInput): DeploySourceInput
   } else {
     throw new ValidationError("A directory or generated files source is required");
   }
-  return { source: snapshot, name, projectId, environment, serverId, signal, onStep, serviceIds: input.serviceIds ? [...input.serviceIds] : undefined };
+  return { source: snapshot, name, projectId, environment, serverId, signal, onStep, strictServiceScope: input.strictServiceScope, serviceIds: input.serviceIds ? [...input.serviceIds] : undefined };
 }

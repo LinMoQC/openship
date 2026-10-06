@@ -13,6 +13,11 @@ async function result<T>(c: Context, work: Promise<OperationResult<T>>): Promise
 }
 const operations = () => getPlatformKernel().services;
 
+export async function syncDocument(c: Context) {
+  const data = await result(c, operations().syncDocument(operationContext(c), param(c, "id"), await c.req.json()));
+  return c.json({ success: true, services: data });
+}
+
 export async function list(c: Context) {
   const data = await result(c, operations().list(operationContext(c), param(c, "id")));
   return c.json({ success: true, services: data });

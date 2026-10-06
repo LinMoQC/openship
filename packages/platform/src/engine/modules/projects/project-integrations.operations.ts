@@ -1,3 +1,4 @@
+import { requireGitopsRelease } from "../releases/release-gate";
 import { NotFoundError, safeErrorMessage } from "@repo/core";
 import type { ProjectIntegrationSchemas } from "@repo/contracts";
 import { repos } from "@repo/db";
@@ -18,27 +19,32 @@ export function createProjectIntegrationOperations(recordAudit: ProjectDependenc
     listConnections: (ctx, id) => connections.listConnections(ctx, id),
     listConnectionConsumers: (ctx, id) => connections.listConsumers(ctx, id),
     async createConnection(ctx, id, input) {
+      await requireGitopsRelease(id);
       const result = await connections.createConnection(ctx, id, input);
       audit(ctx, id, "write", { operation: "connection.create", sourceProjectId: input.sourceProjectId, outputId: input.outputId, envKey: input.envKey, mode: result.connection.mode });
       return result;
     },
     async connectBundle(ctx, id, input) {
+      await requireGitopsRelease(id);
       const result = await connections.connectBundle(ctx, id, input);
       audit(ctx, id, "write", { operation: "connection.bundle", sourceProjectId: input.sourceProjectId, items: input.items });
       return result;
     },
     async removeConnection(ctx, id, linkId) {
+      await requireGitopsRelease(id);
       const result = await connections.deleteConnection(ctx, id, linkId);
       audit(ctx, id, "admin", { operation: "connection.remove", linkId });
       return result;
     },
     getStorage: (ctx, id) => storage.getObjectStorage(ctx, id),
     async bindStorage(ctx, id, input) {
+      await requireGitopsRelease(id);
       const result = await storage.bindObjectStorage(ctx, id, input);
       audit(ctx, id, "write", { operation: "storage.bind", provider: result.binding.provider, bucket: result.binding.bucket, sourceProjectId: result.binding.sourceProjectId ?? null, envKeys: result.binding.envKeys });
       return result;
     },
     async unbindStorage(ctx, id) {
+      await requireGitopsRelease(id);
       const result = await storage.unbindObjectStorage(ctx, id);
       audit(ctx, id, "admin", { operation: "storage.unbind", removed: result.removed });
       return result;

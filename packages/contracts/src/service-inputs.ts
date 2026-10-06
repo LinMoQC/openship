@@ -69,6 +69,35 @@ const AdvancedSchema = Type.Object(
     // alone" so a partial caller can't wipe the rest of the blob, which makes an
     // explicit `null` the way to say "remove this one".
     healthcheck: Type.Optional(Type.Union([HealthcheckSchema, Type.Null()])),
+    dependsOnConditions: Type.Optional(
+      Type.Union([
+        Type.Record(
+          Type.String({ maxLength: 120 }),
+          Type.Object(
+            {
+              condition: Type.Union([
+                Type.Literal("service_started"),
+                Type.Literal("service_healthy"),
+                Type.Literal("service_completed_successfully"),
+              ]),
+              required: Type.Optional(Type.Boolean()),
+            },
+            { additionalProperties: false },
+          ),
+        ),
+        Type.Null(),
+      ]),
+    ),
+    externalVolumeNames: Type.Optional(
+      Type.Union([
+        Type.Array(Type.String({ minLength: 1, maxLength: 255 }), { maxItems: 50 }),
+        Type.Null(),
+      ]),
+    ),
+    externalNetworkName: Type.Optional(
+      Type.Union([Type.String({ minLength: 1, maxLength: 255 }), Type.Null()]),
+    ),
+    runToCompletion: Type.Optional(Type.Union([Type.Boolean(), Type.Null()])),
     monitoringEnabled: Type.Optional(Type.Union([Type.Boolean(), Type.Null()])),
     /**
      * Per-service DEPLOY-TIME readiness gate, overriding the project's for this
@@ -87,6 +116,7 @@ const AdvancedSchema = Type.Object(
             path: Type.Optional(Type.String({ maxLength: 2000 })),
             port: Type.Optional(Type.Integer({ minimum: 1, maximum: 65535 })),
             timeoutSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 600 })),
+            preflight: Type.Optional(Type.Boolean()),
             stabilization: Type.Optional(Type.Boolean()),
             stabilizationSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 600 })),
             onFailure: Type.Optional(Type.Union([Type.Literal("warn"), Type.Literal("fail")])),
@@ -311,6 +341,19 @@ export const UpdateServiceBody = Type.Object(
  *
  * `services: []` is left to the handler, which rejects it with its own message.
  */
+export const SyncComposeDocumentBody = Type.Object({
+  releaseRunId: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })),
+  manifestCommit: Type.Optional(Type.String({ pattern: "^[a-f0-9]{40}$" })),
+  compose: Type.String({ minLength: 1, maxLength: 1048576 }),
+  environment: EnvironmentScopeSchema,
+  expectedServices: Type.Array(Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9_.-]*$" }), {
+    minItems: 1,
+    maxItems: 100,
+    uniqueItems: true,
+  }),
+}, { additionalProperties: false });
+export type TSyncComposeDocumentBody = Static<typeof SyncComposeDocumentBody>;
+
 export const SyncServicesBody = Type.Object({
   services: Type.Array(
     Type.Object(

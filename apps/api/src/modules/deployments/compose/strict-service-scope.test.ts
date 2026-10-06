@@ -1,5 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { BuildAccessBody, parseCreateDeploymentInput } from "@repo/contracts";
+import { Value } from "@sinclair/typebox/value";
 
 /**
  * `targetServiceIds` is a BUILD subset. `strictScope` is an EXCLUSION. Conflating them
@@ -40,10 +42,10 @@ describe("strictScope reaches the compose deploy from the snapshot", () => {
     expect(buildService).toContain("meta = { ...meta, strictServiceScope: true }");
   });
 
-  it("is INTERNAL-only — never a field of the wire body", () => {
-    // A client that could set it could scope any project's deploy exclusively.
-    expect(buildService).toMatch(/internal\?:\s*\{[\s\S]{0,200}strictServiceScope\?: boolean/);
-    expect(buildService).toContain("strictServiceScope: internal?.strictServiceScope");
+  it("allows a public scope to narrow deployment without permitting forceAll to broaden it", () => {
+    expect(Value.Check(BuildAccessBody, { projectId: "project", serviceIds: ["api"], strictServiceScope: true })).toBe(true);
+    expect(() => parseCreateDeploymentInput({ projectId: "project", serviceIds: ["api"], strictServiceScope: true, forceAll: true })).toThrow("cannot be combined");
+    expect(() => parseCreateDeploymentInput({ projectId: "project", strictServiceScope: true })).toThrow("requires serviceIds");
   });
 
   it("is read off the snapshot and passed into the deploy", () => {
@@ -53,11 +55,11 @@ describe("strictScope reaches the compose deploy from the snapshot", () => {
     expect(pipeline).toContain("strictScope,");
   });
 
-  it("requires a scope to mean anything, and never overrides forceAll", () => {
+  it("fails a conflicting stored scope instead of silently broadening it", () => {
     const at = pipeline.indexOf("const strictScope =");
     const decl = pipeline.slice(at, at + 240);
-    expect(decl).toContain("!dep.forceAll");
-    expect(decl).toContain("!!targetServiceIds");
+    expect(decl).toContain("dep.forceAll || !targetServiceIds?.size");
+    expect(decl).toContain("throw new Error");
   });
 
   it("makes the deploy SKIP an untargeted service outright", () => {

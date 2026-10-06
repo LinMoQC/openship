@@ -95,6 +95,7 @@ vi.mock("@repo/db", () => ({
   schema: {},
   getDriver: () => "postgres",
   repos: {
+    releases: { binding: vi.fn(async () => null), pendingJournals: vi.fn(async () => []), journals: vi.fn(async () => []) },
     serverCluster: { membership: async () => null },
     user: { findFoundingAdmin: async () => ({ id: "founder" }) },
     instanceSettings: { get: async () => h.settings, upsert: h.settingsUpsert, delete: h.settingsDelete },

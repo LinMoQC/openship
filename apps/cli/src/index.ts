@@ -45,6 +45,7 @@ import { resetAdminCommand } from "./commands/reset-admin";
 
 // Distribution
 import { installCommand } from "./commands/install";
+import { releaseCommand } from "./commands/release";
 import { updateCommand } from "./commands/update";
 import { cacheCommand } from "./commands/cache";
 
@@ -74,7 +75,7 @@ program
     if (file) {
       let top = actionCommand;
       while (top.parent && top.parent !== thisCommand) top = top.parent;
-      if (!["project", "app", "service", "domain", "deploy", "deployment", "logs", "init", "server", "system", "backup", "job", "status", "doctor"].includes(top.name()))
+      if (!["release", "project", "app", "service", "domain", "deploy", "deployment", "logs", "init", "server", "system", "backup", "job", "status", "doctor"].includes(top.name()))
         throw new Error("Choose an SDK resource command with --native-config; installation and remote-login commands use a remote context.");
       await initializeNativeClient(file, cliUserAgent);
     }
@@ -113,6 +114,7 @@ program.addCommand(doctorCommand);
 
 // Deploy loop
 program.addCommand(deployCommand);
+program.addCommand(releaseCommand);
 program.addCommand(deploymentCommand);
 program.addCommand(logsCommand);
 

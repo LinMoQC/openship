@@ -1,3 +1,4 @@
+import { createReleasesRepo } from "./releases.repo";
 import { createClusterStorageRepo } from "./cluster-storage.repo";
 export { createClusterStorageRepo, type ClusterStorageRecord } from "./cluster-storage.repo";
 export { createUserRepo, type User, type NewUser } from "./user.repo";
@@ -113,6 +114,7 @@ export {
   createServiceRepo,
   normalizeRoutingFields,
   toComposeSpec,
+  composeWritePatch,
   composeSpecsEqual,
   reconcileComposeSpec,
   unresolvedComposeEnvironmentKeys,
@@ -389,6 +391,7 @@ export function createRepositories(db: Database, encryption: ConfigurationEncryp
     webhookSource: createWebhookSourceRepo(db),
     incomingWebhook: createIncomingWebhookRepo(db),
     notice: createSystemNoticeRepo(db),
+    releases: createReleasesRepo(db),
     updateStatus: createUpdateStatusRepo(db),
     serverModuleStatus: createServerModuleStatusRepo(db),
     serverContainerStatus: createServerContainerStatusRepo(db),

@@ -82,6 +82,8 @@ try {
         await database.repos.jobRun.failStaleRunning("Native owner restarted while job was in flight");
         await database.repos.notificationDelivery.failInterrupted("Native owner restarted before delivery outcome was recorded; verify the receiver before retrying");
         await database.repos.deployment.sweepStaleInFlight("Native owner restarted — redeploy to retry interrupted work.");
+        const { recoverInterruptedReleaseCutovers } = await import("./engine/modules/releases/release-cutover");
+        await recoverInterruptedReleaseCutovers();
         const { migrationOrchestrator } = await import("./engine/modules/migration/migration.orchestrator");
         await migrationOrchestrator.recoverInterruptedMigrations();
       }
@@ -324,7 +326,7 @@ try {
         return runWithOperationSource((args[0] as ExecutionContext).source ?? "api", () => fn(...args));
       }
     }
-    for (const [prefix, operations] of Object.entries({ domains: kernel.domains, dns: kernel.dns, credentials: kernel.credentials, servers: kernel.servers, system: kernel.system, apps: kernel.apps, backupDestinations: kernel.backupDestinations, backups: kernel.backups, billing: kernel.billing, notices: kernel.notices, github: kernel.github, permissions: kernel.permissions, tokens: kernel.tokens, webhooks: kernel.webhooks, updates: kernel.updates, audit: kernel.audit, settings: kernel.settings, notifications: kernel.notifications, issues: kernel.issues, analytics: kernel.analytics, jobs: kernel.jobs })) {
+    for (const [prefix, operations] of Object.entries({ releases: kernel.releases, domains: kernel.domains, dns: kernel.dns, credentials: kernel.credentials, servers: kernel.servers, system: kernel.system, apps: kernel.apps, backupDestinations: kernel.backupDestinations, backups: kernel.backups, billing: kernel.billing, notices: kernel.notices, github: kernel.github, permissions: kernel.permissions, tokens: kernel.tokens, webhooks: kernel.webhooks, updates: kernel.updates, audit: kernel.audit, settings: kernel.settings, notifications: kernel.notifications, issues: kernel.issues, analytics: kernel.analytics, jobs: kernel.jobs })) {
       if (!operation.startsWith(`${prefix}.`)) continue;
       const key = operation.slice(prefix.length + 1);
       if (key !== "verifyStream" && Object.hasOwn(operations, key)) {

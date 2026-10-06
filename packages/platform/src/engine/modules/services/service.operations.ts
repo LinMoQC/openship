@@ -1,3 +1,4 @@
+import { requireGitopsRelease, requireEditableReleaseConfiguration } from "../releases/release-gate";
 import { AppError, NotFoundError, safeErrorMessage } from "@repo/core";
 import { OperationError } from "@repo/contracts";
 import { repos } from "@repo/db";
@@ -8,6 +9,7 @@ import { audit } from "../../lib/audit-emitter";
 import { parseRevealKeys, pickRevealed } from "../../lib/env-reveal";
 import { sshManager } from "../../lib/ssh-manager";
 import * as service from "./service.service";
+import { syncComposeDocument } from "./compose-sync.service";
 import { applyServiceEnvironment } from "./service-environment";
 import {
   getServiceEnvironment,
@@ -76,11 +78,18 @@ export const serviceDependencies: ServiceDependencies = {
     list: (ctx, id) =>
       run(async () => visible(ctx, await service.listServices(ctx, id), (row) => row.id)),
     async create(ctx, id, input) {
+      await requireGitopsRelease(id);
       const result = await run(() => service.createService(ctx, id, input));
       record(ctx, result.id, "write", { operation: "create", projectId: id, name: result.name });
       return result;
     },
+    async syncDocument(ctx, id, input) {
+      const result = await run(() => syncComposeDocument(ctx, id, input));
+      record(ctx, "*", "write", { operation: "syncDocument", projectId: id, environment: input.environment, serviceNames: input.expectedServices });
+      return result;
+    },
     async sync(ctx, id, input) {
+      await requireGitopsRelease(id);
       if (input.services.length === 0)
         throw new OperationError(
           "Refusing to sync an empty compose service list",
@@ -112,21 +121,25 @@ export const serviceDependencies: ServiceDependencies = {
   resources: {
     get: (ctx, projectId, id) => run(() => service.getService(ctx, projectId, id)),
     async update(ctx, projectId, id, input) {
+      await requireGitopsRelease(projectId);
       const result = await run(() => service.updateService(ctx, projectId, id, input));
       record(ctx, id, "write", { operation: "update", projectId, fields: Object.keys(input) });
       return result;
     },
     async remove(ctx, projectId, id) {
+      await requireGitopsRelease(projectId);
       await run(() => service.deleteService(ctx, projectId, id));
       record(ctx, id, "admin", { operation: "remove", projectId });
       return { success: true };
     },
     async acceptDrift(ctx, projectId, id) {
+      await requireGitopsRelease(projectId);
       const result = await run(() => service.acceptServiceDrift(ctx, projectId, id));
       record(ctx, id, "write", { operation: "drift.accept", projectId });
       return result;
     },
     async keepDrift(ctx, projectId, id) {
+      await requireGitopsRelease(projectId);
       const result = await run(() => service.keepServiceDrift(ctx, projectId, id));
       record(ctx, id, "write", { operation: "drift.keep", projectId });
       return result;
@@ -136,6 +149,7 @@ export const serviceDependencies: ServiceDependencies = {
     getEnvironment: (ctx, projectId, id, input) =>
       run(() => getServiceEnvironment(ctx, projectId, id, input)),
     async mergeEnvVars(ctx, projectId, id, input) {
+      await requireEditableReleaseConfiguration(projectId);
       const result = await run(() => mergeServiceEnvVars(ctx, projectId, id, input));
       record(ctx, id, "write", {
         operation: "env.merge",
@@ -147,6 +161,7 @@ export const serviceDependencies: ServiceDependencies = {
       return result;
     },
     async setEnvVars(ctx, projectId, id, input) {
+      await requireEditableReleaseConfiguration(projectId);
       const result = await run(() => service.setServiceEnvVars(ctx, projectId, id, input));
       record(ctx, id, "write", {
         operation: "env.replace",
@@ -178,21 +193,25 @@ export const serviceDependencies: ServiceDependencies = {
         ...(await service.getServiceVolumeSizes(ctx, projectId, id)),
       })),
     async start(ctx, projectId, id) {
+      await requireGitopsRelease(projectId);
       await run(() => service.startServiceContainer(ctx, projectId, id));
       record(ctx, id, "write", { operation: "start", projectId });
       return { success: true };
     },
     async stop(ctx, projectId, id) {
+      await requireGitopsRelease(projectId);
       await run(() => service.stopServiceContainer(ctx, projectId, id));
       record(ctx, id, "write", { operation: "stop", projectId });
       return { success: true };
     },
     async restart(ctx, projectId, id, input) {
+      await requireGitopsRelease(projectId);
       const result = await run(() => service.restartServiceContainer(ctx, projectId, id, input));
       record(ctx, id, "write", { operation: "restart", projectId, force: input?.force ?? false });
       return { success: true, ...result };
     },
     async applyEnvironment(ctx, projectId, id) {
+      await requireGitopsRelease(projectId);
       const result = await run(() => applyServiceEnvironment(ctx, projectId, id));
       record(ctx, id, "write", { operation: "env.apply", projectId, containerId: result.containerId });
       return result;

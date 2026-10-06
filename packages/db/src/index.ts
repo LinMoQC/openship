@@ -76,6 +76,7 @@ export {
   createPersonalAccessTokenRepo,
   normalizeRoutingFields,
   toComposeSpec,
+  composeWritePatch,
   composeSpecsEqual,
   reconcileComposeSpec,
   unresolvedComposeEnvironmentKeys,

@@ -28,6 +28,7 @@ import {
   type IssueOperations,
   type AnalyticsOperations,
   type JobOperations,
+  type ReleaseOperations,
 } from "@repo/contracts";
 import type {
   ExecutionContext,
@@ -105,6 +106,7 @@ export interface ScopedShip {
   readonly tokens: TokenOperations;
   readonly webhooks: WebhookOperations;
   readonly updates: UpdateOperations;
+  readonly releases: ReleaseOperations;
   readonly audit: AuditOperations;
   readonly settings: UserSettingsOperations;
   readonly notifications: NotificationOperations;
@@ -544,6 +546,7 @@ function createAttachedShip<Assertion>({
         tokens: bindGroup(platform.tokens),
         webhooks: bindGroup(platform.webhooks),
         updates: bindGroup(platform.updates),
+        releases: bindGroup({ state: platform.releases.state, bind: platform.releases.bind, plan: platform.releases.plan, getPlan: platform.releases.getPlan, start: platform.releases.start, getRun: platform.releases.getRun, latest: platform.releases.latest, capabilities: platform.releases.capabilities }),
         audit: bindGroup(platform.audit),
         settings: bindGroup(platform.settings),
         notifications: bindGroup(platform.notifications),

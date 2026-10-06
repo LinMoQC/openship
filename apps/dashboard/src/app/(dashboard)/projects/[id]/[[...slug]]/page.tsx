@@ -11,6 +11,7 @@ import { Deployments } from "../components/Deployments";
 import { HealthTab } from "../components/HealthTab";
 import { MonitoringTab } from "../components/MonitoringTab";
 import { AdvancedSettings } from "../components/AdvancedSettings";
+import { ReleaseTab } from "../components/ReleaseTab";
 import { OverviewTab } from "../components/OverviewTab";
 import { ServicesTab } from "../components/ServicesTab";
 import { ProjectTopologyPage } from "@/components/topology/ProjectTopologyPage";
@@ -826,6 +827,8 @@ const ProjectSettingsContent = () => {
         return <ServicesTab />;
       case "domains":
         return <DomainSettings />;
+      case "release":
+        return <ReleaseTab />;
       case "deployments":
         return <Deployments />;
       case "health":

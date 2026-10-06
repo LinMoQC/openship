@@ -105,7 +105,7 @@ describe("SDK source deployments", () => {
     const services = ["web"];
     const result = s.client.deploy({
       source: { type: "files", files: { "index.js": bytes, "dist/index.html": "published-site" } },
-      name: "app", projectId: "existing", environment: "preview", serverId: "server-a", serviceIds: services,
+      name: "app", projectId: "existing", environment: "preview", serverId: "server-a", serviceIds: services, strictServiceScope: true,
     });
     bytes.fill(65);
     services.push("another-service");
@@ -120,7 +120,7 @@ describe("SDK source deployments", () => {
     });
     expect(s.commands[3]?.body).toMatchObject({
       projectId: "project-a", uploadSessionId: "session/opaque", deployTarget: "server", serverId: "server-a",
-      serviceIds: ["web"], environment: "preview", services: [{ name: "web", image: "node:22", ports: [], dependsOn: [], environment: {}, volumes: [] }],
+      serviceIds: ["web"], strictServiceScope: true, environment: "preview", services: [{ name: "web", image: "node:22", ports: [], dependsOn: [], environment: {}, volumes: [] }],
     });
   });
 

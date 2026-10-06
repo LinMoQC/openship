@@ -21,6 +21,8 @@ try {
   }, null, 2));
   run("npm", ["install", "--ignore-scripts", "--omit=optional", "--no-audit", "--no-fund", "--no-package-lock"]);
   const installed = join(scratch, "node_modules/openship");
+  for (const file of ["dist/server/copied-pglite-upgrade.mjs", "dist/server/copied-platform-docker.mjs"])
+    if (!existsSync(join(installed, file))) throw new Error("Installed offline copied-database tooling is incomplete");
   writeFileSync(join(scratch, "probe.mjs"), `
 import assert from 'node:assert/strict';
 const environment = { ...process.env };
@@ -66,6 +68,7 @@ console.log('CJS_OK');
   if (!run(node, ["probe.cjs"]).includes("CJS_OK")) throw new Error("CommonJS package probe failed");
   writeFileSync(join(scratch, "native-probe.mjs"), `
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -73,10 +76,17 @@ import { createRequire } from 'node:module';
 const { createShip } = process.argv[2] === 'cjs' ? createRequire(import.meta.url)('openship/native') : await import('openship');
 const environment = { ...process.env };
 const directory = await mkdtemp(join(tmpdir(), 'openship-installed-native-'));
+const catalog = createServer((request, response) => {
+  assert.equal(request.url, '/api/billing/plans?locale=ar');
+  response.writeHead(200, { 'Content-Type': 'application/json' });
+  response.end(JSON.stringify({ data: { locale: 'ar', annual: { enabled: false, monthsFree: 0 }, ui: {}, plans: [] } }));
+});
+await new Promise((resolve, reject) => { catalog.once('error', reject); catalog.listen(0, '127.0.0.1', resolve); });
 let identity = null;
 let ship;
 const options = {
   instanceId: 'installed', stateDirectory: directory,
+  environment: { OPENSHIP_CLOUD_API_URL: 'http://127.0.0.1:' + catalog.address().port },
   storage: { driver: 'pglite', dataDir: join(directory, 'database') },
   encryptionKey: 'installed-sdk-smoke-test-persistent-key-32-bytes',
   runtime: 'bare', routing: 'none', administration: true,
@@ -91,7 +101,7 @@ try {
   const scoped = await ship.scope({ identity: 'verified-host-session', organizationId: mapping.personalOrganizationId });
   const plans = await scoped.billing.listPlans({ locale: 'ar' });
   assert.equal(plans.locale, 'ar');
-  assert.ok(plans.plans.length > 0);
+  assert.equal(plans.plans.length, 0);
   const notice = await ship.operator.notices.create({ title: 'Installed SDK', message: 'Persistent operator notice' });
   assert.ok((await scoped.notices.list()).advisories.some(item => item.id === notice.id));
   assert.equal(scoped.notices.create, undefined);
@@ -140,6 +150,8 @@ try {
   console.log('NATIVE_OK');
 } finally {
   await ship?.close();
+  catalog.closeAllConnections();
+  await new Promise((resolve, reject) => catalog.close(error => error ? reject(error) : resolve()));
   await rm(directory, { recursive: true, force: true });
 }
 `);

@@ -1,3 +1,4 @@
+import { requireGitopsRelease } from "../releases/release-gate";
 import { findActiveDeployment } from "@repo/platform/engine/lib/active-deployment";
 import { AppError, NotFoundError, isWildcardHostname, normalizeCustomHostname, safeErrorMessage } from "@repo/core";
 import { OperationError, type ProjectRoutingSchemas } from "@repo/contracts";
@@ -43,6 +44,7 @@ export const projectRoutingOperations: ResourceServices<typeof ProjectRoutingSch
     return repos.routeRule.listByProject(id);
   },
   async createRouteRule(ctx, id, input) {
+      await requireGitopsRelease(id);
     await localProject(ctx, id);
     await ownedDomain(id, input.domainId);
     const rule = await repos.routeRule.create({
@@ -54,6 +56,7 @@ export const projectRoutingOperations: ResourceServices<typeof ProjectRoutingSch
     return rule;
   },
   async updateRouteRule(ctx, id, input) {
+      await requireGitopsRelease(id);
     await localProject(ctx, id);
     const existing = await repos.routeRule.get(input.ruleId);
     if (!existing || existing.projectId !== id || existing.organizationId !== ctx.organizationId)
@@ -72,6 +75,7 @@ export const projectRoutingOperations: ResourceServices<typeof ProjectRoutingSch
     return rule;
   },
   async removeRouteRule(ctx, id, ruleId) {
+      await requireGitopsRelease(id);
     await localProject(ctx, id);
     await repos.routeRule.removeForProject(id, ruleId);
     await repush(id);
@@ -96,6 +100,7 @@ export const projectRoutingOperations: ResourceServices<typeof ProjectRoutingSch
     };
   },
   async connectDomain(ctx, id, input) {
+      await requireGitopsRelease(id);
     const hostname = normalizeCustomHostname(input.domain);
     if (!hostname) throw new OperationError("Domain is required", 400, "VALIDATION_ERROR", { success: false });
     try {

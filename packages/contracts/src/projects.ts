@@ -19,6 +19,8 @@ export const ProjectSchema = Type.Object({
   environmentName: Type.Optional(Type.String()),
   environmentSlug: Type.Optional(Type.String()),
   environmentType: Type.Optional(Type.String()),
+  managementMode: Type.Optional(Type.Union([Type.Literal("gitops"), Type.Literal("source")])),
+  releaseEnvironment: Type.Optional(nullableString()),
   gitProvider: Type.Optional(nullableString()),
   gitOwner: Type.Optional(nullableString()),
   gitRepo: Type.Optional(nullableString()),

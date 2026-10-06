@@ -27,6 +27,7 @@
 
 import { findActiveDeployment } from "@repo/platform/engine/lib/active-deployment";
 import crypto from "node:crypto";
+import { requireGitopsRelease } from "../releases/release-gate";
 import { repos } from "@repo/db";
 import { isServiceFailureStatus, safeErrorMessage, sanitizeProxySettings } from "@repo/core";
 // The SHARED bounded-concurrency limiter. This module grew a private copy (`runPool`)
@@ -484,6 +485,7 @@ class MigrationOrchestratorImpl {
     ctx: RequestContext,
     input: StartMigrationInput,
   ): Promise<{ migrationId: string; confirmationToken: string }> {
+    if (input.projectMove) await requireGitopsRelease(input.projectMove.projectId);
     // Global begin lock: migrations are rare, so serializing the (check → create)
     // makes the guard atomic in-process. (A multi-process API would additionally
     // need a DB constraint; self-hosted runs one API process.)

@@ -35,6 +35,17 @@ describe("deploy requires folder upload opt-in (#853)", () => {
     vi.restoreAllMocks();
   });
 
+  it.each([{ flags: ["--release-run", "run-1"] }])(
+    "refuses unsupported controller guarantees before uploading source ($flags)", async ({ flags }) => {
+      fetchStub = stubFetch(() => { throw new Error("must not upload or deploy"); });
+      const { deployCommand } = await import("../../src/commands/deploy");
+      const result = await runCommand(deployCommand, ["--folder", "--project", "p1", ...flags]);
+      expect(result.code).toBe(1);
+      expect(result.err).toContain("Folder uploads cannot execute a registered release");
+      expect(fetchStub.calls).toHaveLength(0);
+    },
+  );
+
   it.each([
     { flags: ["--folder"], inRepo: true },
     { flags: ["--name", "local-app"], inRepo: false },
@@ -86,6 +97,7 @@ describe("deploy requires folder upload opt-in (#853)", () => {
           projectId: "p1",
           uploadSessionId: "session-1",
           serviceIds: ["svc1"],
+          strictServiceScope: true,
         });
         return { json: { success: true, deployment_id: "d1", project_id: "p1" } };
       }
@@ -99,6 +111,7 @@ describe("deploy requires folder upload opt-in (#853)", () => {
         "p1",
         "--service-ids",
         "svc1",
+        "--strict-service-scope",
       ]);
       expect(result.code).toBe(0);
       expect(result.out + result.err).toContain("d1");

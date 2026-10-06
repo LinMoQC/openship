@@ -4,6 +4,7 @@ import {
   CreateServiceBody,
   UpdateServiceBody,
   SyncServicesBody,
+  SyncComposeDocumentBody,
   SetServiceEnvVarsBody,
 } from "./service-inputs";
 import { AgentExecBody } from "./exec";
@@ -152,6 +153,7 @@ export const ServiceCollectionSchemas = {
   list: { action: "read", output: Type.Array(ServiceSchema) },
   create: { action: "write", input: CreateServiceBody, output: ServiceSchema },
   sync: { action: "write", input: SyncServicesBody, output: Type.Array(ServiceSchema) },
+  syncDocument: { action: "write", input: SyncComposeDocumentBody, output: Type.Array(ServiceSchema) },
   activeContainers: { action: "read", output: Type.Array(LiveServiceContainerSchema) },
 } as const satisfies Record<string, ResourceOperationSchema>;
 export const ServiceResourceSchemas = {

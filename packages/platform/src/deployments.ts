@@ -5,6 +5,7 @@ import {
   type Deployment,
   type DeploymentOperations,
 } from "@repo/contracts";
+import { assertDeploymentsAvailable } from "./deployment-maintenance";
 import type { Authorization } from "./authorization";
 import type { ExecutionContext } from "./context";
 import { createDeploymentResourceOperations, type DeploymentResourceDependencies } from "./deployment-resources";
@@ -30,6 +31,8 @@ export interface DeploymentDependencies {
   authorization: Authorization;
   resources?: DeploymentResourceDependencies;
   builds?: BuildDependencies;
+  /** Shared admission runs before either the local engine or a cloud gateway. */
+  admit?(ctx: ExecutionContext, input: CreateDeploymentInput): Promise<void>;
   trigger(
     ctx: ExecutionContext,
     input: CreateDeploymentInput & { trigger?: "webhook" },
@@ -83,6 +86,8 @@ export function createDeploymentOperations(deps: DeploymentDependencies): Platfo
       // The existing engine validates registered-server ownership and runtime
       // admission using this resolved organization, along with source access,
       // billing, preflight, and build locks.
+      assertDeploymentsAvailable();
+      await deps.admit?.(authorized, input);
       let result = await deps.forward?.(authorized, input, options);
       if (!result) {
         const triggered = await deps.trigger(authorized, { ...input, trigger: options.trigger });

@@ -35,6 +35,7 @@ export async function deploySourceWorkflow(ship: { projects: ProjectOperations; 
     environment: input.environment,
     ...(services?.length ? { services } : {}),
     ...(input.serviceIds?.length ? { serviceIds: input.serviceIds } : {}),
+    ...(input.strictServiceScope ? { strictServiceScope: true } : {}),
   }));
   return { deployment_id: deployment.deployment_id, project_id: deployment.project_id,
     ...(scan.configDiagnostics && { configDiagnostics: scan.configDiagnostics }) };

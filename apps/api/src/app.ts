@@ -1,3 +1,4 @@
+import { releaseProjectRoutes, releasePlanRoutes, releaseRunRoutes, releaseCapabilityRoutes } from "./modules/releases/release.routes";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
@@ -209,6 +210,10 @@ app.route("/api/audit", auditRoutes);
 app.route("/api/permissions", permissionsRoutes);
 app.route("/api/notifications", notificationsRoutes);
 app.route("/api/updates", updatesRoutes);
+app.route("/api/projects/:id", releaseProjectRoutes);
+app.route("/api/release-plans", releasePlanRoutes);
+app.route("/api/release-runs", releaseRunRoutes);
+app.route("/api/releases", releaseCapabilityRoutes);
 // Org-wide issue feed — reads the caches the jobs above write; no detection of its own.
 app.route("/api/issues", issuesRoutes);
 app.route("/api/jobs", jobRoutes);

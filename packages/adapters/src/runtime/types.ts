@@ -566,6 +566,8 @@ export interface MultiServiceDeployConfig {
    * already pulled during cohort preparation. Docker must not infer this from
    * the tag text: a registry image can legitimately use Openship's tag shape. */
   imageAlreadyPrepared?: boolean;
+  /** Opt-in stateless candidate and activation health checks before retiring the incumbent. */
+  healthcheckPreflight?: import("./docker-preflight").HealthcheckPreflight;
   /** Extended compose fields (healthcheck, …). Docker honors them; runtimes
    *  that can't (cloud) warn-and-drop. See ComposeAdvanced in @repo/core. */
   advanced?: ComposeAdvanced;
@@ -611,6 +613,8 @@ export interface MultiServiceDeployConfig {
 }
 
 export interface MultiServiceDeployResult {
+  /** Settled only after all deployment gates; never serialized. */
+  activation?: { commit(): Promise<void>; rollback(): Promise<void> };
   containerId: string;
   status: string;
   /** The container is running, but one or more edge routes need a retry. */
@@ -652,6 +656,7 @@ export interface MultiServiceRuntimeAdapter extends RuntimeAdapter {
     projectId: string;
     slug: string;
     resources?: ResourceConfig;
+    externalNetworkName?: string;
   }): Promise<MultiServiceGroupHandle>;
 
   /** Deploy one service workload into a prepared group */
@@ -660,6 +665,13 @@ export interface MultiServiceRuntimeAdapter extends RuntimeAdapter {
     config: MultiServiceDeployConfig,
     onLog?: LogCallback,
   ): Promise<MultiServiceDeployResult>;
+
+  /** Wait for a Compose dependency condition on an already-created workload. */
+  waitForServiceCondition?(
+    containerId: string,
+    condition: "service_started" | "service_healthy" | "service_completed_successfully",
+    timeoutMs?: number,
+  ): Promise<void>;
 
   /**
    * Optional batch build: clone/prune the shared source ONCE and build every

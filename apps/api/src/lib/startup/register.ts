@@ -14,8 +14,10 @@ import { registerAppServiceRowReconcile } from "@repo/platform/engine/modules/se
 import { registerCustomCommandRestoreBackfill } from "@repo/platform/engine/modules/backups/restore-command-backfill";
 import { registerCredentialBackfill } from "./credential-backfill";
 import { registerNetworkSetupRecovery } from "@repo/platform/engine/lib/startup/network-setups";
+import { registerReleaseCutoverRecovery } from "@repo/platform/engine/modules/releases/release-cutover";
 
 export function registerStartupHooks(): void {
+  registerReleaseCutoverRecovery();
   // Persist stopped preparation/apply/check runs before serving saved progress.
   registerNetworkSetupRecovery();
   // Desktop: re-open saved port-forward tunnels marked auto-start.

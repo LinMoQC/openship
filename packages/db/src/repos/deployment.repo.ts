@@ -2,7 +2,7 @@ import { ilike, type SQL, eq, and, desc, gte, lte, inArray, isNotNull, isNull, n
 import { generateId, DEPLOYMENT_HISTORY_STATUSES, type DeploymentHistoryQuery } from "@repo/core";
 import type { Database } from "../connection";
 import { createConfigurationSecrets, type ConfigurationEncryption } from "../configuration-secrets";
-import { deployment, buildSession, project } from "../schema";
+import { deployment, buildSession, project, releaseRun } from "../schema";
 import { detailOf } from "./storable-detail";
 import { withProjectWorkAdmission } from "./project-work-admission";
 
@@ -213,6 +213,18 @@ export function createDeploymentRepo(db: Database, encryption: ConfigurationEncr
       const { id: providedId, ...rest } = data;
       const id = providedId ?? generateId("dep");
       return withProjectWorkAdmission(db, rest.projectId, rest.organizationId, async (tx) => {
+        const releaseRunId = (rest.meta as { releaseRunId?: string } | null)?.releaseRunId;
+        if (releaseRunId) {
+          const [run] = await tx.select().from(releaseRun).where(eq(releaseRun.id, releaseRunId)).for("update");
+          if (!run || run.projectId !== rest.projectId || run.organizationId !== rest.organizationId || !run.workflowRunId ||
+              !["queued", "syncing", "pulling", "deploying"].includes(run.stage)) return undefined;
+          if (run.deploymentId) {
+            const existing = await tx.query.deployment.findFirst({ where: eq(deployment.id, run.deploymentId) });
+            if (!existing || existing.projectId !== rest.projectId || existing.commitSha !== rest.commitSha || existing.environment !== rest.environment)
+              throw new Error("RELEASE_DEPLOYMENT_CONFLICT");
+            return codec.openDeployment(existing);
+          }
+        }
         // A terminal-looking deployment can still have a worker unwinding after
         // cancellation. The partial unique status index no longer covers that
         // row, so refuse its replacement until the worker's outermost finally
@@ -236,6 +248,12 @@ export function createDeploymentRepo(db: Database, encryption: ConfigurationEncr
           .values(codec.sealDeployment({ id, ...rest }))
           .onConflictDoNothing()
           .returning();
+        if (inserted && releaseRunId) {
+          // The Run association and worker lease exist before any network reply
+          // or host operation. Lost CLI responses cannot authorize a second deploy.
+          await tx.update(releaseRun).set({ deploymentId: inserted.id, updatedAt: new Date() }).where(eq(releaseRun.id, releaseRunId));
+          await tx.insert(buildSession).values({ id: generateId("bld"), deploymentId: inserted.id, projectId: rest.projectId, status: "queued" });
+        }
         return codec.openDeployment(inserted as Deployment | undefined);
       });
     },

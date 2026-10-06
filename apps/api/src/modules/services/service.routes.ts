@@ -26,6 +26,7 @@ import {
   SetServiceEnvVarsBody,
   MergeServiceEnvVarsBody,
   SyncServicesBody,
+  SyncComposeDocumentBody,
   UpdateServiceBody,
 } from "@repo/contracts";
 import { secureRouter } from "../../lib/secure-router";
@@ -81,6 +82,7 @@ r.post(
   cloudProjectProxy,
   ctrl.syncFromCompose,
 );
+r.post("/sync-compose", { tag: "project:service:write", collection: true, auditHandledByOperation: true, body: SyncComposeDocumentBody, mcpExcluded: "Server-side CI Compose synchronization" }, cloudProjectProxy, ctrl.syncDocument);
 r.get(
   "/:serviceId",
   { tag: "project:service:read", mcp: { description: "Get one service by id." } },

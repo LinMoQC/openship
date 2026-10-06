@@ -7,15 +7,20 @@ import { resolveEffectiveTarget, type DeploymentMeta } from "../../lib/deploymen
 import { needsDomainSslCheck } from "../../lib/domain-ssl";
 import { platform } from "../../lib/platform-config";
 import { getDomain } from "./domain.service";
+import { requireGitopsRelease } from "../releases/release-gate";
 
 /** Reused at operation admission and before detached work mutates the target. */
 export async function domainExecution(ctx: ExecutionContext, id: string, verifying = false) {
+  const domain = await getDomain(ctx, id);
+  // External-ingress verification is read-only. DNS, certificates and routing
+  // changes on a bound project remain owned by its GitOps controller.
+  if (!(verifying && domain.externalIngress) && domain.projectId)
+    await requireGitopsRelease(domain.projectId);
   if (
     process.env.OPENSHIP_NATIVE !== "true" ||
     process.env.OPENSHIP_NATIVE_ALLOW_HOST_EXECUTION === "true"
   )
     return;
-  const domain = await getDomain(ctx, id);
   if (verifying && (domain.externalIngress || (domain.verified && !needsDomainSslCheck(domain))))
     return;
   const project = domain.projectId ? await repos.project.findById(domain.projectId) : null;

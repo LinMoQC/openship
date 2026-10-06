@@ -321,6 +321,7 @@ describe("parseOpenshipConfig", () => {
         timeoutSeconds: 90,
         stabilization: true,
         stabilizationSeconds: 30,
+        preflight: true,
         onFailure: "fail" as const,
       };
       const { config, errors, warnings } = parseOpenshipConfig({ readiness });
@@ -346,6 +347,7 @@ describe("parseOpenshipConfig", () => {
         timeoutSeconds: undefined,
         stabilization: undefined,
         stabilizationSeconds: undefined,
+        preflight: undefined,
         onFailure: undefined,
       });
     });

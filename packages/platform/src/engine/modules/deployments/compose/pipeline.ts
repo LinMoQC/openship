@@ -263,7 +263,10 @@ export async function executeComposePipeline(opts: ComposePipelineOpts): Promise
    * services must be untouchable even with no previous release (a migration reusing
    * already-running containers in place) sets this on the snapshot.
    */
-  const strictScope = !dep.forceAll && !!targetServiceIds && Boolean(snapshot.strictServiceScope);
+  const strictScope = Boolean(snapshot.strictServiceScope);
+  if (strictScope && (dep.forceAll || !targetServiceIds?.size)) {
+    throw new Error("An exclusive Compose scope cannot be empty or combined with forceAll");
+  }
 
   // Service rows can change after request-time/reconciliation validation. Do
   // one final fail-closed check in the worker before any image build, pull, or

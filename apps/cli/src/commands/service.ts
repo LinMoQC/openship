@@ -12,6 +12,7 @@ import { Command } from "commander";
 import chalk from "chalk";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
+import { readFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import {
@@ -266,9 +267,30 @@ const syncCmd = stackCommand("sync")
     "Sync a stack's services from a docker-compose file (services not in the file are removed)",
   )
   .argument("<compose-file>", "Path to docker-compose.yml / compose.yaml")
+  .option("--release-run <id>", "Registered GitOps controller run ID")
+  .option("--manifest-commit <sha>", "Immutable GitOps manifest commit")
+  .option("--server-env <environment>", "Resolve variables on the deployment server")
+  .option("--expected-services <names>", "Complete comma-separated service set")
   .option("-y, --yes", "Skip the confirmation prompt")
   .action(async (composeFile: string, opts) => {
     requireAuth();
+    if (opts.serverEnv) {
+      const expectedServices = String(opts.expectedServices ?? "").split(",").filter(Boolean);
+      if (!["preview", "production", "development"].includes(opts.serverEnv) || !expectedServices.length) {
+        err("  --server-env requires a valid environment and --expected-services.");
+        exitCommand(1);
+      }
+      try {
+        const projectId = await resolveProject(opts.project);
+        await confirmOrExit(opts.yes, "Sync the complete prebuilt service configuration?");
+        const rows = await getShipClient().services.syncDocument(projectId, {
+          compose: readFileSync(path.resolve(composeFile), "utf8"), environment: opts.serverEnv, expectedServices,
+          ...(opts.releaseRun && { releaseRunId: opts.releaseRun }), ...(opts.manifestCommit && { manifestCommit: opts.manifestCommit }),
+        });
+        if (isJsonMode()) printJson({ services: rows }); else ok(`  Synced ${rows.length} service(s).`);
+      } catch (e) { rethrowCommandExit(e); fail(e); }
+      return;
+    }
     // No YAML dependency in the CLI: let Docker Compose parse + interpolate,
     // then map its normalized JSON to the sync payload.
     const abs = path.resolve(composeFile);

@@ -7,6 +7,8 @@ interface TriggerRequest {
   branch?: string | null;
   trigger: string;
   forceAll: boolean;
+  serviceIds?: string[];
+  strictServiceScope?: boolean;
   commitSha?: string;
   commitShaBefore?: string;
   reuseSnapshot: {
@@ -33,7 +35,8 @@ vi.mock("@repo/db", () => ({
         id === h.target?.id ? h.target : id === h.active?.id ? h.active : null,
     },
     project: { findById: async () => h.project },
-    service: { listByDeployment: async () => h.serviceImages },
+    service: { listByDeployment: async () => h.serviceImages,
+      listByProject: async () => [{ id: "relay", name: "relay", enabled: true }, { id: "database", name: "database", enabled: true }] },
     serviceDeployment: { effectiveImagesAsOf: async () => new Map() },
     member: { listByOrganization: async () => [{ userId: "org-owner" }] },
   },
@@ -137,6 +140,18 @@ beforeEach(() => {
 });
 
 describe("rollback — reacquire a frozen release image", () => {
+  it("restores an exclusive candidate through its exact service boundary", async () => {
+    await rollback("dep-target", { serviceIds: ["relay"], strictServiceScope: true });
+    expect(h.triggerDeployment).toHaveBeenCalledTimes(1);
+    expect(h.triggerDeployment.mock.calls[0][1]).toMatchObject({
+      projectId: "project-1", serviceIds: ["relay"], strictServiceScope: true, forceAll: false,
+    });
+  });
+  it("refuses a stale or foreign service scope before triggering restoration", async () => {
+    await expect(rollback("dep-target", { serviceIds: ["foreign"], strictServiceScope: true }))
+      .rejects.toMatchObject({ code: "ROLLBACK_SCOPE_INVALID" });
+    expect(h.triggerDeployment).not.toHaveBeenCalled();
+  });
   it("restores a cluster digest without changing the source used by a later redeploy", async () => {
     h.runtimeName = "kubernetes";
     h.target!.imageRef = FROZEN_RELEASE_IMAGE;

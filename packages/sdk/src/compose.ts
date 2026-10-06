@@ -3,13 +3,16 @@ import { ValidationError, type TSyncServicesBody } from "@repo/contracts";
 
 /** Input from Docker Compose's normalized JSON, after interpolation. */
 export function normalizeComposeServices(
-  document: { services?: Record<string, unknown> },
+  document: { services?: Record<string, unknown>; volumes?: unknown; networks?: unknown },
   baseDirectory: string,
 ): TSyncServicesBody["services"] {
   const errors: string[] = [];
+  const volumeNames = normalizedVolumeNames(document.volumes);
+  const networkNames = normalizedExternalNetworkNames(document.networks);
   const services = Object.entries(document.services ?? {}).map(([name, definition]) =>
-    mapComposeService(name, definition, baseDirectory, errors),
+    mapComposeService(name, definition, baseDirectory, errors, volumeNames, networkNames),
   );
+  markComposeCompletionTasks(services);
   if (!services.length) throw new ValidationError("No services found in the compose file");
   if (errors.length)
     throw new ValidationError(
@@ -55,19 +58,28 @@ function mapPorts(ports: unknown): string[] {
   });
 }
 
-function mapVolumes(vols: unknown, name: string, errors: string[]): string[] {
+function mapVolumes(
+  vols: unknown,
+  name: string,
+  errors: string[],
+  resolvedVolumeNames: ReadonlyMap<string, string>,
+): string[] {
   if (!Array.isArray(vols)) return [];
   return vols.map((v) => {
     if (typeof v === "string") return v;
     if (v && typeof v === "object") {
+      const mount = { ...(v as Record<string, unknown>) };
+      if (typeof mount.source === "string") {
+        mount.source = resolvedVolumeNames.get(mount.source) ?? mount.source;
+      }
       // The same mount rules the API import enforces. Without this, a file the
       // wizard refuses (a tmpfs that would become persistent disk, a subpath that
       // would mount the whole volume) synced cleanly through the CLI instead —
       // one policy accepted by one door and rejected by the other.
-      for (const issue of composeMountIssues(v as Record<string, unknown>)) {
+      for (const issue of composeMountIssues(mount)) {
         if (issue.blocking) errors.push(`  ${name}: ${issue.reason}`);
       }
-      const spec = composeMountToSpec(v as Record<string, unknown>);
+      const spec = composeMountToSpec(mount);
       if (spec !== undefined) return spec;
     }
     return String(v);
@@ -98,6 +110,60 @@ function mapEnv(env: unknown): Record<string, string> {
 function mapDependsOn(deps: unknown): string[] {
   if (Array.isArray(deps)) return deps.filter((d): d is string => typeof d === "string");
   if (deps && typeof deps === "object") return Object.keys(deps);
+  return [];
+}
+
+function mapDependencyConditions(
+  deps: unknown,
+): ComposeAdvanced["dependsOnConditions"] | undefined {
+  if (!deps || typeof deps !== "object" || Array.isArray(deps)) return undefined;
+  const out: NonNullable<ComposeAdvanced["dependsOnConditions"]> = {};
+  for (const [service, raw] of Object.entries(deps as Record<string, unknown>)) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const condition = (raw as Record<string, unknown>).condition;
+    if (
+      condition !== "service_started" &&
+      condition !== "service_healthy" &&
+      condition !== "service_completed_successfully"
+    ) {
+      continue;
+    }
+    const required = (raw as Record<string, unknown>).required;
+    out[service] = {
+      condition,
+      ...(typeof required === "boolean" ? { required } : {}),
+    };
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function normalizedVolumeNames(raw: unknown): Map<string, string> {
+  const names = new Map<string, string>();
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return names;
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      const name = (value as Record<string, unknown>).name;
+      if (typeof name === "string" && name) names.set(key, name);
+    }
+  }
+  return names;
+}
+
+function normalizedExternalNetworkNames(raw: unknown): Map<string, string> {
+  const names = new Map<string, string>();
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return names;
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const def = value as Record<string, unknown>;
+    if (def.external !== true) continue;
+    names.set(key, typeof def.name === "string" && def.name ? def.name : key);
+  }
+  return names;
+}
+
+function serviceNetworkNames(raw: unknown): string[] {
+  if (Array.isArray(raw)) return raw.filter((name): name is string => typeof name === "string");
+  if (raw && typeof raw === "object") return Object.keys(raw as Record<string, unknown>);
   return [];
 }
 
@@ -143,6 +209,8 @@ export function mapComposeService(
   def: unknown,
   baseDir: string,
   errors: string[],
+  resolvedVolumeNames: ReadonlyMap<string, string> = new Map(),
+  resolvedExternalNetworkNames: ReadonlyMap<string, string> = new Map(),
 ): Record<string, unknown> {
   const d = (def ?? {}) as Record<string, unknown>;
   const svc: Record<string, unknown> = { name };
@@ -174,7 +242,7 @@ export function mapComposeService(
   if (dependsOn.length) svc.dependsOn = dependsOn;
   const environment = mapEnv(d.environment);
   if (Object.keys(environment).length) svc.environment = environment;
-  const volumes = mapVolumes(d.volumes, name, errors);
+  const volumes = mapVolumes(d.volumes, name, errors, resolvedVolumeNames);
   if (volumes.length) svc.volumes = volumes;
 
   // #332: carry structured argv (list verbatim / string shell-split) so the
@@ -193,6 +261,33 @@ export function mapComposeService(
   // namespaces the same way it lost read-only mounts.
   const { advanced, errors: namespaceErrors } = mapNamespaces(name, d);
   errors.push(...namespaceErrors);
+  const dependencyConditions = mapDependencyConditions(d.depends_on);
+  if (dependencyConditions) advanced.dependsOnConditions = dependencyConditions;
+  const externalVolumeNames = volumes
+    .map((volume) => volume.split(":", 1)[0])
+    .filter((source) => [...resolvedVolumeNames.values()].includes(source));
+  if (externalVolumeNames.length > 0) {
+    advanced.externalVolumeNames = [...new Set(externalVolumeNames)];
+  }
+  const networkNames = serviceNetworkNames(d.networks);
+  if (networkNames.length === 1) {
+    const externalNetworkName = resolvedExternalNetworkNames.get(networkNames[0]);
+    if (externalNetworkName) advanced.externalNetworkName = externalNetworkName;
+  }
+  if (d.healthcheck && typeof d.healthcheck === "object" && !Array.isArray(d.healthcheck)) {
+    const health = d.healthcheck as Record<string, unknown>;
+    advanced.healthcheck = {
+      ...(health.test !== undefined ? { test: health.test as string | string[] } : {}),
+      ...(typeof health.interval === "string" ? { interval: health.interval } : {}),
+      ...(typeof health.timeout === "string" ? { timeout: health.timeout } : {}),
+      ...(typeof health.retries === "number" ? { retries: health.retries } : {}),
+      ...(typeof health.start_period === "string" ? { startPeriod: health.start_period } : {}),
+      ...(typeof health.disable === "boolean" ? { disable: health.disable } : {}),
+    };
+  }
+  if (d.entrypoint !== null && d.entrypoint !== undefined) {
+    advanced.entrypoint = commandToArgv(d.entrypoint as string | string[]) ?? [];
+  }
   // `docker compose config` has already expanded args, including turning `$$`
   // into a literal `$`. An explicit empty marker prevents the API from ever
   // treating that normalized literal as a raw template on a later deploy.
@@ -212,4 +307,22 @@ export function mapComposeService(
   if (Object.keys(advanced).length > 0) svc.advanced = advanced;
 
   return svc;
+}
+
+/** Mark services used as Compose completion gates as one-shot tasks. */
+export function markComposeCompletionTasks(services: Array<Record<string, unknown>>): void {
+  const completionTargets = new Set(
+    services.flatMap((service) =>
+      Object.entries((service.advanced as ComposeAdvanced | undefined)?.dependsOnConditions ?? {})
+        .filter(([, value]) => value.condition === "service_completed_successfully")
+        .map(([name]) => name),
+    ),
+  );
+  for (const service of services) {
+    if (!completionTargets.has(String(service.name))) continue;
+    service.advanced = {
+      ...((service.advanced as ComposeAdvanced | undefined) ?? {}),
+      runToCompletion: true,
+    } satisfies ComposeAdvanced;
+  }
 }

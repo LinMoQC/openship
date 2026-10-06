@@ -93,6 +93,7 @@ export async function reapProjectImages(project: Project): Promise<ReapResult> {
 
 async function reapProjectImagesUnlocked(project: Project): Promise<ReapResult> {
   const out: ReapResult = { removed: 0, bytes: 0, skippedInUse: 0, errors: 0 };
+  if ((await repos.releases.journals(project.id)).some(row => !["committed", "restored"].includes(row.stage))) return out;
   if (!project.activeDeploymentId) return out; // no host to resolve
   const activeDep = await findActiveDeployment(project);
   if (!activeDep) return out;

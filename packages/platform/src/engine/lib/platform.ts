@@ -1,3 +1,5 @@
+import { releaseDependencies } from "../modules/releases/release.operations";
+import { assertGitopsDeployment } from "../modules/releases/release-gate";
 /** Application composition shared by the HTTP process and each owned native worker. */
 import { AppError, CLOUD_UNREACHABLE_CODE } from "@repo/core";
 import { isCreateDeploymentResult, isDeployment } from "@repo/contracts";
@@ -56,6 +58,7 @@ let platform: PlatformKernel | undefined;
 export function getPlatformKernel(): PlatformKernel {
   return (platform ??= createPlatform({
     authorization,
+    releases: releaseDependencies,
     projects: projectDependencies,
     builds: buildDependencies,
     sources: sourceDependencies,
@@ -108,6 +111,9 @@ export function getPlatformKernel(): PlatformKernel {
       subscribe: (...args) => buildService.subscribeToBuildSession(...args),
     },
     trigger: (ctx, input) => buildService.triggerDeployment(ctx, input),
+    async admit(ctx, input) {
+      await assertGitopsDeployment(ctx, input.projectId, input);
+    },
     // Preserve the HTTP presentation, including masking, and detach all nested
     // objects. Native callers get the same ISO dates/JSON values as HTTP callers.
     present(deployment) {

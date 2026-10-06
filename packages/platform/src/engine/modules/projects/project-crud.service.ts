@@ -3,6 +3,7 @@
  */
 
 import { activeDeploymentForProject, findActiveDeployment, listActiveServiceDeployments } from "@repo/platform/engine/lib/active-deployment";
+import { requireGitopsRelease } from "../releases/release-gate";
 import {
   repos,
   type Deployment,
@@ -293,6 +294,7 @@ export async function enrichProject(p: Project) {
   // reads this payload. Anywhere else would be a second thing to fetch and a second place
   // for the answer to disagree.
   const activeMigration = await loadActiveMigration(p.id);
+  const releaseBinding = await repos.releases.binding(p.id);
 
   return {
     ...p,
@@ -300,6 +302,8 @@ export async function enrichProject(p: Project) {
     serverId,
     serverName,
     activeMigration,
+    managementMode: releaseBinding ? "gitops" as const : "source" as const,
+    releaseEnvironment: releaseBinding?.config.environment ?? null,
     ...readEnabled(p),
     ...readActiveDeploymentSummary(activeDep),
     // isCloud decides the fallback when nothing is configured: the metered free
@@ -351,6 +355,7 @@ export async function enrichProjectsBatch(
   // projects costs a query rather than 50. The map is empty on cloud (no migrations there)
   // and on any failure — a lookup for a status pill must never fail a project list.
   const activeMigrations = await loadActiveMigrations(projects.map((p) => p.id));
+  const releaseBindings = new Map((await repos.releases.bindings()).map(b => [b.projectId, b]));
 
   return projects.map((p) => {
     const production = p.resources as ResourceConfig | null;
@@ -373,6 +378,8 @@ export async function enrichProjectsBatch(
       serverId,
       serverName,
       activeMigration: readActiveMigration(activeMigrations.get(p.id)),
+      managementMode: releaseBindings.has(p.id) ? "gitops" as const : "source" as const,
+      releaseEnvironment: releaseBindings.get(p.id)?.config.environment ?? null,
       ...readEnabled(p),
       ...readActiveDeploymentSummary(activeDep),
       // isCloud decides the fallback when nothing is configured: the metered
@@ -1459,6 +1466,7 @@ export async function ensureProject(data: EnsureProjectBody, organizationId: str
   if (project && project.organizationId !== organizationId) {
     throw new NotFoundError("Project", data.projectId ?? desiredSlug);
   }
+  if (project) await requireGitopsRelease(project.id);
   if (data.deploymentEnvironment !== undefined) {
     // Source deployments ensure config before asking for build access. Reject a
     // preview aimed at production here too, before overwriting services/config
@@ -1691,6 +1699,8 @@ export async function updateProject(
 ) {
   const p = await repos.project.findById(projectId);
   assertResourceInOrg(p, "Project", organizationId, projectId);
+  if (Object.keys(data).some(key => !["name", "description"].includes(key)))
+    await requireGitopsRelease(projectId);
 
   // Reject a bogus custom hostname before the field edits below are committed — the
   // route sync happens after them, so validating there alone would 400 a request
@@ -2445,7 +2455,9 @@ export async function evaluateDrift(
   if (upstream.mode === "release" && deployed.mode === "release") {
     const latest = upstream.key === releaseSourceKey(p) ? upstream.latestVersion : null;
     const current = deployed.currentVersion;
-    const behind = Boolean(latest && current && compareSemver(latest, current) > 0);
+    const { customRuntimeUpdatePolicy } = await import("@repo/core");
+    const custom = p.appTemplateId === "openship" && current ? customRuntimeUpdatePolicy(current, latest) : null;
+    const behind = custom ? custom.adaptationRequired : Boolean(latest && current && compareSemver(latest, current) > 0);
     const latestInProgress =
       behind && latest
         ? Boolean(
@@ -2462,6 +2474,7 @@ export async function evaluateDrift(
       latestVersion: latest,
       currentVersion: current,
       pinned: upstream.pinned,
+      ...(custom ?? {}),
     };
   }
 

@@ -11,6 +11,7 @@ import { ServiceIcon } from "@/components/services/ServiceIcon";
 import { ConnectionCard } from "./ConnectionCard";
 import { ConnectedServicesCard } from "./ConnectedServicesCard";
 import { UsedByCard } from "./UsedByCard";
+import { ReleaseSummary } from "./ReleaseSummary";
 import { TrafficChart } from "./general/TrafficChart";
 import { useProjectInfo, useAnalyticsData, invalidateProjectCaches } from "@/hooks/useProjectEndpoints";
 import { useI18n, interpolate } from "@/components/i18n-provider";
@@ -155,6 +156,7 @@ export const OverviewTab = () => {
 
   return (
     <div className="space-y-5">
+      {projectData.managementMode === "gitops" && <ReleaseSummary projectId={id} name={projectData.name} environment={projectData.environmentType} />}
       {/* Apps expose their connection details first. Projects share individual
           services from the Services tab. */}
       {projectData.id && projectData.isApp && (

@@ -40,6 +40,7 @@ const serverRepo = vi.hoisted(() => ({
 // ensureProject only ever touches these three repos.
 vi.mock("@repo/db", () => ({
   repos: {
+    releases: { binding: vi.fn(async () => null), pendingJournals: vi.fn(async () => []), journals: vi.fn(async () => []) },
     project: projectRepo,
     projectGroup: projectGroupRepo,
     service: serviceRepo,

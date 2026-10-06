@@ -78,6 +78,7 @@ const h = vi.hoisted(() => ({
 
 vi.mock("@repo/db", () => ({
   repos: {
+    releases: { binding: vi.fn(async () => null), pendingJournals: vi.fn(async () => []), journals: vi.fn(async () => []) },
     project: {
       findById: async () => ({ ...h.project }),
       update: async (_id: string, patch: Record<string, unknown>) => {

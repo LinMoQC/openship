@@ -119,6 +119,7 @@ import {
 } from "../../lib/release-resolver";
 import { commitSourceKey, projectBranch } from "../projects/project-crud.service";
 import { env } from "../../config/index";
+import { assertGitopsDeployment, requireGitopsRelease } from "../releases/release-gate";
 
 function throwPreflightFailure(preflight: PreflightResult): never {
   const failedChecks = preflight.checks.filter((check) => check.status === "fail");
@@ -204,6 +205,8 @@ export async function runDeploymentPreflight(
 
 /** Config snapshot stored in deployment.meta - self-contained build+deploy config. */
 export interface DeploymentConfigSnapshot {
+  /** Verified controller context retained for background execution. */
+  releaseRunId?: string;
   /** Internal Cloud service-slot reservation, derived at queue creation. */
   cloudApplicationSlot?: boolean;
   /** Frozen stack names reserve slots before their service rows are synchronized. */
@@ -1329,6 +1332,12 @@ async function createQueuedDeploymentUnlocked(opts: {
   changedPaths?: string[] | null;
   changedPathsTruncated?: boolean;
 }) {
+  const binding = await repos.releases.binding(opts.projectId);
+  if (binding) {
+    const run = opts.meta.releaseRunId ? await repos.releases.run(opts.meta.releaseRunId) : null;
+    if (!run || run.projectId !== opts.projectId || run.organizationId !== opts.organizationId || !run.workflowRunId || !["queued", "syncing", "pulling", "deploying"].includes(run.stage))
+      throw new AppError("Create a GitOps release plan before deploying this project", 409, "GITOPS_RELEASE_REQUIRED");
+  }
   // Persist the smart-deploy serviceIds onto the snapshot so the
   // executor can find them without re-resolving from request scope.
   let meta: DeploymentConfigSnapshot = opts.meta;
@@ -1438,7 +1447,7 @@ async function createQueuedDeploymentUnlocked(opts: {
   }
 
   try {
-    await repos.deployment.createBuildSession({
+    if (!meta.releaseRunId) await repos.deployment.createBuildSession({
       deploymentId: dep.id,
       projectId: opts.projectId,
       status: "queued",
@@ -1506,9 +1515,8 @@ export async function requestBuildAccess(
   input: BuildAccessInput,
   /**
    * INTERNAL-only options — deliberately a second argument rather than fields on
-   * `BuildAccessInput`, which is the wire body. These values can change which services
-   * are touched or bypass normal artifact acquisition, so only server-side callers get
-   * to set them.
+   * `BuildAccessInput`, which is the wire body. Artifact handovers bypass normal
+   * acquisition; the public strict scope can only narrow execution.
    */
   internal?: {
     strictServiceScope?: boolean;
@@ -1532,6 +1540,7 @@ export async function requestBuildAccess(
     serviceDeploymentMode,
     services,
     serviceIds,
+    strictServiceScope,
     refreshServiceIds,
     cloudResourceTier,
     cloudResourceCustom,
@@ -1543,6 +1552,11 @@ export async function requestBuildAccess(
     throw new NotFoundError("Project", projectId);
   }
   if (project.organizationId !== ctx.organizationId) throw new NotFoundError("Project", projectId);
+  await requireGitopsRelease(projectId);
+  const exactScope = strictServiceScope || internal?.strictServiceScope;
+  if (exactScope && !serviceIds?.length) {
+    throw new AppError("An exact deployment scope requires at least one service ID", 400);
+  }
   const deployEnvironment = resolveDeploymentEnvironment(project, environment);
   if (process.env.OPENSHIP_NATIVE === "true" && process.env.OPENSHIP_NATIVE_ALLOW_HOST_EXECUTION !== "true") {
     if (buildStrategy === "local" || deployTarget === "local")
@@ -1957,6 +1971,11 @@ export async function requestBuildAccess(
   );
   freezeResolvedServicePipeline(snapshot, { useServicePipeline, servicePreflightServices });
 
+  if (exactScope && serviceIds?.length) {
+    try { assertExactServiceTargets(await repos.service.listByProject(project.id), serviceIds); }
+    catch (error) { throw new AppError(safeErrorMessage(error), 400); }
+  }
+
   // Resolve the snapshot's target (deployTarget + serverId + runtimeMode) from
   // the single source of truth shared with triggerDeployment — UI override >
   // cloudWorkspaceId > active-deployment meta. Keeps the two deploy entry points
@@ -2091,7 +2110,7 @@ export async function requestBuildAccess(
     // stateful services (DBs/caches) on an unrelated change.
     serviceIds,
     refreshServiceIds,
-    strictServiceScope: internal?.strictServiceScope,
+    strictServiceScope: exactScope,
   });
 
   // Store env vars on project as "latest defaults"
@@ -2273,6 +2292,7 @@ export async function redeployBuildSession(
   opts?: { useExistingCommit?: boolean; trigger?: string },
 ) {
   const { dep: oldDep, project } = await loadDeployment(deploymentId);
+  await requireGitopsRelease(project.id);
   resolveDeploymentEnvironment(project, oldDep.environment);
   // The Openship control plane updates itself via the CLI — never a redeploy.
   // The apply-update endpoint (updates.service) reaches redeploy directly, and
@@ -2505,6 +2525,7 @@ export async function triggerDeployment(
   ctx: RequestContext,
   data: {
     projectId: string;
+    releaseRunId?: string;
     /**
      * Explicit registered-server target for CLI/API deploys. It is resolved by
      * the same snapshot-target and org-scoped preflight path as the dashboard;
@@ -2600,6 +2621,10 @@ export async function triggerDeployment(
     throw new NotFoundError("Project", data.projectId);
   }
   const environment = resolveDeploymentEnvironment(project, data.environment);
+  if (data.strictServiceScope && data.forceAll) {
+    throw new AppError("An exclusive service scope cannot be combined with forceAll", 400);
+  }
+  const releaseExecution = await assertGitopsDeployment(ctx, project.id, { ...data, environment });
   if (data.serverId) await requireOrgServer(data.serverId, ctx.organizationId);
   // The Openship control plane IS the running host service, not a redeployable
   // workload — it updates itself via the CLI. It's a release-provider project, so
@@ -2741,6 +2766,7 @@ export async function triggerDeployment(
   // must not inherit its force-pull behavior.
   if (data.forcePullImages) snapshot.forcePullImages = true;
   else delete snapshot.forcePullImages;
+  if (releaseExecution) snapshot.releaseRunId = releaseExecution.run.id;
   const routeState = await resolveProjectRouteState(project);
 
   // Resolve the snapshot's target (deployTarget + serverId + runtimeMode) from
@@ -2943,6 +2969,11 @@ export async function triggerDeployment(
     // single-app pipeline without turning an empty subset into "build all".
     finalServiceIds = target.length > 0 ? target : undefined;
     refreshServiceIds = target.length > 0 ? target : undefined;
+  }
+
+  if (data.strictServiceScope && (finalForceAll || !finalServiceIds?.length ||
+      JSON.stringify([...finalServiceIds].sort()) !== JSON.stringify([...(data.serviceIds ?? [])].sort()))) {
+    throw new AppError("Resolved deployment differs from the exclusive service scope", 409, "DEPLOYMENT_SCOPE_CHANGED");
   }
 
   const dep = await createQueuedDeployment({

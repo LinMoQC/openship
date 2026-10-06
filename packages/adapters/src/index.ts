@@ -1,3 +1,4 @@
+/// <reference path="./runtime/tar-fs.d.ts" />
 /**
  * @repo/adapters - platform abstraction layer.
  *
@@ -84,6 +85,7 @@ export { assertCapability, isMultiServiceRuntime } from "./runtime/types";
 export {
   DockerRuntime,
   buildNetworkAliases,
+  parsePortBindings,
   ownsBuiltImage,
   type BuildCachePruneOptions,
   type BuildCachePruneResult,
@@ -612,3 +614,4 @@ export * from "./cluster/database";
 export { databaseArchiveName } from "./cluster/redis-backups";
 export * from "./runtime/kubernetes";
 export { splitRuntimeEnv, droppedRuntimeEnvMessage } from "./runtime/runtime-env";
+export type { ServiceCutoverRecord, CutoverPersistence } from "./runtime/docker-cutover";

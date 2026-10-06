@@ -1,6 +1,6 @@
 import { and, asc, eq, gt, or, sql, type SQL } from "drizzle-orm";
 import type { Database } from "../connection";
-import { deployment, service } from "../schema";
+import { deployment, service, envVar } from "../schema";
 import {
   createConfigurationSecrets,
   isPlainConfiguration,
@@ -15,8 +15,29 @@ export function createConfigurationSecretsRepo(db: Database, encryption: Configu
   const codec = createConfigurationSecrets(encryption);
   const nonemptyJson = (cell: SQL) =>
     sql`jsonb_typeof(${cell}) in ('object', 'array') and ${cell} <> '{}'::jsonb and ${cell} <> '[]'::jsonb`;
+  async function assertReadable() {
+    // Verify existing ciphertext before sealing legacy config. A wrong key must
+    // fail startup rather than create a database with mixed encryption keys.
+    try {
+      for (const table of [service, deployment, envVar]) {
+        let after: string | undefined;
+        for (;;) {
+          const rows = await db.select().from(table).where(after ? gt(table.id, after) : undefined).orderBy(asc(table.id)).limit(100);
+          if (!rows.length) break;
+          for (const row of rows) {
+            if (table === service) codec.openService(row);
+            else if (table === deployment) codec.openDeployment(row);
+            else if ("value" in row) encryption.decrypt(String(row.value));
+          }
+          after = rows.at(-1)!.id;
+        }
+      }
+    } catch { throw new Error("Unable to decrypt existing configuration with this installation's key"); }
+  }
   return {
+    assertReadable,
     async backfillLegacy(): Promise<{ services: number; deployments: number }> {
+      await assertReadable();
       const counts = { services: 0, deployments: 0 };
       let after: string | undefined;
       for (;;) {

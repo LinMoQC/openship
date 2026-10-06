@@ -65,6 +65,8 @@ interface ProjectOptions {
 }
 
 interface BasicProjectData {
+  managementMode?: "gitops" | "source";
+  releaseEnvironment?: "preview" | "production" | null;
   id: string;
   slug: string;
   name: string;
@@ -968,6 +970,7 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
       { id: "services", label: tl.services, icon: "layers" },
       { id: "domains", label: tl.domains, icon: "globe" },
       { id: "deployments", label: tl.deployments, icon: "rocket" },
+      ...(projectData.managementMode === "gitops" ? [{ id: "release", label: t.projects.release.tab, icon: "git-branch" as const }] : []),
       // Shown on cloud AND self-hosted, deliberately: both halves of the tab work
       // in both modes through adapters that already exist — resource usage via
       // RuntimeAdapter.getUsage (dockerode | Oblien metrics) and visitor geography
@@ -996,7 +999,7 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
       { id: "backup", label: tl.backup, icon: "database-backup" },
       { id: "advanced", label: tl.settings, icon: "wrench" },
     ];
-  }, [t, projectData.deployTarget, selfHosted]);
+  }, [t, projectData.deployTarget, projectData.managementMode, selfHosted]);
 
   const defaultTab = tabs[0].id;
   const [activeTab, setActiveTab] = useState(() => {

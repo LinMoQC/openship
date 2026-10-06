@@ -13,6 +13,7 @@ import * as dnsChallenge from "./domain-dns-challenge.service";
 import { manageDomainSsl, needsDomainSslCheck } from "../../lib/domain-ssl";
 import { resolveManagedHostname } from "../../lib/routing-domains";
 import { domainExecution } from "./domain-execution";
+import { requireGitopsRelease } from "../releases/release-gate";
 export { domainExecution } from "./domain-execution";
 
 function record(ctx: ExecutionContext, id: string, eventType: string, after: unknown) {
@@ -135,6 +136,7 @@ export const domainDependencies: DomainDependencies = {
     },
     async create(ctx, id, input) {
       await projectAuthority(ctx, id);
+      await requireGitopsRelease(id);
       const result = await service.addDomain(ctx, { ...input, projectId: id });
       record(ctx, result.domain.id, "domain.added", {
         projectId: result.domain.projectId, hostname: result.domain.hostname, isPrimary: result.domain.isPrimary,
@@ -160,6 +162,7 @@ export const domainDependencies: DomainDependencies = {
       return service.planDomainDns(ctx, id, input.serverId);
     },
     async dnsApply(ctx, id, input = {}) {
+      await domainExecution(ctx, id);
       await targetServer(ctx, input.serverId);
       const result = await service.applyDomainDns(ctx, id, input.serverId);
       record(ctx, id, "domain.dns_provisioned", {
@@ -183,11 +186,13 @@ export const domainDependencies: DomainDependencies = {
       return result;
     },
     async cancelDnsChallenge(ctx, id, input) {
+      await domainExecution(ctx, id);
       const result = await dnsChallenge.cancelDnsChallenge(ctx, id, input.attemptId);
       record(ctx, id, "domain:write", { operation: "cancelDnsChallenge", attemptId: result.id });
       return result;
     },
     async setPrimary(ctx, id) {
+      await domainExecution(ctx, id);
       const result = await service.setPrimaryDomain(ctx, id);
       record(ctx, id, "domain.set_primary", { projectId: result.projectId, hostname: result.hostname, isPrimary: true });
       return result;

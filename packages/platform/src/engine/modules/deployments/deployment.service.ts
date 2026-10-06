@@ -29,12 +29,15 @@ import {
   type EnvDiff,
   type EnvRestoreStrategy,
   type RestorePlan,
+  type RollbackScope,
 } from "./rollback/index";
 import { checkNoActiveBuild } from "./build.service";
 import { livePrimaryContainerId } from "../services/service-container";
 import { decryptEnvMap } from "../../lib/encryption";
 import { mergeServiceDeployEnv } from "./compose/service-env-layers";
 import * as sessionManager from "./session-manager";
+import { requireGitopsRelease } from "../releases/release-gate";
+import { planRejectRestore } from "./reject-restore";
 
 /**
  * #336: present a deployment to a CLIENT — masks `meta.composeServices[].environment`.
@@ -136,6 +139,7 @@ export async function getDeployment(deploymentId: string, organizationId: string
 
 export async function deleteDeployment(deploymentId: string, organizationId: string) {
   const dep = await getDeployment(deploymentId, organizationId);
+  await requireGitopsRelease(dep.projectId);
 
   const project = await repos.project.findById(dep.projectId);
   assertNotControlPlane(project);
@@ -176,11 +180,12 @@ export async function deleteDeployment(deploymentId: string, organizationId: str
 // the policy + the runtime primitive calls; this service just adds the
 // per-org ownership check via getDeployment.
 
-export async function rollbackDeployment(deploymentId: string, organizationId: string) {
+export async function rollbackDeployment(deploymentId: string, organizationId: string, scope?: RollbackScope) {
   // Existence + org-scope check (throws if deployment isn't in this org).
   const dep = await getDeployment(deploymentId, organizationId);
   await assertNotControlPlaneById(dep.projectId);
-  await rollback(deploymentId);
+  await requireGitopsRelease(dep.projectId);
+  await rollback(deploymentId, scope);
   // Return the post-rollback deployment row (now with any updated container id).
   return (await repos.deployment.findById(dep.id)) ?? dep;
 }
@@ -321,6 +326,7 @@ export async function setDeploymentPin(
 
 export async function rejectDeployment(deploymentId: string, organizationId: string) {
   const dep = await getDeployment(deploymentId, organizationId);
+  await requireGitopsRelease(dep.projectId);
 
   // Reject targets a FINISHED deploy: a fully-ready one, or a partial-failure
   // compose deploy (the case that surfaces the "N of M services failed —
@@ -334,7 +340,7 @@ export async function rejectDeployment(deploymentId: string, organizationId: str
     throw new NotFoundError("Project", dep.projectId);
   }
 
-  const meta = (dep.meta as { previousActiveDeploymentId?: string } | null) ?? null;
+  const meta = (dep.meta as { previousActiveDeploymentId?: string; targetServiceIds?: string[]; strictServiceScope?: boolean } | null) ?? null;
   const previousDeploymentId = meta?.previousActiveDeploymentId;
   // Imported/old metadata is not authority to restore another project. Refuse
   // before restoring or tearing down anything when the predecessor is invalid.
@@ -355,8 +361,11 @@ export async function rejectDeployment(deploymentId: string, organizationId: str
 
   // Restore the deployment this one replaced (if any) as the active/finalized
   // one — same as before.
-  if (previousDeploymentId && previousDeploymentId !== deploymentId) {
-    await rollbackDeployment(previousDeploymentId, organizationId);
+  const restore = planRejectRestore({ deploymentId, previousDeploymentId,
+    activeDeploymentId: project.activeDeploymentId,
+    targetServiceIds: meta?.targetServiceIds, strictServiceScope: meta?.strictServiceScope });
+  if (restore) {
+    await rollbackDeployment(restore.deploymentId, organizationId, restore.scope);
   }
 
   // Tear down THIS deployment's runtime resources (containers/routes). We
@@ -416,6 +425,7 @@ export async function rejectDeployment(deploymentId: string, organizationId: str
  */
 export async function keepDeployment(deploymentId: string, organizationId: string) {
   const dep = await getDeployment(deploymentId, organizationId);
+  await requireGitopsRelease(dep.projectId);
 
   if (dep.status !== "partial_failure") {
     throw new ForbiddenError("Only a deployment awaiting a decision can be kept");
@@ -529,6 +539,7 @@ export async function getDeploymentLogs(
 
 export async function restartDeployment(deploymentId: string, organizationId: string) {
   const dep = await getDeployment(deploymentId, organizationId);
+  await requireGitopsRelease(dep.projectId);
   await assertNotControlPlaneById(dep.projectId);
 
   if (dep.status !== "ready") {

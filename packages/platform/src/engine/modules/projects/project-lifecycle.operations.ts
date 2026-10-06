@@ -1,3 +1,4 @@
+import { requireGitopsRelease } from "../releases/release-gate";
 import type { ProjectControlSchemas } from "@repo/contracts";
 import type { ResourceServices } from "../../../resource-operations";
 import type { ProjectDependencies } from "../../../projects";
@@ -28,6 +29,7 @@ export function createProjectLifecycleOperations(
         // attempts on resources the actor could actually see.
         return failOperation({ ok: false, error: "Project not found" }, 404);
       }
+      await requireGitopsRelease(id);
       // The Openship control plane deploys itself; deleting its app row would drop
       // the Apps entry + domain while the host service keeps running (and orphan the
       // edge route). It's managed from the CLI, never torn down via the dashboard.

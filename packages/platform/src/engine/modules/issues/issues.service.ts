@@ -364,6 +364,8 @@ function updateIssue(row: UpdateRow): SystemIssue {
   // the CLI (`build.service` refuses to redeploy it), so it is a PLATFORM issue
   // with no in-app fix rather than a project row with a button that 403s.
   const isSelf = row.appTemplateId === "openship";
+  const gitops = row.detail?.gitops === true;
+  const uncertain = gitops && ["unknown", "blocked", "drift"].includes(String(row.detail?.releaseState));
   const version =
     row.currentLabel && row.latestLabel
       ? `${row.currentLabel} → ${row.latestLabel}`
@@ -372,17 +374,20 @@ function updateIssue(row: UpdateRow): SystemIssue {
   return {
     id: `update:${row.projectId}`,
     kind: "update_available",
-    severity: "advisory",
+    severity: uncertain ? "action_required" : "advisory",
     scope: isSelf ? "platform" : "project",
     source: "update",
     title: row.name,
-    message: version,
+    message: uncertain ? (row.detail?.releaseState === "drift" ? "运行镜像与清单不一致" : row.detail?.releaseState === "blocked" ? "发布条件未满足" : "版本检测失败或信息未知") : version,
     details: {
       kind: row.kind,
       currentLabel: row.currentLabel,
       latestLabel: row.latestLabel,
       latestInProgress: row.latestInProgress,
       selfUpdate: isSelf,
+      gitops,
+      releaseState: row.detail?.releaseState,
+      adaptationRequired: row.detail?.adaptationRequired === true,
     },
     target: {
       scope: isSelf ? "platform" : "project",
@@ -390,9 +395,9 @@ function updateIssue(row: UpdateRow): SystemIssue {
       name: row.name,
       // Where the CLI command actually lives (`UpdatesTab`), not the project page
       // whose Update button would 403.
-      href: isSelf ? "/settings?tab=instance" : `/projects/${row.projectId}`,
+      href: isSelf ? "/settings?tab=instance" : `/projects/${row.projectId}${gitops ? "/release" : ""}`,
     },
-    resolveWith: isSelf
+    resolveWith: isSelf || gitops
       ? []
       : [{ label: "Update", method: "POST", path: `/api/updates/${row.projectId}/apply` }],
   };
@@ -460,7 +465,7 @@ export async function listOrganizationIssues(
       ? repos.serverContainerStatus.listBehindByOrg(organizationId).catch(() => [])
       : Promise.resolve([]),
     getOrgPendingActions(organizationId).catch(() => new Map<string, PendingAction[]>()),
-    listOrganizationUpdates(ctx, { behindOnly: true }).catch(() => []),
+    listOrganizationUpdates(ctx).catch(() => []),
     loadNames(organizationId),
     mailVisible ? repos.mailServer.listByOrganization(organizationId).catch(() => []) : Promise.resolve([]),
     mailVisible ? repos.job.findByKey("ssl:renew").catch(() => null) : Promise.resolve(null),
@@ -541,7 +546,7 @@ export async function listOrganizationIssues(
 
   for (const row of updates) {
     if (!(await visible("project", row.projectId))) continue;
-    if (!row.behind) continue;
+    if (!row.behind && !(row.detail?.gitops === true && ["unknown", "blocked", "drift"].includes(String(row.detail?.releaseState)))) continue;
     // Already deploying the newest version — there is nothing left to act on, and
     // an "Update" button here is what made pressing it look like it did nothing.
     if (row.latestInProgress) continue;

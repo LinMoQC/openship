@@ -376,7 +376,9 @@ export class DockerBackupExecutor implements BackupExecutor {
         // rather than a green run, via the empty-source gate) and a restore into a
         // volume nothing reads.
         const source =
-          parsed.type === "volume" && service.namespaceVolumes
+          parsed.type === "volume" &&
+          service.namespaceVolumes &&
+          !service.externalVolumeNames?.includes(parsed.source)
             ? ensureScopedVolumeName(service.projectSlug, parsed.source)
             : parsed.source;
         return {
@@ -686,7 +688,7 @@ export class DockerBackupExecutor implements BackupExecutor {
       compression === "zstd" ? "apk add --no-cache zstd >/dev/null 2>&1 || true" : null,
       compression === "zstd"
         ? 'command -v zstd >/dev/null 2>&1 || { echo "openship: zstd is not available in the ' +
-          'restore helper and could not be installed (the host may have no egress). ' +
+          "restore helper and could not be installed (the host may have no egress). " +
           'Refusing to clear the target: nothing was written and your data is untouched." >&2; ' +
           "exit 90; }"
         : null,
@@ -1103,7 +1105,9 @@ export class DockerBackupExecutor implements BackupExecutor {
     demuxDockerStream(stream as unknown as NodeJS.ReadableStream, stdoutSink, stderrSink);
 
     const stderrTail = () =>
-      Buffer.concat(stderrChunks).toString("utf8").slice(0, 16 * 1024);
+      Buffer.concat(stderrChunks)
+        .toString("utf8")
+        .slice(0, 16 * 1024);
 
     // Every LOGICAL restore applies through here — pg_restore, mysql, mongorestore,
     // redis, custom_command — and this was the one direction with no completion

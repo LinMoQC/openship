@@ -27,6 +27,8 @@ import { createRemoteUserSettingsOperations } from "./settings-client";
 import type { UserSettingsOperations } from "@repo/contracts";
 import { createRemoteAuditOperations } from "./audit-client";
 import type { AuditOperations } from "@repo/contracts";
+import { createRemoteReleaseOperations } from "./releases-client";
+import type { ReleaseOperations } from "@repo/contracts";
 import { createRemoteUpdateOperations } from "./updates-client";
 import type { UpdateOperations } from "@repo/contracts";
 import { createRemoteWebhookOperations } from "./webhooks-client";
@@ -80,6 +82,7 @@ export class OpenshipClient {
   readonly tokens: TokenOperations;
   readonly webhooks: WebhookOperations;
   readonly updates: UpdateOperations;
+  readonly releases: ReleaseOperations;
   readonly audit: AuditOperations;
   readonly settings: UserSettingsOperations;
   readonly notifications: NotificationOperations;
@@ -110,6 +113,7 @@ export class OpenshipClient {
     this.tokens = createRemoteTokenOperations(http);
     this.webhooks = createRemoteWebhookOperations(http);
     this.updates = createRemoteUpdateOperations(http);
+    this.releases = createRemoteReleaseOperations(http);
     this.audit = createRemoteAuditOperations(http);
     this.settings = createRemoteUserSettingsOperations(http);
     this.notifications = createRemoteNotificationOperations(http);

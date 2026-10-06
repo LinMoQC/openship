@@ -1,3 +1,4 @@
+import type { PlatformReleaseOperations } from "./releases";
 /** Passive host facade. The engine is loaded only by an explicitly constructed worker. */
 import { Worker } from "node:worker_threads";
 import { randomUUID } from "node:crypto";
@@ -297,6 +298,7 @@ export async function createNativePlatform(value: NativePlatformOptions): Promis
   return Object.freeze({
     instanceId: options.instanceId, operator,
     resolveScope: (...args) => call("scope", ...args),
+    releases: Object.freeze(Object.fromEntries(["state", "bind", "plan", "getPlan", "start", "getRun", "latest", "automatic", "register", "progress", "capabilities"].map(name => [name, (...args: unknown[]) => call(`releases.${name}`, ...args)]))) as unknown as PlatformReleaseOperations,
     deployments: Object.freeze({ ...deployments, events }),
     projects: Object.freeze(projects),
     sources: Object.freeze(sources),
