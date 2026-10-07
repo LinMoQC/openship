@@ -13,6 +13,7 @@ const h = vi.hoisted(() => ({
   projectGroup: { findById: vi.fn() },
   deployment: { findLatestByProject: vi.fn() },
   domain: { getPrimaryByProject: vi.fn() },
+  releases: { bindings: vi.fn() },
 }));
 vi.mock("@repo/db", () => ({ repos: h, db: {}, schema: {}, getDriver: () => "postgres" }));
 vi.mock("@repo/platform/engine/modules/domains/project-route.service", () => ({
@@ -50,6 +51,7 @@ const project = (id: string, environmentSlug = "production", groupId = "group") 
 
 beforeEach(() => {
   vi.resetAllMocks();
+  h.releases.bindings.mockResolvedValue([]);
   h.project.findById.mockResolvedValue(project("production"));
   h.project.listByGroup.mockResolvedValue([project("production"), project("preview", "preview")]);
   h.projectGroup.findById.mockResolvedValue({ id: "group", name: "Example", slug: "example" });
@@ -57,6 +59,19 @@ beforeEach(() => {
 });
 
 describe("project environment access", () => {
+  it("expands explicitly bound release environments after permission filtering", async () => {
+    h.project.listByOrganization.mockResolvedValue({ rows: [project("production"), project("preview", "preview"), project("hidden", "preview"), project("ordinary", "production", "other")], total: 4 });
+    h.releases.bindings.mockResolvedValue(["production", "preview", "hidden"].map(projectId => ({ projectId })));
+    const result = await listProjects("org", { includeReleaseEnvironments: true, canRead: async id => id !== "hidden" });
+    expect(result.rows.map(p => p.id)).toEqual(["production", "preview", "ordinary"]);
+    expect(result.total).toBe(3);
+  });
+  it("retains grouped source behavior and does not duplicate an unbound primary", async () => {
+    h.project.listByOrganization.mockResolvedValue({ rows: [project("production"), project("preview", "preview")], total: 2 });
+    h.releases.bindings.mockResolvedValue([{ projectId: "preview" }]);
+    expect((await listProjects("org")).rows.map(p => p.id)).toEqual(["production"]);
+    expect((await listProjects("org", { includeReleaseEnvironments: true })).rows.map(p => p.id)).toEqual(["production", "preview"]);
+  });
   it("selects an accessible preview before calculating grouped project totals and pages", async () => {
     h.project.listByOrganization.mockResolvedValue({
       rows: [

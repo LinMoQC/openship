@@ -107,6 +107,14 @@ export const ReleaseTargetSchema = Type.Object({
   eventKey: nullableHash, acceptedReceipt: Type.Union([Type.Record(Type.String(), Type.Unknown()), Type.Null()]), manifest: Type.Record(Type.String(), Type.Unknown()),
 });
 export const ReleaseStateSchema = Type.Object({ binding: ReleaseBindingSchema, kind: Type.Union([Type.Literal("current"), Type.Literal("available"), Type.Literal("configuration"), Type.Literal("drift"), Type.Literal("unknown"), Type.Literal("blocked")]), current: ReleaseObservationSchema, target: Type.Union([ReleaseTargetSchema, Type.Null()]), checks: Type.Array(ReleaseCheckSchema), checkedAt: date, stale: Type.Boolean(), error: Type.Union([Type.String(), Type.Null()]) });
+/** Cached, non-sensitive card metadata. It contains no controller identity,
+ * raw manifest, environment values or workflow credential. */
+export const ReleaseOverviewSchema = Type.Object({
+  kind: ReleaseStateSchema.properties.kind, current: ReleaseObservationSchema,
+  target: Type.Union([Type.Object({ images: Type.Record(Type.String(), ReleaseImageSchema), ossGitSha: Type.Union([sha, Type.Null()]) }), Type.Null()]),
+  checkedAt: Type.Union([date, Type.Null()]), stale: Type.Boolean(),
+});
+export type ReleaseOverview = Static<typeof ReleaseOverviewSchema>;
 export const ReleasePlanSchema = Type.Object({ id, projectId: id, organizationId: id, bindingRevision: Type.Integer({ minimum: 1 }), current: ReleaseObservationSchema, target: ReleaseTargetSchema, checks: Type.Array(ReleaseCheckSchema), summaryHash: hash, createdAt: date, expiresAt: date, consumedAt: Type.Union([date, Type.Null()]) });
 export const ReleaseRunSchema = Type.Object({
   id, projectId: id, organizationId: id, planId: id, origin: Type.Union([Type.Literal("user"), Type.Literal("automatic")]), userId: id, githubActor: id, idempotencyKey: id,

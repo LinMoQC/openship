@@ -112,7 +112,7 @@ export function ReleaseWorkspace({ projectData, apiClient = releasesApi }: { pro
       <Button variant="outline" size="sm" disabled={loading} onClick={() => void refresh()} aria-label={`${c.refresh} · ${label}`}><Icon name="refresh" />{c.refresh}</Button>
     </div>
     {(error || state?.error || pending) && <div role="status" className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border/70 bg-muted/30 px-4 py-3 text-sm"><span className="min-w-0 break-words text-muted-foreground">{pending ? c.pendingSubmission : error ?? state?.error}</span><Button variant="ghost" size="sm" onClick={() => void refresh()}>{c.retry}</Button></div>}
-    {githubRequired && <ReleaseGitHubConnect />}
+    {(githubRequired || state?.kind === "unknown" || (!state && !!error)) && <ReleaseGitHubConnect />}
     {state && <>
       <fieldset className="flex flex-wrap items-center gap-2"><legend className="mb-2 text-xs text-muted-foreground">{c.operation}</legend>{(["release", "rollback", ...(state.binding.environment === "preview" ? ["verify"] : [])] as const).map(mode => <Button key={mode} variant={action === mode ? "secondary" : "outline"} size="sm" aria-pressed={action === mode} disabled={active || submitting || pending} onClick={() => { setAction(mode as typeof action); setPlan(null); setConfirm(""); }}>{c[mode as keyof typeof c] as string}</Button>)}</fieldset>
       {action === "rollback" && <label className="block text-sm">{c.rollbackCommit}<input value={rollbackCommit} onChange={e => { setRollbackCommit(e.target.value); setPlan(null); }} placeholder="0123456789abcdef…" maxLength={40} spellCheck={false} autoComplete="off" className="mt-2 w-full rounded-lg border border-border bg-background px-3 py-2 font-mono text-xs" /></label>}

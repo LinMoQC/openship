@@ -9,13 +9,14 @@ import { AppLogo } from "@/components/AppLogo";
 import { getFrameworkConfig } from "@/components/import-project/Frameworks";
 import { getProjectStatus, projectDisplayDomain } from "@/utils/project-status";
 import { ProjectStatusBadge } from "@/components/shared/ProjectStatusBadge";
-import { useI18n, interpolate } from "@/components/i18n-provider";
+import { useI18n } from "@/components/i18n-provider";
 import { useModal } from "@/context/ModalContext";
 import { useToast } from "@/context/ToastContext";
 import { projectsApi, getApiErrorMessage } from "@/lib/api";
 import { timeAgo } from "@/lib/time";
 import { useImageFallback } from "@/hooks/useImageFallback";
 import type { Dictionary } from "@/i18n";
+import { ProjectReleaseMetadata, ProjectReleaseName, projectReleaseLabel } from "./ProjectReleaseMetadata";
 
 /* ── Helpers ──────────────────────────────────────────────────────── */
 
@@ -68,6 +69,7 @@ const ProjectCard: React.FC<Props> = ({ project, preferAppLogo, updateAvailable,
   const status = getProjectStatus(project);
   const fw = getFrameworkConfig(project.framework);
   const favicon = useImageFallback(project.favicon);
+  const label = projectReleaseLabel(project, t);
 
   const isLocal = !!project.localPath;
   const hasRepo = !!(project.gitOwner && project.gitRepo);
@@ -83,7 +85,7 @@ const ProjectCard: React.FC<Props> = ({ project, preferAppLogo, updateAvailable,
   const isDraftApp = !!project.isApp && status === "draft" && !!appTemplateId;
   const clickTarget = isDraftApp
     ? `/apps/new/${appTemplateId}?projectId=${project.id}`
-    : `/projects/${project.id}`;
+    : `/projects/${project.id}${project.managementMode === "gitops" ? "/release" : ""}`;
 
   const confirmDeleteApp = () => {
     const id = showModal({
@@ -116,7 +118,7 @@ const ProjectCard: React.FC<Props> = ({ project, preferAppLogo, updateAvailable,
           → open in new tab) without nesting a <button> inside an <a>. It sits
           above the static content (captures row clicks) but below the draft menu
           (lifted with z-10), which stays independently clickable. */}
-      <Link href={clickTarget} aria-label={project.name} className="absolute inset-0 z-0" />
+      <Link href={clickTarget} aria-label={project.managementMode === "gitops" ? `${t.projects.release.plan} · ${label}` : label} className="absolute inset-0 z-0" />
 
       <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-3 gap-y-2 px-4 py-3.5 @xl/project-row:flex @xl/project-row:gap-4 @xl/project-row:px-5">
         {/* Icon — on the Apps page show the catalog app's brand logo; otherwise
@@ -138,26 +140,25 @@ const ProjectCard: React.FC<Props> = ({ project, preferAppLogo, updateAvailable,
         </div>
 
         {/* Name + domain */}
-        <div className="min-w-0 text-start @xl/project-row:w-44 @xl/project-row:flex-none @3xl/project-row:w-56">
+        <div className={`min-w-0 text-start ${project.managementMode === "gitops" ? "@xl/project-row:flex-1" : "@xl/project-row:w-44 @xl/project-row:flex-none @3xl/project-row:w-56"}`}>
           <div className="flex min-w-0 items-center gap-1.5">
-            <p className="min-w-0 truncate text-sm font-medium text-foreground" title={project.name}>{project.name}</p>
+            <ProjectReleaseName project={project} />
             {project.activeVersion != null && (
               <span
                 className="shrink-0 rounded-md bg-muted/60 px-1.5 py-0.5 font-mono text-[10px] font-medium text-muted-foreground"
-                title={interpolate(t.projects.card.liveVersion, {
-                  version: String(project.activeVersion),
-                })}
+                title={`${t.projects.release.deploymentNumber} ${project.activeVersion}`}
               >
-                v{project.activeVersion}
+                {t.projects.release.deploymentNumber} {project.activeVersion}
               </span>
             )}
-            {updateAvailable && (
+            {updateAvailable && project.managementMode !== "gitops" && (
               <span className="shrink-0 whitespace-nowrap rounded-md bg-warning-bg px-1.5 py-0.5 text-[10px] font-medium text-warning">
                 {t.projects.card.updateAvailable}
               </span>
             )}
           </div>
           {domain && <p className="text-xs text-muted-foreground truncate mt-0.5">{domain}</p>}
+          <ProjectReleaseMetadata project={project} />
         </div>
 
         {/* Keep metadata on one line; reveal secondary fields when the row itself

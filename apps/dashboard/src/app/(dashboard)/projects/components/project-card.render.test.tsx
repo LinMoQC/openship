@@ -5,6 +5,7 @@ import { I18nProvider } from "@/components/i18n-provider";
 import { ModalProvider } from "@/context/ModalContext";
 import type { Project } from "@/constants/mock";
 import ProjectCard from "./ProjectCard";
+import ProjectGridCard from "./ProjectGridCard";
 
 /**
  * Two lies this row used to tell, both seen in the field on one Convex app:
@@ -59,6 +60,24 @@ describe("ProjectCard — hostname", () => {
   it("prints the persisted primary route when there is one", () => {
     const out = text(render(project({ primaryDomain: "convex.example.com" })));
     expect(out).toContain("convex.example.com");
+  });
+});
+
+describe("GitOps project cards", () => {
+  it.each([ProjectCard, ProjectGridCard])("names the precise environment and links its release plan", Card => {
+    const html = renderToStaticMarkup(<I18nProvider><ModalProvider><Card project={project({ name: "Admin", managementMode: "gitops", releaseEnvironment: "preview", activeVersion: 6 })} /></ModalProvider></I18nProvider>);
+    expect(text(html)).toContain("Admin · PRT");
+    expect(text(html)).toContain("Deployment number 6"); expect(text(html)).not.toContain("v6");
+    expect(text(html)).toContain("Version could not be verified");
+    expect(html).toContain('href="/projects/p1/release"');
+    expect(html).toContain('aria-label="View release plan · Admin · PRT"');
+  });
+  it("separates actual and target digests and the OSS source", () => {
+    const image = { image: "ghcr.io/example/web", digest: `sha256:${"a".repeat(64)}`, gitSha: "b".repeat(40) };
+    const html = render(project({ managementMode: "gitops", releaseEnvironment: "production", releaseOverview: { kind: "available", current: { images: { web: image }, deploymentId: "d", configurationHash: null, ossGitSha: "c".repeat(40), verified: true }, target: { images: { web: { ...image, gitSha: "d".repeat(40) } }, ossGitSha: "e".repeat(40) }, stale: false, checkedAt: "2026-10-07T00:00:00.000Z" } }));
+    const out = text(html);
+    expect(out).toContain("Production"); expect(out).toContain("bbbbbbbbbbbb"); expect(out).toContain("dddddddddddd"); expect(out).toContain("OSS · cccccccccccc");
+    expect(html).toContain(image.digest);
   });
 });
 

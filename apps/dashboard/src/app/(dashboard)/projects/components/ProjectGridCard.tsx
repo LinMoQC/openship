@@ -9,10 +9,11 @@ import { AppLogo } from "@/components/AppLogo";
 import { getFrameworkConfig } from "@/components/import-project/Frameworks";
 import { getProjectStatus, projectDisplayDomain } from "@/utils/project-status";
 import { ProjectStatusBadge } from "@/components/shared/ProjectStatusBadge";
-import { useI18n, interpolate } from "@/components/i18n-provider";
+import { useI18n } from "@/components/i18n-provider";
 import { timeAgo } from "@/lib/time";
 import { useImageFallback } from "@/hooks/useImageFallback";
 import { getHostingLabel } from "./ProjectCard";
+import { ProjectReleaseMetadata, ProjectReleaseName, projectReleaseLabel } from "./ProjectReleaseMetadata";
 
 /**
  * Grid (tile) view of a project — the same data as {@link ProjectCard}, stacked
@@ -35,6 +36,7 @@ const ProjectGridCard: React.FC<{
   const status = getProjectStatus(project);
   const fw = getFrameworkConfig(project.framework);
   const favicon = useImageFallback(project.favicon);
+  const label = projectReleaseLabel(project, t);
 
   const isLocal = !!project.localPath;
   const hasRepo = !!(project.gitOwner && project.gitRepo);
@@ -46,11 +48,11 @@ const ProjectGridCard: React.FC<{
   const isDraftApp = !!project.isApp && status === "draft" && !!appTemplateId;
   const clickTarget = isDraftApp
     ? `/apps/new/${appTemplateId}?projectId=${project.id}`
-    : `/projects/${project.id}`;
+    : `/projects/${project.id}${project.managementMode === "gitops" ? "/release" : ""}`;
 
   return (
     <div className="group relative flex flex-col gap-3.5 rounded-2xl bg-card p-4 transition-colors hover:bg-muted/40">
-      <Link href={clickTarget} aria-label={project.name} className="absolute inset-0 z-0" />
+      <Link href={clickTarget} aria-label={project.managementMode === "gitops" ? `${t.projects.release.plan} · ${label}` : label} className="absolute inset-0 z-0" />
 
       {/* Identity */}
       <div className="flex items-start gap-3">
@@ -73,8 +75,8 @@ const ProjectGridCard: React.FC<{
 
         <div className="min-w-0 flex-1 text-start">
           <div className="flex min-w-0 items-center gap-1.5">
-            <p className="min-w-0 truncate text-sm font-medium text-foreground" title={project.name}>{project.name}</p>
-            {updateAvailable && (
+            <ProjectReleaseName project={project} />
+            {updateAvailable && project.managementMode !== "gitops" && (
               <span className="shrink-0 whitespace-nowrap rounded-full bg-warning/10 px-1.5 py-0.5 text-[10px] font-medium text-warning">
                 {t.projects.card.updateAvailable}
               </span>
@@ -82,15 +84,14 @@ const ProjectGridCard: React.FC<{
             {project.activeVersion != null && (
               <span
                 className="shrink-0 rounded-md bg-muted/60 px-1.5 py-0.5 font-mono text-[10px] font-medium text-muted-foreground"
-                title={interpolate(t.projects.card.liveVersion, {
-                  version: String(project.activeVersion),
-                })}
+                title={`${t.projects.release.deploymentNumber} ${project.activeVersion}`}
               >
-                v{project.activeVersion}
+                {t.projects.release.deploymentNumber} {project.activeVersion}
               </span>
             )}
           </div>
           {domain && <p className="mt-0.5 truncate text-xs text-muted-foreground">{domain}</p>}
+          <ProjectReleaseMetadata project={project} />
         </div>
       </div>
 

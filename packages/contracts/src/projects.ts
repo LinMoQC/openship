@@ -5,6 +5,7 @@ import type { ProjectControlOperations } from "./project-controls";
 import type { ProjectLocalOperations } from "./project-local";
 import type { ProjectLogStreams } from "./project-logs";
 import type { ProjectRoutingStreams } from "./project-routing";
+import { ReleaseOverviewSchema } from "./releases";
 
 const nullableString = () => Type.Union([Type.String(), Type.Null()]);
 /** Public project fields. Provider-specific diagnostics may accompany these fields. */
@@ -21,6 +22,7 @@ export const ProjectSchema = Type.Object({
   environmentType: Type.Optional(Type.String()),
   managementMode: Type.Optional(Type.Union([Type.Literal("gitops"), Type.Literal("source")])),
   releaseEnvironment: Type.Optional(nullableString()),
+  releaseOverview: Type.Optional(Type.Union([ReleaseOverviewSchema, Type.Null()])),
   gitProvider: Type.Optional(nullableString()),
   gitOwner: Type.Optional(nullableString()),
   gitRepo: Type.Optional(nullableString()),
