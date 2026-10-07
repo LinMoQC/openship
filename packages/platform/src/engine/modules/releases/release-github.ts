@@ -6,7 +6,7 @@ import { getUserToken, githubFetch } from "../github/github.auth";
 import { githubReleaseError } from "../../../release-diagnostics";
 export async function githubRead<T>(ctx: ExecutionContext, b: ReleaseBinding, path: string): Promise<T> {
   const [owner, repo] = b.repository.split("/");
-  try { return await githubFetch<T>({ ctx, owner, repo, url: `https://api.github.com/repos/${b.repository}/${path}` }); }
+  try { return await githubFetch<T>({ ctx, owner, repo, allowAnonymous: false, url: `https://api.github.com/repos/${b.repository}/${path}` }); }
   catch (error) { throw githubReleaseError(error); }
 }
 export async function githubFile(ctx: ExecutionContext, b: ReleaseBinding, path: string, ref: string): Promise<string> {

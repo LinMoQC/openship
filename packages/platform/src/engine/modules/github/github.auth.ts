@@ -583,6 +583,8 @@ export interface GitHubFetchOptions {
    *  underlying `tokenFor` dispatcher (PAT → installation → OAuth chain).
    *  See `github.token.ts` for the resolution order. */
   ctx: RequestContext;
+  /** Public source browsing may fall back anonymously; bound GitOps inspection requires an authorized identity. */
+  allowAnonymous?: boolean;
   url: string;
   method?: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
   owner?: string;
@@ -712,7 +714,7 @@ export async function githubFetch<T = unknown>(opts: GitHubFetchOptions): Promis
 
   // Public github.com reads also work when a saved credential was revoked.
   // Enterprise sources must never resolve a same-named public GitHub repo.
-  if (readOnly && !customApiBase && opts.url.startsWith("https://api.github.com/")) {
+  if (readOnly && opts.allowAnonymous !== false && !customApiBase && opts.url.startsWith("https://api.github.com/")) {
     const publicData = await ghFetchPublic<T>({
       url: opts.url, params: opts.params, headers: opts.headers,
     });
