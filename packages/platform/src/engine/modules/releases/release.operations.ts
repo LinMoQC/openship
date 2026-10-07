@@ -12,6 +12,8 @@ import { audit, operationAuditContext } from "../../lib/audit-emitter";
 import { settleReleaseCutovers, recoverReleaseCutovers } from "./release-cutover";
 import { releaseTopologyVerifier, assertReleaseHostConfiguration } from "./release-topology";
 import { serverEnvironmentHash } from "./release-gate";
+import { releaseServiceArtifacts } from "./release-artifacts";
+import { assertRetainedTaskContainer } from "../../../gitops-artifacts";
 export const releaseDependencies: ReleaseDependencies = {
   store: releaseStore, now: () => new Date(), id: generateId, inspect: inspectRelease,
   async afterAcceptance(run) {
@@ -36,10 +38,11 @@ export const releaseDependencies: ReleaseDependencies = {
     if (releaseHash(saved) !== releaseHash(receipt)) throw new AppError("Acceptance receipt is not the immutable GitOps record", 409, "RELEASE_ACCEPTANCE_MISMATCH");
     const project = await repos.project.findById(b.projectId), deployment = await repos.deployment.findById(String(progress.deploymentId));
     if (!deployment || project?.activeDeploymentId !== deployment.id || deployment.organizationId !== b.organizationId || deployment.environment !== b.environment || deployment.commitSha !== receipt.manifestCommit || deployment.status !== "ready") throw new AppError("Accepted deployment is not the active ready deployment", 409, "RELEASE_ACTIVE_DEPLOYMENT_MISMATCH");
-    const rows = await repos.service.listByDeployment(deployment.id), services = await repos.service.listByProject(project.id);
+    const services = await repos.service.listByProject(project.id);
+    const rows = await releaseServiceArtifacts(deployment, services, await repos.service.listByDeployment(deployment.id), Object.keys(plan.target.images));
     if (await serverEnvironmentHash(project.id, b.environment) !== plan.current.serverEnvironmentHash)
       throw new AppError("Server environment changed during release", 409, "RELEASE_EXECUTION_CONFIG_MISMATCH");
-    const topology = await releaseTopologyVerifier(ctx, b, deployment);
+    const topology = await releaseTopologyVerifier(ctx, b, deployment, undefined, rows);
     const { runtime } = await resolveDeploymentRuntimeForRead(deployment);
     try {
       if (!(runtime instanceof DockerRuntime)) throw new AppError("Actual Docker images cannot be verified", 409, "RELEASE_RUNTIME_UNKNOWN");
@@ -48,6 +51,7 @@ export const releaseDependencies: ReleaseDependencies = {
         const service = services.find(s => s.name === name), row = rows.find(r => r.serviceId === service?.id);
         if (!row?.containerId) throw new AppError("Accepted service has no actual container", 409, "RELEASE_RUNTIME_UNKNOWN");
         const actual = await runtime.inspectReleaseContainer(row.containerId, image.image);
+        assertRetainedTaskContainer(deployment, name, row, actual);
         if (topology(name, actual).status !== "pass") throw new AppError("Actual topology differs from the deployed document", 409, "RELEASE_RUNTIME_TOPOLOGY_MISMATCH");
         if (actual.digest !== image.digest || (service?.advanced?.runToCompletion ? actual.running || actual.exitCode !== 0 : !actual.running || (actual.health !== null && actual.health !== "healthy"))) throw new AppError("Actual container does not match the accepted image or health state", 409, "RELEASE_RUNTIME_MISMATCH");
       }

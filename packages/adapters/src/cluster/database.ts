@@ -23,7 +23,7 @@ import {
 } from "./database-backups";
 import { kubernetesPodIssue, kubernetesPodPhase } from "./kubernetes-health";
 import { kubernetesIdLabel } from "./kubernetes-label";
-import { patchKubernetesObject } from "./kubernetes-mutation";
+import { deleteKubernetesObject, patchKubernetesObject } from "./kubernetes-mutation";
 import { RedisArchive, DatabaseArchiveTasks } from "./redis-backups";
 export type { ClusterDatabaseBackupStorage } from "./database-backups";
 
@@ -956,18 +956,18 @@ export class ClusterDatabaseAdapter {
       if (root.metadata.labels?.[managed] !== this.target.id)
         throw conflict("The database resource changed ownership.");
       if (!root.metadata.deletionTimestamp) {
-        await this.fence();
-        await this.api.request(
-          "DELETE",
+        await deleteKubernetesObject(
+          this.api,
           `${this.crBase()}/database`,
-          {
-            propagationPolicy: "Foreground",
-            preconditions: {
-              uid: root.metadata.uid,
-              resourceVersion: root.metadata.resourceVersion,
-            },
+          root.metadata.uid,
+          async (current) => {
+            if (current.metadata.labels?.[managed] !== this.target.id)
+              throw conflict("The database resource changed ownership.");
+            await this.assertNoApplicationReferences();
+            await this.dataTasks.assertRemovable();
+            await this.fence();
           },
-          this.signal,
+          { signal: this.signal, propagationPolicy: "Foreground" },
         );
       }
       await waitForClusterResource(
@@ -992,17 +992,16 @@ export class ClusterDatabaseAdapter {
         current.metadata.labels?.[managed] !== this.target.id
       )
         throw conflict("A database volume changed during removal.");
-      await this.fence();
-      await this.api.request(
-        "DELETE",
+      await deleteKubernetesObject(
+        this.api,
         `${this.base()}/persistentvolumeclaims/${current.metadata.name}`,
-        {
-          preconditions: {
-            uid: current.metadata.uid,
-            resourceVersion: current.metadata.resourceVersion,
-          },
+        current.metadata.uid,
+        async (observed) => {
+          if (observed.metadata.labels?.[managed] !== this.target.id)
+            throw conflict("A database volume changed during removal.");
+          await this.fence();
         },
-        this.signal,
+        { signal: this.signal },
       );
       await waitForClusterResource(
         this.signal,
@@ -1224,18 +1223,19 @@ export class ClusterDatabaseAdapter {
         )
           throw conflict("A database connection check changed ownership during cleanup.");
         if (!current.metadata.deletionTimestamp) {
-          await this.fence();
-          await this.api.request(
-            "DELETE",
+          await deleteKubernetesObject(
+            this.api,
             `${path}/${object.metadata.name}`,
-            {
-              propagationPolicy: "Foreground",
-              preconditions: {
-                uid: current.metadata.uid,
-                resourceVersion: current.metadata.resourceVersion,
-              },
+            current.metadata.uid,
+            async (observed) => {
+              if (
+                observed.metadata.labels?.[managed] !== this.target.id ||
+                observed.metadata.labels?.["openship.io/runtime"] !== this.target.runtimeId
+              )
+                throw conflict("A database connection check changed ownership during cleanup.");
+              await this.fence();
             },
-            this.signal,
+            { signal: this.signal, propagationPolicy: "Foreground" },
           );
         }
         await waitForClusterResource(

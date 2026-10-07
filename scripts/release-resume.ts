@@ -155,12 +155,22 @@ export function assertResumeBinding(source: string, workflowPath: string, jobId:
 }
 
 export function trustedResumeRun(run: ResumeRun, repository: string, tag: string): boolean {
-  return (
+  const trustedSource =
     run.repository.full_name === repository &&
     run.head_repository?.full_name === repository &&
     run.event === "push" &&
+    /^[a-f0-9]{40}$/.test(run.head_sha);
+  if (!trustedSource) return false;
+  // Magic tags are immutable and bind directly to their source SHA. An ancestor
+  // tag can certify an unchanged check; ancestry, its exact workflow signature,
+  // dependency scope and successful job are still checked by findReusableJob.
+  if (/^magic-runtime-[a-f0-9]{12}$/.test(tag))
+    return (
+      run.path === ".github/workflows/magic-runtime.yml" &&
+      run.head_branch === `magic-runtime-${run.head_sha.slice(0, 12)}`
+    );
+  return (
     run.head_branch === tag &&
-    /^[a-f0-9]{40}$/.test(run.head_sha) &&
     [".github/workflows/release.yml", ".github/workflows/docker-images.yml"].includes(run.path)
   );
 }
@@ -257,6 +267,11 @@ export async function findReusableJob(options: {
 }): Promise<{ runId: string; url: string; artifactId?: number } | undefined> {
   if (!workflows.has(options.workflow)) throw new Error("Unknown release workflow.");
   if (git("status", "--porcelain", "--untracked-files=normal")) return undefined;
+  if (
+    options.tag.startsWith("magic-runtime-") &&
+    options.tag !== `magic-runtime-${git("rev-parse", "HEAD").slice(0, 12)}`
+  )
+    throw new Error("The immutable Magic tag does not match this checkout.");
   const currentSource = readFileSync(options.workflow, "utf8");
   assertResumeBinding(currentSource, options.workflow, options.jobId);
   const currentSignature = jobSignature(currentSource, options.jobId);
@@ -315,10 +330,12 @@ async function main() {
     git("rev-parse", `${process.env.GITHUB_SHA}^{commit}`) !== git("rev-parse", "HEAD")
   )
     throw new Error("The checkout does not match this workflow's immutable revision.");
-  // Manual npm/image publishing and ordinary tags always run the complete gate.
+  // Without an explicit trusted run record, tags execute the complete gate.
   if (
     process.env.GITHUB_REF_TYPE === "tag" &&
-    /^v\d+\.\d+\.\d+(?:-[\w.-]+)?$/.test(process.env.GITHUB_REF_NAME ?? "")
+    /^(?:v\d+\.\d+\.\d+(?:-[\w.-]+)?|magic-runtime-[a-f0-9]{12})$/.test(
+      process.env.GITHUB_REF_NAME ?? "",
+    )
   ) {
     const tag = process.env.GITHUB_REF_NAME!;
     const runIds = resumeRuns(git("for-each-ref", `refs/tags/${tag}`, "--format=%(contents)"));

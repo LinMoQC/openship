@@ -159,6 +159,69 @@ describe("Oblien Docker byte transport", () => {
     const { stdout } = await promisify(execFile)("bun", ["--eval", script], { timeout: 20_000 });
     expect(stdout).toBe("ok");
   });
+  it("flushes Bun's queued response before EOF reaches a slow Unix-socket consumer", async () => {
+    const size = 4 * 1024 * 1024 + 17;
+    const script = `
+      import { createCloudDockerTransport } from ${JSON.stringify(new URL("./docker-transport.ts", import.meta.url).pathname)};
+      import { Duplex } from "node:stream";
+      const upstream = new Duplex({
+        read() {}, write(_chunk, _encoding, callback) { callback(); },
+        final(callback) { this.push(Buffer.alloc(${size}, 83)); this.push(null); callback(); }
+      });
+      const t = createCloudDockerTransport(async () => upstream);
+      const { socketPath } = await t.establish();
+      process.stdout.write(JSON.stringify({ socketPath }) + "\\n");
+      await new Promise(resolve => process.stdin.once("data", resolve));
+      await t.close();
+    `;
+    const child = spawn("bun", ["--eval", script], { stdio: ["pipe", "pipe", "pipe"] });
+    const exited = once(child, "exit");
+    let client: Socket | undefined;
+    let errors = "";
+    child.stderr!.on("data", bytes => { errors += bytes.toString(); });
+    try {
+      let readyTimer: ReturnType<typeof setTimeout> | undefined;
+      const ready = new Promise<string>((resolve, reject) => {
+        readyTimer = setTimeout(() => reject(new Error("Bun transport did not become ready")), 5_000);
+        let output = "";
+        child.stdout!.on("data", bytes => {
+          output += bytes.toString();
+          if (output.includes("\n")) {
+            try { resolve(JSON.parse(output.split("\n")[0]).socketPath); }
+            catch (error) { reject(error); }
+          }
+        });
+        child.once("error", reject);
+        child.once("exit", () => reject(new Error(`Bun transport exited before readiness: ${errors}`)));
+      });
+      const path = await ready.finally(() => clearTimeout(readyTimer));
+      client = connect({ path, allowHalfOpen: true });
+      const bytes: Buffer[] = [];
+      client.on("error", () => {});
+      client.on("data", chunk => bytes.push(chunk));
+      client.pause();
+      const ended = once(client, "end");
+      client.end("request complete");
+      // Let the response fill the forwarding socket before this consumer reads.
+      await new Promise(resolve => setTimeout(resolve, 100));
+      client.resume();
+      let responseTimer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        ended,
+        new Promise<never>((_, reject) => {
+          responseTimer = setTimeout(() => reject(new Error("Bun response did not complete")), 4_000);
+        }),
+      ]).finally(() => clearTimeout(responseTimer));
+      const actual = Buffer.concat(bytes);
+      expect(actual.length).toBe(size);
+      expect(actual.equals(Buffer.alloc(size, 83))).toBe(true);
+    } finally {
+      client?.destroy();
+      child.stdin!.end("close");
+      const cleanupTimer = setTimeout(() => child.kill("SIGKILL"), 5_000);
+      await exited.finally(() => clearTimeout(cleanupTimer));
+    }
+  });
   it("supports the raw HTTP upgrade used by container exec and terminals", async () => {
     const socket = connect({ path: socketPath, allowHalfOpen: true });
     socket.on("error", () => {});

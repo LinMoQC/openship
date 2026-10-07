@@ -256,18 +256,40 @@ describeDockerE2E("durable stateless cutover against real Docker and PGlite", ()
 
   it("recovery refuses a foreign serving container and keeps its port and old instance intact", async () => {
     const f = await fixture();
-    const transaction = await deployPreflightedService(docker, f.target, { timeoutMs: 5000, journal: f.journal }, () => {});
+    const transaction = await deployPreflightedService(
+      docker,
+      f.target,
+      { timeoutMs: 5000, journal: f.journal },
+      () => {},
+    );
     await transaction.container.stop();
     await transaction.container.rename({ name: `${f.payload.name}-external` });
-    const foreign = await docker.createContainer({ ...f.payload, Cmd: f.payload.Cmd!.map(value => value.replace("incumbent", "foreign")) });
-    await foreign.start();
-    await expect(settleServiceCutover(docker, await f.record(), "restore", f.save)).rejects.toThrow(/foreign/);
-    expect((await f.record()).stage).toBe("recovery_failed");
-    expect((await foreign.inspect()).State.Running).toBe(true);
-    expect((await f.old.inspect()).State.Running).toBe(false);
-    expect(await f.read()).toBe("foreign\n");
-    await foreign.remove({ force: true });
-    await settleServiceCutover(docker, await f.record(), "restore", f.save);
+    const foreign = await docker.createContainer({
+      ...f.payload,
+      Cmd: ["sh", "-c", `sleep 0.5; ${f.payload.Cmd![2]!.replace("incumbent", "foreign")}`],
+    });
+    try {
+      await foreign.start();
+      // Docker start acknowledges the process before its HTTP listener is ready.
+      // Establish the serving precondition, including a deliberately slow boot,
+      // before checking that recovery leaves this unrelated service untouched.
+      await vi.waitFor(async () => expect(await f.read()).toBe("foreign\n"), {
+        timeout: 5000,
+        interval: 100,
+      });
+      await expect(
+        settleServiceCutover(docker, await f.record(), "restore", f.save),
+      ).rejects.toThrow(/foreign/);
+      expect((await f.record()).stage).toBe("recovery_failed");
+      expect((await foreign.inspect()).State.Running).toBe(true);
+      expect((await f.old.inspect()).State.Running).toBe(false);
+      expect(await f.read()).toBe("foreign\n");
+    } finally {
+      // A failed assertion must not leave an ownerless pending journal for the
+      // later startup-recovery cases, which inspect the complete test database.
+      await foreign.remove({ force: true });
+      await settleServiceCutover(docker, await f.record(), "restore", f.save);
+    }
     expect(await f.read()).toBe("incumbent\n");
   });
 
