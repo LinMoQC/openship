@@ -33,7 +33,7 @@ export interface ReleaseCheck {
 }
 export interface ReleaseObservation {
   deploymentId: string | null; images: Record<string, ReleaseImage>;
-  configurationHash: string | null; serverEnvironmentHash?: string | null; ossGitSha: string | null; verified: boolean;
+  configurationHash: string | null; deploymentConfigurationHash?: string | null; serverEnvironmentHash?: string | null; ossGitSha: string | null; verified: boolean;
 }
 export type ReleaseStateKind = "current" | "available" | "configuration" | "drift" | "unknown" | "blocked";
 export interface ReleaseState {
@@ -100,7 +100,7 @@ const nullableId = Type.Union([id, Type.Null()]);
 const nullableHash = Type.Union([hash, Type.Null()]);
 const date = Type.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$" });
 export const ReleaseBindingSchema = Type.Object({ ...ReleaseBindingInputSchema.properties, id, projectId: id, organizationId: id, revision: Type.Integer({ minimum: 1 }) });
-export const ReleaseObservationSchema = Type.Object({ deploymentId: nullableId, images: Type.Record(Type.String(), ReleaseImageSchema), configurationHash: nullableHash, serverEnvironmentHash: Type.Optional(nullableHash), ossGitSha: Type.Union([sha, Type.Null()]), verified: Type.Boolean() });
+export const ReleaseObservationSchema = Type.Object({ deploymentId: nullableId, images: Type.Record(Type.String(), ReleaseImageSchema), configurationHash: nullableHash, deploymentConfigurationHash: Type.Optional(nullableHash), serverEnvironmentHash: Type.Optional(nullableHash), ossGitSha: Type.Union([sha, Type.Null()]), verified: Type.Boolean() });
 export const ReleaseCheckSchema = Type.Object({ key: id, label: id, status: Type.Union([Type.Literal("pass"), Type.Literal("fail"), Type.Literal("unknown")]), blocking: Type.Boolean(), detail: Type.String() });
 export const ReleaseTargetSchema = Type.Object({
   action: Type.Union([Type.Literal("release"), Type.Literal("rollback"), Type.Literal("verify")]), workflowSha: sha, manifestCommit: sha, manifestHash: hash, configurationHash: hash,

@@ -208,6 +208,9 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
     const oldTemplate = active.commitSha ? await githubFile(ctx, b, stack.templatePath, active.commitSha) : null;
     const oldConfig = active.commitSha ? YAML.parse(await githubFile(ctx, b, "platform.yaml", active.commitSha)) as { stacks: Stack[] } : null;
     const oldStack = oldConfig?.stacks?.find(s => s.name === b.stack);
+    // Retain the immutable deployment's own hash separately for matched
+    // desired-state recovery; live host attestation must not rewrite history.
+    current.deploymentConfigurationHash = oldTemplate && oldStack ? gitopsConfigurationHash(oldTemplate, oldStack) : null;
     current.configurationHash = oldTemplate && oldStack ? observedGitopsConfigurationHash({
       preview: b.environment === "preview", template: oldTemplate, stack: oldStack,
       targetTemplate: template, targetStack: stack, imageServices: Object.keys(actualImages), checks,
