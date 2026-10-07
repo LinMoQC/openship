@@ -608,6 +608,7 @@
     "githubConnect": "GitHub hesabımı bağla",
     "githubLinking": "Bağlanıyor",
     "githubSetup": "Bu platformda GitHub OAuth yapılandırılmamış. Hesabınızı bağlamadan önce bir yöneticiden yapılandırmasını isteyin.",
-    "githubLinkError": "GitHub hesabınız bağlanamadı"
+    "githubLinkError": "GitHub hesabınız bağlanamadı",
+    "retryAt": "Yeniden kontrol edilebilecek zaman"
   }
 }

@@ -608,6 +608,7 @@
     "githubConnect": "Conectar minha conta do GitHub",
     "githubLinking": "Conectando",
     "githubSetup": "O GitHub OAuth não está configurado nesta plataforma. Peça a um administrador que o configure antes de conectar sua conta.",
-    "githubLinkError": "Não foi possível conectar sua conta do GitHub"
+    "githubLinkError": "Não foi possível conectar sua conta do GitHub",
+    "retryAt": "Nova verificação disponível em"
   }
 }

@@ -608,6 +608,7 @@
     "githubConnect": "ربط حسابي على GitHub",
     "githubLinking": "جارٍ الربط",
     "githubSetup": "لم يُضبط GitHub OAuth على هذه المنصة. اطلب من المسؤول ضبطه قبل ربط حسابك.",
-    "githubLinkError": "تعذّر ربط حسابك على GitHub"
+    "githubLinkError": "تعذّر ربط حسابك على GitHub",
+    "retryAt": "وقت إتاحة إعادة التحقق"
   }
 }
