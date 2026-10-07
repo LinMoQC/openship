@@ -43,7 +43,9 @@ export async function verifyCopiedPgliteUpgrade(input: Input) {
   const open = (directory: string, migrationsDir: string, migrations: "apply" | "verify") => createDatabase({ driver: "pglite", dataDir: directory, migrationsDir, migrations, pgliteAssetsDir: input.assetsDirectory });
   try {
     connection = await open(data, input.oldMigrationsDirectory, "verify");
-    const before = await snapshot(connection.db); await connection.close(); connection = undefined;
+    const before = await snapshot(connection.db);
+    const oldMigrationCount = Number((await connection.db.execute(sql`select count(*)::int as count from drizzle.__drizzle_migrations`)).rows[0]!.count);
+    await connection.close(); connection = undefined;
     connection = await open(data, input.targetMigrationsDirectory, "apply");
     await createConfigurationSecretsRepo(connection.db, key).backfillLegacy();
     const after = await snapshot(connection.db, before.fields);
@@ -55,16 +57,22 @@ export async function verifyCopiedPgliteUpgrade(input: Input) {
     finally { wrong.close(); }
     if (!wrongKeyRejected) throw new Error("Copied database has no validated ciphertext; wrong-key rejection is unproven");
     const migrations = Number((await connection.db.execute(sql`select count(*)::int as count from drizzle.__drizzle_migrations`)).rows[0]!.count);
+    const migrationDelta = migrations - oldMigrationCount;
+    if (!Number.isSafeInteger(migrationDelta) || migrationDelta < 0) throw new Error("Copied platform migration history moved backwards");
     await connection.close(); connection = undefined;
     await cp(input.snapshotDataDirectory, restored, { recursive: true, errorOnExist: true, force: false });
     connection = await open(restored, input.oldMigrationsDirectory, "verify");
     if ((await snapshot(connection.db, before.fields)).fingerprint !== before.fingerprint) throw new Error("Matching old database/key restore failed");
     await connection.close(); connection = undefined;
-    let targetRejectedOldSnapshot = false;
+    let targetRejectedOldSnapshot = false, targetAcceptedCompatibleSnapshot = false;
     try { connection = await open(restored, input.targetMigrationsDirectory, "verify"); }
     catch { targetRejectedOldSnapshot = true; }
-    if (!targetRejectedOldSnapshot) throw new Error("Target schema verifier accepted the old snapshot without migration");
-    return { upgradeVerified: true, wrongKeyRejected, matchingRestoreVerified: true, targetRejectedOldSnapshot, migrations, projects: before.projects, users: before.users, services: before.services, deployments: before.deployments };
+    if (migrationDelta > 0 && !targetRejectedOldSnapshot) throw new Error("Target schema verifier accepted a snapshot with pending migrations");
+    if (migrationDelta === 0) {
+      if (targetRejectedOldSnapshot || !connection || (await snapshot(connection.db, before.fields)).fingerprint !== before.fingerprint) throw new Error("Compatible target cannot verify the unchanged snapshot and original key");
+      targetAcceptedCompatibleSnapshot = true;
+    }
+    return { upgradeVerified: true, wrongKeyRejected, matchingRestoreVerified: true, targetRejectedOldSnapshot, targetAcceptedCompatibleSnapshot, migrationDelta, migrations, projects: before.projects, users: before.users, services: before.services, deployments: before.deployments };
   } finally { await connection?.close(); key.close(); await rm(work, { recursive: true, force: true }); }
 }
 
