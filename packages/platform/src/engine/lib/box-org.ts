@@ -1,4 +1,6 @@
 import { repos } from "@repo/db";
+import { AppError } from "@repo/core";
+import { env } from "../config/env";
 
 import { resolvesToLocalHost } from "./self-host";
 
@@ -13,7 +15,8 @@ export function clearBoxOwningOrgCache(): void {
 
 /**
  * The organization that OWNS this control-plane box: the founding admin's
- * personal org (`org_<founderId>`) — the same org self-server.ts registers the
+ * personal org (`org_<founderId>`), or an explicitly pinned legacy workspace
+ * that this same founder owns — the same org self-server.ts registers the
  * isLocal "This Server" row in.
  *
  * Only this org may treat a loopback/self server row as the local host, which
@@ -27,12 +30,22 @@ export function clearBoxOwningOrgCache(): void {
  * onboarding (no admin yet) — no deploys happen then anyway.
  */
 export async function boxOwningOrgId(): Promise<string | null> {
-  if (cachedBoxOrgId) return cachedBoxOrgId;
+  const configured = env.OPENSHIP_HOST_ORGANIZATION_ID;
+  if (cachedBoxOrgId && !configured) return cachedBoxOrgId;
   const generation = cacheGeneration;
   const admin = await repos.user.findFoundingAdmin();
   if (!admin?.id) return null;
-  const resolved = `org_${admin.id}`;
-  if (generation === cacheGeneration) cachedBoxOrgId = resolved;
+  const resolved = configured ?? `org_${admin.id}`;
+  if (configured) {
+    const [organization, membership] = await Promise.all([
+      repos.organization.findById(configured), repos.member.find(configured, admin.id),
+    ]);
+    if (!organization || membership?.role !== "owner") {
+      throw new AppError("Configured host workspace must exist and be owned by the founding admin", 403, "HOST_OWNER_CONFIG_INVALID");
+    }
+  }
+  // A legacy team's membership can change; never memoize its ownership proof.
+  if (generation === cacheGeneration && !configured) cachedBoxOrgId = resolved;
   return resolved;
 }
 

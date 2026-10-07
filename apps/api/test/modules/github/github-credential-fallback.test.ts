@@ -18,8 +18,11 @@ const ctx = { userId: "u", organizationId: "o" } as never;
 const options = { ctx, owner: "acme", repo: "api", url: "https://api.github.com/repos/acme/api" };
 const reply = (status: number, body: unknown, headers?: Record<string, string>) => new Response(JSON.stringify(body), { status, headers });
 let wire: ReturnType<typeof vi.fn<typeof fetch>>;
+let testTime = Date.now();
 
 beforeEach(() => {
+  // Every case represents a separate request window, not the previous case's cooldown.
+  vi.useFakeTimers(); vi.setSystemTime(testTime += 120_000);
   vi.resetAllMocks();
   h.apiBase.mockResolvedValue(null);
   h.instanceIdentity.mockResolvedValue(true);
@@ -30,7 +33,7 @@ beforeEach(() => {
   wire = vi.fn<typeof fetch>();
   vi.stubGlobal("fetch", wire);
 });
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 describe("GitHub repository reads with rejected credentials (#944)", () => {
   it.each([401, 403])("retries through the authorized App without selecting the rejected token again (%i)", async (status) => {

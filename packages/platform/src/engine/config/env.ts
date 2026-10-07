@@ -338,6 +338,8 @@ const envSchema = z.object({
   NOTIFY_WEBHOOK_ALLOW_INTERNAL: envBool("false"),
   /** Public IP of the server - used for A record instructions in self-hosted mode. */
   SERVER_IP: z.string().optional(),
+  /** Operator-pinned legacy host workspace; its owner must be the founding admin. */
+  OPENSHIP_HOST_ORGANIZATION_ID: z.string().trim().min(1).optional(),
   /**
    * Base domain for the self-hosted instance (e.g. "example.com").
    * Deployments get a free subdomain: slug.HOST_DOMAIN (e.g. "myapp.example.com").

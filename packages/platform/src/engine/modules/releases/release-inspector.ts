@@ -7,7 +7,7 @@ import type { ReleaseBinding, ReleaseCheck, ReleaseImage, ReleasePlanInput, Rele
 import type { ExecutionContext } from "../../../context";
 import { manifestHash, releaseHash } from "../../../releases";
 import { gitopsConfigurationHash, renderGitopsCompose, selectedImageExpectations } from "../../../gitops-compose";
-import { githubFile, githubRead } from "./release-github";
+import { githubBlob, githubFile, githubRead } from "./release-github";
 import { resolveDeploymentRuntimeForRead, disposeRuntime } from "../../lib/deployment-runtime";
 import { parseComposeFile, blockingComposeFields } from "../../lib/compose-parser";
 import { migrationDelta, migrationEvidenceMatches } from "../../../gitops-migrations";
@@ -92,13 +92,22 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
     // A selected event is processed alone. Preserve per-stack FIFO; do not drain a shared queue from one UI action.
     const pending: Array<{ key: string; receivedAt: string; payload: Record<string, unknown> }> = [];
     try {
-      const files = await githubRead<Array<{ name: string }>>(ctx, b, "contents/events?ref=release-inbox");
+      const inbox = await githubRead<{ sha: string }>(ctx, b, "commits/release-inbox");
+      const files = await githubRead<Array<{ name: string; sha: string }>>(ctx, b, `contents/events?ref=${inbox.sha}`);
       if (files.length >= 1000) fail("Release inbox listing may be truncated");
+      let receipts: Array<{ name: string; sha: string }> = [];
+      try {
+        const audit = await githubRead<{ sha: string }>(ctx, b, "commits/release-audit");
+        receipts = await githubRead(ctx, b, `contents/receipts?ref=${audit.sha}`);
+        if (receipts.length >= 1000) fail("Release receipt listing may be truncated");
+      } catch (error) { if (!(error instanceof AppError) || error.statusCode !== 404) throw error; }
+      const receiptByName = new Map(receipts.map(file => [file.name, file.sha]));
       for (const file of files.filter(f => /^[a-f0-9]{64}\.json$/.test(f.name))) {
-        const event = JSON.parse(await githubFile(ctx, b, `events/${file.name}`, "release-inbox"));
+        const event = JSON.parse(await githubBlob(ctx, b, file.sha));
         if (event.payload?.stack !== b.stack) continue;
         let terminal = false;
-        try { const receipt = JSON.parse(await githubFile(ctx, b, `receipts/${event.key}.json`, "release-audit")); terminal = ["accepted", "superseded", "duplicate", "noop"].includes(receipt.status); } catch (error) { if (!(error instanceof AppError) || error.statusCode !== 404) throw error; }
+        const receiptSha = receiptByName.get(`${event.key}.json`);
+        if (receiptSha) { const receipt = JSON.parse(await githubBlob(ctx, b, receiptSha)); terminal = ["accepted", "superseded", "duplicate", "noop"].includes(receipt.status); }
         if (!terminal) pending.push(event);
       }
     } catch (error) { if (!(error instanceof AppError) || error.statusCode !== 404) throw error; }

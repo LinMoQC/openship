@@ -27,6 +27,65 @@ function setup() {
 }
 const key = { idempotencyKey: "idempotency_12345678" };
 describe("GitOps release operations", () => {
+  it("backs off failed background reads and keeps their evidence stale", async () => {
+    const x = setup();
+    vi.mocked(x.deps.inspect).mockRejectedValue(new Error("offline"));
+    for (let i = 0; i < 5; i++) expect((await x.api.state(ctx, "p")).data.stale).toBe(true);
+    expect(x.deps.inspect).toHaveBeenCalledTimes(1);
+    x.advance(60_001);
+    await x.api.state(ctx, "p");
+    expect(x.deps.inspect).toHaveBeenCalledTimes(2);
+  });
+  it("coalesces concurrent reads without sharing another user's inspection", async () => {
+    const x = setup();
+    await Promise.all(Array.from({ length: 5 }, () => x.api.state(ctx, "p")));
+    expect(x.deps.inspect).toHaveBeenCalledTimes(1);
+    await x.api.state({ ...ctx, userId: "other" }, "p", { fresh: true });
+    expect(x.deps.inspect).toHaveBeenCalledTimes(2);
+  });
+  it("retains a rate-limit deadline across fresh reads and store restart", async () => {
+    const x = setup(), error = Object.assign(new AppError("limited", 503, "RELEASE_SOURCE_RATE_LIMITED"), { retryAt: "2026-10-06T01:00:00.000Z" });
+    const first = (await x.api.state(ctx, "p")).data;
+    vi.mocked(x.deps.inspect).mockRejectedValue(error);
+    const failed = (await x.api.state(ctx, "p", { fresh: true })).data;
+    expect(failed.checkedAt).toBe(first.checkedAt);
+    expect(failed).toMatchObject({ retryAt: error.retryAt, stale: true, kind: "unknown" });
+    const restarted = createReleaseOperations({ authorize: async c => c } as Authorization, x.deps);
+    await restarted.state(ctx, "p", { fresh: true });
+    expect(x.deps.inspect).toHaveBeenCalledTimes(2);
+    x.advance(3_600_001);
+    vi.mocked(x.deps.inspect).mockResolvedValue(structuredClone(x.fresh));
+    expect((await restarted.state(ctx, "p", { fresh: true })).data.stale).toBe(false);
+    expect(x.deps.inspect).toHaveBeenCalledTimes(3);
+  });
+  it("does not apply another user's persisted rate limit to a fresh read", async () => {
+    const x = setup();
+    vi.mocked(x.deps.inspect).mockRejectedValue(Object.assign(new AppError("limited",503,"RELEASE_SOURCE_RATE_LIMITED"),{retryAt:"2026-10-06T01:00:00.000Z"}));
+    await x.api.state(ctx,"p");
+    vi.mocked(x.deps.inspect).mockResolvedValue(structuredClone(x.fresh));
+    expect((await x.api.state({...ctx,userId:"other"},"p",{fresh:true})).data.stale).toBe(false);
+    expect(x.deps.inspect).toHaveBeenCalledTimes(2);
+  });
+  it("keeps newer verified evidence when an older concurrent inspection fails", async () => {
+    const x = setup();
+    await x.api.state(ctx, "p");
+    let reject!: (error: Error) => void, entered!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const slow = new Promise<typeof x.fresh>((_, fail) => { reject = fail; });
+    vi.mocked(x.deps.inspect).mockImplementation(async context => {
+      if (context.userId === ctx.userId) { entered(); return slow; }
+      return structuredClone(x.fresh);
+    });
+    const pending = x.api.state(ctx, "p", { fresh: true });
+    await started;
+    x.advance(1000); x.fresh.current.deploymentId = "dep_new";
+    const latest = (await x.api.state({ ...ctx, userId: "other" }, "p", { fresh: true })).data;
+    reject(new Error("offline"));
+    const failed = (await pending).data;
+    expect(failed.current.deploymentId).toBe("dep_new");
+    expect(failed.checkedAt).toBe(latest.checkedAt);
+    expect(failed.stale).toBe(true);
+  });
   it("compares per-application images and recognizes OSS changes", () => {
     const x = setup(); expect(releaseHash({ b: 2, a: 1 })).toBe(releaseHash({ a: 1, b: 2 }));
     expect(releaseStateKind(x.fresh.current, { ...x.fresh.target, manifestCommit: "f".repeat(40) }, x.fresh.checks)).toBe("current");

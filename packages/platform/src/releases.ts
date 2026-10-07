@@ -87,6 +87,7 @@ export interface PlatformReleaseOperations {
 const conflict = (code: string, message: string): never => { throw new AppError(message, 409, code); };
 const blocked = (checks: ReleaseCheck[]) => checks.some(c => c.blocking && c.status !== "pass");
 export function createReleaseOperations(authorization: Authorization, dependencies?: ReleaseDependencies): PlatformReleaseOperations {
+  const inspections = new Map<string, Promise<ReleaseState>>();
   const deps = () => { if (!dependencies) throw new AppError("GitOps releases are unavailable", 501, "CAPABILITY_UNAVAILABLE"); return dependencies; };
   async function authorized(ctx: ExecutionContext, projectId: string, action: "read" | "write" | "admin") {
     return authorization.authorize(ctx, { resourceType: "project", resourceId: projectId, action });
@@ -123,19 +124,41 @@ export function createReleaseOperations(authorization: Authorization, dependenci
       const context = await authorized(ctx, projectId, "read");
       const b = await binding(context, projectId);
       const last = await deps().store.cache(projectId);
+      const retryScope = releaseHash([context.organizationId, context.userId, context.tokenScope?.tokenId ?? null]);
+      const retryPending = last?.retryAt && Date.parse(last.retryAt) > deps().now().getTime();
+      const rateLimited = last?.checks.some(check => check.key === "inspection.github.rate_limit");
+      if (last?.binding.revision === b.revision && last.retryScope === retryScope && retryPending && (!options.fresh || rateLimited)) return { context, data: last };
       if (!options.fresh && last && !last.stale && deps().now().getTime() - Date.parse(last.checkedAt) < 300_000 && last.binding.revision === b.revision) return { context, data: last };
       const checkedAt = deps().now().toISOString();
-      try {
-        const fresh = await deps().inspect(context, b, {});
-        const data: ReleaseState = { binding: b, ...fresh, kind: releaseStateKind(fresh.current, fresh.target, fresh.checks), checkedAt, stale: false, error: null };
-        await deps().store.saveState(data);
-        return { context, data };
-      } catch (error) {
-        // Retain evidence from the last successful poll; it is never reported as current.
-        const failure = releaseInspectionFailure(error);
-        return { context, data: { binding: b, current: last?.current ?? { deploymentId: null, images: {}, configurationHash: null, ossGitSha: null, verified: false }, target: last?.target ?? null,
-          checks: [failure, ...(last?.checks ?? []).filter(check => !check.key.startsWith("inspection."))], kind: "unknown", checkedAt: last?.checkedAt ?? deps().now().toISOString(), stale: true, error: failure.detail } };
+      // Authorized callers share only the same user's, token's and binding's live read.
+      const key = JSON.stringify([context.organizationId, context.userId, context.source, context.tokenScope?.tokenId, projectId, b.revision]);
+      let pending = inspections.get(key);
+      if (!pending) {
+        pending = (async (): Promise<ReleaseState> => {
+          try {
+            const fresh = await deps().inspect(context, b, {});
+            const data: ReleaseState = { binding: b, ...fresh, kind: releaseStateKind(fresh.current, fresh.target, fresh.checks), checkedAt, inspectedAt: checkedAt, stale: false, error: null };
+            await deps().store.saveState(data);
+            return data;
+          } catch (error) {
+            // Failure time and retry time must not replace the last successful evidence time.
+            const failure = releaseInspectionFailure(error);
+            const cached = await deps().store.cache(projectId);
+            const evidence = cached?.binding.revision === b.revision ? cached : last?.binding.revision === b.revision ? last : null;
+            const supplied = error && typeof error === "object" && "retryAt" in error && typeof error.retryAt === "string" ? Date.parse(error.retryAt) : NaN;
+            const now = deps().now().getTime();
+            const retryAt = new Date(Number.isFinite(supplied) && supplied > now ? supplied : now + 60_000).toISOString();
+            const data: ReleaseState = { binding: b, current: evidence?.current ?? { deploymentId: null, images: {}, configurationHash: null, ossGitSha: null, verified: false }, target: evidence?.target ?? null,
+              checks: [failure, ...(evidence?.checks ?? []).filter(check => !check.key.startsWith("inspection."))], kind: "unknown", checkedAt: evidence?.checkedAt ?? checkedAt,
+              inspectedAt: checkedAt, retryAt, retryScope, stale: true, error: failure.detail };
+            await deps().store.saveState(data);
+            return data;
+          }
+        })();
+        inspections.set(key, pending);
+        pending.finally(() => { if (inspections.get(key) === pending) inspections.delete(key); }).catch(() => {});
       }
+      return { context, data: await pending };
     },
     async bind(ctx, projectId, value) {
       const input = parseInput(ReleaseBindingInputSchema, value);
