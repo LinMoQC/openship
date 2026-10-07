@@ -439,16 +439,25 @@ export class ClusterStorageAdapter {
     );
     if (namespace && !namespace.metadata.deletionTimestamp && volumes) {
       const confirmation = `${longhornBase}/settings/deleting-confirmation-flag`;
-      if (await clusterObject(this.api, confirmation, this.signal))
-        await patchKubernetesObject(
-          this.api,
-          confirmation,
-          async () => {
-            await this.fence();
-            return { value: "true" };
-          },
-          this.signal,
-        );
+      const originalConfirmation = await clusterObject(this.api, confirmation, this.signal);
+      if (!originalConfirmation) throw conflict("The storage removal confirmation is unavailable.");
+      await patchKubernetesObject(
+        this.api,
+        confirmation,
+        async (current) => {
+          if (current.metadata.uid !== originalConfirmation.metadata.uid)
+            throw conflict("The storage removal confirmation was replaced.");
+          await this.fence();
+          return { value: "true" };
+        },
+        this.signal,
+      );
+      const confirmed = await clusterObject(this.api, confirmation, this.signal);
+      if (
+        confirmed?.metadata.uid !== originalConfirmation.metadata.uid ||
+        confirmed?.value !== "true"
+      )
+        throw conflict("The storage removal confirmation was not saved. Removal stopped.");
       // The pinned native uninstaller removes controllers/finalizers in order.
       for (const object of uninstall) {
         if (object.kind !== "Job") await this.ensure(object);
@@ -457,7 +466,12 @@ export class ClusterStorageAdapter {
             ...object.metadata.labels,
             "openship.io/runtime": this.runtimeId,
           };
-          object.spec.backoffLimit = 0;
+          // Preserve the pinned native job's single bounded retry. Longhorn's
+          // uninstaller does not wait for its Setting informer to sync, so a
+          // fresh process can initially observe the default false value even
+          // after the API has confirmed true. Never force an in-use volume.
+          for (const container of object.spec.template.spec.containers)
+            container.command = container.command?.filter((arg: string) => arg !== "--force");
           object.spec.template.spec.nodeSelector = { "openship.io/runtime": this.runtimeId };
           await runClusterJob(this.api, object, {
             signal: this.signal,

@@ -247,6 +247,48 @@ describe("operator database manifests", () => {
     await adapter({}, api).remove(true);
     expect(request.mock.calls.every(([method]) => method === "GET")).toBe(true);
   });
+  it("revalidates a database deletion after the operator advances its status version", async () => {
+    const instance = adapter();
+    const root = `/apis/postgresql.cnpg.io/v1/namespaces/${instance.namespace}/clusters/database`;
+    let version = 1,
+      deleted = false,
+      deletes = 0;
+    const request = vi.mocked(instance.api.request);
+    request.mockImplementation(async (method, path, body: any) => {
+      if (method === "GET") {
+        if (path === root && !deleted)
+          return {
+            metadata: {
+              uid: "database-uid",
+              resourceVersion: String(version),
+              labels: { "openship.io/database": "db", "openship.io/runtime": "runtime" },
+            },
+          } as any;
+        if (path === `/api/v1/namespaces/${instance.namespace}`)
+          return {
+            metadata: {
+              uid: "namespace-uid",
+              labels: { "openship.io/database": "db", "openship.io/runtime": "runtime" },
+            },
+          } as any;
+        if (path.endsWith("/persistentvolumeclaims")) return { items: [] } as any;
+        throw new KubernetesApiError(404, "Missing");
+      }
+      expect(method).toBe("DELETE");
+      expect(path).toBe(root);
+      expect(body.preconditions.uid).toBe("database-uid");
+      if (++deletes === 1) {
+        version = 2;
+        throw new KubernetesApiError(409, "ResourceVersion precondition changed");
+      }
+      expect(body.preconditions.resourceVersion).toBe("2");
+      deleted = true;
+      return {} as any;
+    });
+    await instance.remove(false);
+    expect(deletes).toBe(2);
+    expect(deleted).toBe(true);
+  });
   it("prepares a dedicated storage class with explicit retention without changing defaults", () => {
     const objects = prepareDatabaseAddon(
       "local",

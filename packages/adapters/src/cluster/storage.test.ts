@@ -2,12 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ClusterStorageAdapter, longhornBase, managedStorageClass } from "./storage";
 import { StorageProbe } from "./storage-probe";
 import { downloadClusterAddon } from "./database-addons";
+import { runClusterJob } from "./job";
 import { KubernetesApiError, type KubernetesApi, type KubernetesObject } from "./kubernetes-api";
 
 vi.mock("./database-addons", async (original) => ({
   ...(await original<typeof import("./database-addons")>()),
   downloadClusterAddon: vi.fn(async () => []),
 }));
+vi.mock("./job", () => ({ runClusterJob: vi.fn(async () => ({})) }));
 beforeEach(() => {
   vi.clearAllMocks();
   vi.spyOn(StorageProbe.prototype, "cleanup").mockResolvedValue(undefined);
@@ -81,6 +83,88 @@ function setup() {
 }
 
 describe("shared-storage cleanup boundaries", () => {
+  it("does not start an uninstaller when confirmation is missing or was not saved", async () => {
+    for (const missing of [false, true]) {
+      const { adapter, request, objects } = setup();
+      const confirmation = `${longhornBase}/settings/deleting-confirmation-flag`;
+      objects.set("/api/v1/namespaces/longhorn-system", {
+        metadata: { uid: "namespace", labels: { "openship.io/runtime": "runtime" } },
+      });
+      objects.set(`${longhornBase}/volumes`, { metadata: {}, items: [] });
+      if (!missing)
+        objects.set(confirmation, {
+          metadata: { uid: "confirmation", resourceVersion: "1" },
+          value: "false",
+        });
+      const actual = request.getMockImplementation()!;
+      request.mockImplementation(async (method, path, body) =>
+        method === "PATCH" && path === confirmation
+          ? { ...objects.get(path)!, value: "true" }
+          : actual(method, path, body),
+      );
+      vi.mocked(runClusterJob).mockClear();
+      await expect(adapter.remove(async () => {})).rejects.toThrow(
+        missing ? /unavailable/ : /not saved/,
+      );
+      expect(runClusterJob).not.toHaveBeenCalled();
+      expect(request.mock.calls.every(([method]) => method !== "DELETE")).toBe(true);
+    }
+  });
+  it("verifies the uninstall setting and retains the native bounded retry without forcing volumes", async () => {
+    const { adapter, request, objects } = setup();
+    const namespace = "/api/v1/namespaces/longhorn-system";
+    const confirmation = `${longhornBase}/settings/deleting-confirmation-flag`;
+    objects.set(namespace, {
+      metadata: { uid: "namespace", labels: { "openship.io/runtime": "runtime" } },
+    });
+    objects.set(`${longhornBase}/volumes`, { metadata: {}, items: [] });
+    objects.set(confirmation, {
+      metadata: { uid: "confirmation", resourceVersion: "1" },
+      value: "false",
+    });
+    const actual = request.getMockImplementation()!;
+    request.mockImplementation(async (method, path, body) => {
+      if (method === "PATCH" && path === confirmation) {
+        const saved = { ...objects.get(path)!, ...body };
+        objects.set(path, saved);
+        return saved;
+      }
+      return actual(method, path, body);
+    });
+    vi.mocked(downloadClusterAddon).mockImplementation(async (name) =>
+      name === "longhorn-uninstall"
+        ? [
+            {
+              apiVersion: "batch/v1",
+              kind: "Job",
+              metadata: { name: "uninstall", namespace: "longhorn-system" },
+              spec: {
+                backoffLimit: 1,
+                template: {
+                  spec: { containers: [{ command: ["longhorn-manager", "uninstall", "--force"] }] },
+                },
+              },
+            },
+          ]
+        : [],
+    );
+    await adapter.remove(async () => {});
+    expect(objects.get(confirmation)?.value).toBe("true");
+    const definition = vi.mocked(runClusterJob).mock.calls[0]![1];
+    expect(definition.spec.backoffLimit).toBe(1);
+    expect(definition.spec.template.spec.containers[0].command).toEqual([
+      "longhorn-manager",
+      "uninstall",
+    ]);
+    const call = request.mock.calls.findIndex(
+      ([method, path]) => method === "PATCH" && path === confirmation,
+    );
+    expect(
+      request.mock.calls
+        .slice(call + 1)
+        .some(([method, path]) => method === "GET" && path === confirmation),
+    ).toBe(true);
+  });
   it("finishes interrupted cleanup while preserving local database and custom storage classes", async () => {
     const { adapter, request, objects } = setup();
     await adapter.remove(async () => {});
