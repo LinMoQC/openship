@@ -7,6 +7,9 @@ export interface ReleaseTopology {
   networkMode: string;
   pidMode: string;
   mounts: Array<{ source: string; target: string; readOnly: boolean; type: string }>;
+  implicitImageMounts?: ReleaseTopology["mounts"];
+  running?: boolean;
+  exitCode?: number;
 }
 interface ExpectedServiceTopology {
   ports: string[]; volumes: string[]; advanced?: ComposeAdvanced | null;
@@ -43,6 +46,11 @@ export function checkReleaseTopology(service: ExpectedServiceTopology, actual: R
     if (!source || !target) return { status: "unknown", detail: "匿名卷或无效挂载无法确认归属" };
     expectedMounts.push({ source, target, readOnly: modes.includes("ro"), type: isHostPathSource(source) ? "bind" : "volume" });
   }
-  if (sorted(expectedMounts) !== sorted(actual.mounts)) reasons.push("卷、挂载路径或读写权限不一致");
+  // Completed immutable jobs do not serve or retain application data. Their
+  // verified image-created mounts are separate from requested Compose mounts.
+  // Running services, failed jobs and any explicit volume remain strict.
+  const implicit = service.advanced?.runToCompletion === true && actual.running === false && actual.exitCode === 0 && !service.volumes.length
+    ? new Set((actual.implicitImageMounts ?? []).map(mount => JSON.stringify(mount))) : new Set<string>();
+  if (sorted(expectedMounts) !== sorted(actual.mounts.filter(mount => !implicit.has(JSON.stringify(mount))))) reasons.push("卷、挂载路径或读写权限不一致");
   return { status: reasons.length ? "fail" : "pass", detail: reasons.join("、") || "端口、监听地址、网络及卷归属与已部署清单一致" };
 }
