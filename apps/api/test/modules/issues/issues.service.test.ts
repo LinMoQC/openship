@@ -114,6 +114,17 @@ const update = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
+describe("GitOps issue classification", () => {
+  it.each([ ["unknown", "release_unknown"], ["blocked", "release_blocked"], ["drift", "release_drift"], ["configuration", "release_configuration"] ])("does not report %s as an available update", async (releaseState, kind) => {
+    const detail = "尚未连接有效的 GitHub 身份，请连接账号后重新检测";
+    listOrganizationUpdates.mockResolvedValue([update({ name: "Commercial Web · PRT", detail: { gitops: true, releaseState, environment: "preview", checks: [{ key: "inspection.github.connection", label: "版本检测", blocking: true, status: "unknown", detail }] } })]);
+    const { issues } = await listOrganizationIssues(ctx);
+    expect(issues).toHaveLength(1); expect(issues[0]).toMatchObject({ kind, details: { applicationName: "Commercial Web", environment: "preview" }, target: { href: "/projects/proj-2/release" }, resolveWith: [] });
+    expect(issues[0]!.message).not.toBe("2.1.0 → 2.1.4");
+    if (releaseState === "unknown") expect(issues[0]!.message).toBe(detail);
+  });
+});
+
 beforeEach(() => {
   vi.clearAllMocks();
   disconnected.mockReturnValue(false);

@@ -49,6 +49,10 @@
     "edge_absent": "未安装边缘",
     "mail_down": "邮件引擎已停止",
     "update_available": "有可用更新",
+    "release_unknown": "待确认版本",
+    "release_blocked": "发布被阻断",
+    "release_drift": "运行版本不一致",
+    "release_configuration": "配置存在变化",
     "component_behind": "组件有可用更新",
     "monitoring_offline": "桌面端离线",
     "mail_certificate": "邮件证书"

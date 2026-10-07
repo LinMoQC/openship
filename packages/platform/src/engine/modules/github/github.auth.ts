@@ -20,7 +20,7 @@ import { mayUseInstanceGitIdentity } from "./github-instance-access";
 import crypto from "crypto";
 import { repos, db, schema, eq, and } from "@repo/db";
 import { APIError } from "better-auth/api";
-import { safeErrorMessage } from "@repo/core";
+import { AppError, safeErrorMessage } from "@repo/core";
 import { env, localGitHubAppConfiguration } from "../../config/env";
 import { auth } from "../../lib/auth";
 import { cacheStore } from "../../lib/cache-store/index";
@@ -719,7 +719,7 @@ export async function githubFetch<T = unknown>(opts: GitHubFetchOptions): Promis
     if (publicData !== null) return publicData;
   }
   if (authError) throw authError;
-  throw new Error("No GitHub access token available. Please connect your GitHub account.");
+  throw new AppError("No GitHub access token available. Please connect your GitHub account.", 403, "GITHUB_CONNECTION_REQUIRED");
 }
 
 // ─── User status helpers ─────────────────────────────────────────────────────

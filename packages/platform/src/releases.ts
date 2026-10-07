@@ -10,6 +10,7 @@ import {
 import type { ExecutionContext } from "./context";
 import type { Authorization } from "./authorization";
 import type { OperationResult } from "./deployments";
+import { releaseInspectionFailure } from "./release-diagnostics";
 
 export function releaseHash(value: unknown): string {
   function canonical(v: unknown): unknown {
@@ -129,10 +130,11 @@ export function createReleaseOperations(authorization: Authorization, dependenci
         const data: ReleaseState = { binding: b, ...fresh, kind: releaseStateKind(fresh.current, fresh.target, fresh.checks), checkedAt, stale: false, error: null };
         await deps().store.saveState(data);
         return { context, data };
-      } catch {
+      } catch (error) {
         // Retain evidence from the last successful poll; it is never reported as current.
+        const failure = releaseInspectionFailure(error);
         return { context, data: { binding: b, current: last?.current ?? { deploymentId: null, images: {}, configurationHash: null, ossGitSha: null, verified: false }, target: last?.target ?? null,
-          checks: last?.checks ?? [], kind: "unknown", checkedAt: last?.checkedAt ?? deps().now().toISOString(), stale: true, error: "Could not verify GitOps or runtime state. Retry the check." } };
+          checks: [failure, ...(last?.checks ?? []).filter(check => !check.key.startsWith("inspection."))], kind: "unknown", checkedAt: last?.checkedAt ?? deps().now().toISOString(), stale: true, error: failure.detail } };
       }
     },
     async bind(ctx, projectId, value) {
@@ -147,8 +149,9 @@ export function createReleaseOperations(authorization: Authorization, dependenci
       try {
         const fresh = await deps().inspect(context, row, {});
         await deps().store.saveState({ binding: row, ...fresh, kind: releaseStateKind(fresh.current, fresh.target, fresh.checks), checkedAt, stale: false, error: null });
-      } catch {
-        await deps().store.saveState({ binding: row, current: { deploymentId: null, images: {}, configurationHash: null, ossGitSha: null, verified: false }, target: null, checks: [], kind: "unknown", checkedAt, stale: true, error: "Initial runtime verification is incomplete. Check the binding and retry." });
+      } catch (error) {
+        const failure = releaseInspectionFailure(error);
+        await deps().store.saveState({ binding: row, current: { deploymentId: null, images: {}, configurationHash: null, ossGitSha: null, verified: false }, target: null, checks: [failure], kind: "unknown", checkedAt, stale: true, error: failure.detail });
       }
       deps().recordAudit?.(context, projectId, "releaseBind", row.id);
       return { context, data: row };

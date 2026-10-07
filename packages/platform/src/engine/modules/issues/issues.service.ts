@@ -55,6 +55,7 @@ import {
 import { listOrganizationUpdates } from "@repo/platform/engine/modules/updates/updates.service";
 import { desktopNetworkDisconnected } from "../../lib/desktop-network";
 import { nativeJobsEnabled } from "../../native/execution-policy";
+import { releaseUpdateStatus } from "./release-update-status";
 
 // ─── Shape ──────────────────────────────────────────────────────────────────
 
@@ -92,6 +93,10 @@ export type IssueKind =
   | "mail_down"
   | "mail_certificate"
   | "update_available"
+  | "release_unknown"
+  | "release_blocked"
+  | "release_drift"
+  | "release_configuration"
   | "component_behind";
 
 /** A managed container's fix is a streamed modal flow, not an HTTP call — see `useInfraFix`. */
@@ -366,6 +371,7 @@ function updateIssue(row: UpdateRow): SystemIssue {
   const isSelf = row.appTemplateId === "openship";
   const gitops = row.detail?.gitops === true;
   const uncertain = gitops && ["unknown", "blocked", "drift"].includes(String(row.detail?.releaseState));
+  const releaseStatus = gitops ? releaseUpdateStatus(row.detail?.releaseState, row.detail?.checks) : null;
   const version =
     row.currentLabel && row.latestLabel
       ? `${row.currentLabel} → ${row.latestLabel}`
@@ -373,12 +379,12 @@ function updateIssue(row: UpdateRow): SystemIssue {
 
   return {
     id: `update:${row.projectId}`,
-    kind: "update_available",
+    kind: releaseStatus?.kind ?? "update_available",
     severity: uncertain ? "action_required" : "advisory",
     scope: isSelf ? "platform" : "project",
     source: "update",
     title: row.name,
-    message: uncertain ? (row.detail?.releaseState === "drift" ? "运行镜像与清单不一致" : row.detail?.releaseState === "blocked" ? "发布条件未满足" : "版本检测失败或信息未知") : version,
+    message: releaseStatus?.message || version,
     details: {
       kind: row.kind,
       currentLabel: row.currentLabel,
@@ -387,6 +393,8 @@ function updateIssue(row: UpdateRow): SystemIssue {
       selfUpdate: isSelf,
       gitops,
       releaseState: row.detail?.releaseState,
+      environment: row.detail?.environment,
+      applicationName: gitops ? row.name.replace(/ · (PRT|生产)$/u, "") : undefined,
       adaptationRequired: row.detail?.adaptationRequired === true,
     },
     target: {
