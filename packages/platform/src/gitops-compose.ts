@@ -2,6 +2,7 @@ import { AppError } from "@repo/contracts";
 import YAML from "yaml";
 import { releaseHash } from "./releases";
 import type { ReleaseImage } from "@repo/contracts";
+import type { ReleaseCheck } from "@repo/contracts";
 
 /** Completion jobs such as Core's migrate are not independent release images.
  * Attest a selected job through its explicit immutable Compose image instead
@@ -23,6 +24,32 @@ export interface GitopsComposeContract {
 }
 export function gitopsConfigurationHash(template: string, stack: GitopsComposeContract) {
   return releaseHash({ template, expectedServices: [...stack.expectedServices].sort(), hostConfig: stack.hostConfig ?? null });
+}
+/** A legacy PRT deployment can predate hostConfig metadata while already using
+ * exactly those files and mounts. Observe that configuration through current
+ * file and both incumbent/target topology proofs; never rewrite its deployment
+ * commit or turn a real configuration change into a no-op. */
+export function observedGitopsConfigurationHash(input: {
+  preview: boolean;
+  template: string;
+  stack: GitopsComposeContract;
+  targetTemplate: string;
+  targetStack: GitopsComposeContract;
+  imageServices: string[];
+  checks: ReleaseCheck[];
+}) {
+  const { template, stack, targetTemplate, targetStack, imageServices, checks } = input;
+  const original = gitopsConfigurationHash(template, stack);
+  if (!input.preview || stack.hostConfig || !targetStack.hostConfig || !Object.keys(targetStack.hostConfig.files).length ||
+      template !== targetTemplate || releaseHash([...stack.expectedServices].sort()) !== releaseHash([...targetStack.expectedServices].sort()) ||
+      !imageServices.length || new Set(imageServices).size !== imageServices.length) return original;
+  const passed = (key: string) => {
+    const evidence = checks.filter(check => check.key === key);
+    return evidence.length === 1 && evidence[0]!.blocking && evidence[0]!.status === "pass";
+  };
+  if (!passed("configuration.files") || !imageServices.every(name =>
+      passed(`topology.${name}`) && passed(`target.topology.${name}`) && passed(`runtime.${name}`))) return original;
+  return gitopsConfigurationHash(template, targetStack);
 }
 /** Reproduce the controller's locked document without reading or exporting server variables. */
 export function renderGitopsCompose(template: string, stack: GitopsComposeContract, manifest: unknown): string {
