@@ -107,6 +107,27 @@ describe("release continuation", () => {
     expect(successfulJob([job, job], "Scaling journey (application)")).toBeUndefined();
   });
 
+  it("binds immutable Magic history to its real source and bundle workflow", () => {
+    const magic = {
+      ...run,
+      head_branch: `magic-runtime-${run.head_sha.slice(0, 12)}`,
+      path: ".github/workflows/magic-runtime.yml",
+    };
+    const target = "magic-runtime-bbbbbbbbbbbb";
+    expect(trustedResumeRun(magic, repository, target)).toBe(true);
+    for (const changed of [
+      { ...magic, head_branch: "magic-runtime-bbbbbbbbbbbb" },
+      { ...magic, head_branch: "fix/example" },
+      { ...magic, head_sha: "invalid" },
+      { ...magic, path: ".github/workflows/ci.yml" },
+      { ...magic, event: "workflow_dispatch" },
+      { ...magic, repository: { full_name: "other/repository" } },
+      { ...magic, head_repository: { full_name: "other/fork" } },
+    ])
+      expect(trustedResumeRun(changed, repository, target)).toBe(false);
+    expect(trustedResumeRun(magic, repository, "v0.8.0")).toBe(false);
+  });
+
   it("checks older runs and all publishing attempts before moving an unpublished tag", async () => {
     const initialFetch = globalThis.fetch;
     const initialToken = process.env.GITHUB_TOKEN;
@@ -177,6 +198,7 @@ describe("release continuation", () => {
       for (const file of [
         "packages/adapters/src/cluster/job.ts",
         "bun.lock",
+        ".bun-version",
         "apps/api/test/helpers/new-helper.ts",
       ])
         expect(affectsScope(file, scope)).toBe(
@@ -289,6 +311,22 @@ describe("release continuation", () => {
         url: job.html_url,
         artifactId: 789,
       });
+      previous.path = ".github/workflows/magic-runtime.yml";
+      previous.head_branch = `magic-runtime-${previous.head_sha.slice(0, 12)}`;
+      options.tag = `magic-runtime-${git("rev-parse", "HEAD").slice(0, 12)}`;
+      expect(await findReusableJob(options)).toEqual({
+        runId: "123",
+        url: job.html_url,
+        artifactId: 789,
+      });
+      // The changed database journey cannot inherit its own older result.
+      expect(await findReusableJob({ ...options, scope: "databases" })).toBeUndefined();
+      await expect(
+        findReusableJob({ ...options, tag: "magic-runtime-000000000000" }),
+      ).rejects.toThrow("does not match this checkout");
+      previous.path = run.path;
+      previous.head_branch = run.head_branch;
+      options.tag = "v0.8.0";
       expired = true;
       expect(await findReusableJob(options)).toBeUndefined();
       expired = false;
