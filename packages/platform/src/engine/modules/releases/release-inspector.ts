@@ -6,7 +6,7 @@ import { DockerRuntime } from "@repo/adapters";
 import type { ReleaseBinding, ReleaseCheck, ReleaseImage, ReleasePlanInput, ReleaseTarget, ReleaseObservation } from "@repo/contracts";
 import type { ExecutionContext } from "../../../context";
 import { manifestHash, releaseHash } from "../../../releases";
-import { gitopsConfigurationHash, renderGitopsCompose, selectedImageExpectations } from "../../../gitops-compose";
+import { gitopsConfigurationHash, observedGitopsConfigurationHash, renderGitopsCompose, selectedImageExpectations } from "../../../gitops-compose";
 import { githubBlob, githubFile, githubRead } from "./release-github";
 import { resolveDeploymentRuntimeForRead, disposeRuntime } from "../../lib/deployment-runtime";
 import { parseComposeFile, blockingComposeFields } from "../../lib/compose-parser";
@@ -208,7 +208,13 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
     const oldTemplate = active.commitSha ? await githubFile(ctx, b, stack.templatePath, active.commitSha) : null;
     const oldConfig = active.commitSha ? YAML.parse(await githubFile(ctx, b, "platform.yaml", active.commitSha)) as { stacks: Stack[] } : null;
     const oldStack = oldConfig?.stacks?.find(s => s.name === b.stack);
-    current.configurationHash = oldTemplate && oldStack ? gitopsConfigurationHash(oldTemplate, oldStack) : null;
+    // Retain the immutable deployment's own hash separately for matched
+    // desired-state recovery; live host attestation must not rewrite history.
+    current.deploymentConfigurationHash = oldTemplate && oldStack ? gitopsConfigurationHash(oldTemplate, oldStack) : null;
+    current.configurationHash = oldTemplate && oldStack ? observedGitopsConfigurationHash({
+      preview: b.environment === "preview", template: oldTemplate, stack: oldStack,
+      targetTemplate: template, targetStack: stack, imageServices: Object.keys(actualImages), checks,
+    }) : null;
     current.ossGitSha = actualManifest && releaseHash(current.images) === releaseHash(Object.fromEntries(Object.entries({ ...actualManifest.services, ...actualManifest.infrastructure }).map(([name, i]) => [name, { image: i.image, digest: i.digest, gitSha: i.gitSha ?? null }]))) ? actualManifest.ossGitSha ?? null : null;
     check("runtime.manifest", "运行镜像与已部署清单", verified ? (Object.entries(current.images).every(([name, i]) => i.digest === (deployedManifest.services[name] ?? deployedManifest.infrastructure?.[name])?.digest) ? "pass" : "fail") : "unknown", "实际摘要与当前环境清单逐项比对");
     if (b.stack === "magic-core" && target.services.includes("platform-api")) {
