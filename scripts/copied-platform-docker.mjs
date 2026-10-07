@@ -36,9 +36,13 @@ export function runCopiedPlatformDrill({ dataDirectory, keyFile, runtimeDirector
     const output = docker(['start','--attach',container]);
     const result = JSON.parse(output.split('\n').at(-1));
     const settled = JSON.parse(docker(['inspect',container]))[0];
-    if (settled.State.ExitCode !== 0 || result.upgradeVerified !== true || result.wrongKeyRejected !== true || result.matchingRestoreVerified !== true || result.targetRejectedOldSnapshot !== true) throw new Error('Copied-platform migration/encryption/restore evidence is incomplete');
+    const schemaVerified = Number.isSafeInteger(result.migrationDelta) && result.migrationDelta >= 0 && (result.migrationDelta === 0
+      ? result.targetAcceptedCompatibleSnapshot === true && result.targetRejectedOldSnapshot === false
+      : result.targetRejectedOldSnapshot === true && result.targetAcceptedCompatibleSnapshot === false);
+    if (settled.State.ExitCode !== 0 || result.upgradeVerified !== true || result.wrongKeyRejected !== true || result.matchingRestoreVerified !== true || !schemaVerified) throw new Error('Copied-platform migration/encryption/restore evidence is incomplete');
     // Return known evidence fields, never arbitrary subprocess output.
     return { upgradeVerified: true, wrongKeyRejected: true, matchingRestoreVerified: true, isolationVerified: true, nodeImage: ISOLATED_NODE_IMAGE,
+      migrationDelta: result.migrationDelta, targetRejectedOldSnapshot: result.targetRejectedOldSnapshot, targetAcceptedCompatibleSnapshot: result.targetAcceptedCompatibleSnapshot,
       migrations: result.migrations, projects: result.projects, users: result.users, services: result.services, deployments: result.deployments };
   } finally {
     if (container) docker(['rm','--force',container]);
