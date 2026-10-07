@@ -24,6 +24,7 @@
  */
 
 import { cacheStore } from "../../lib/cache-store/index";
+import { createHash } from "node:crypto";
 
 export interface GhRequest {
   url: string;
@@ -31,6 +32,7 @@ export interface GhRequest {
   /** GET → serialized to the query string; non-GET → JSON request body. */
   params?: Record<string, unknown>;
   headers?: Record<string, string>;
+  redirect?: "follow" | "error" | "manual";
 }
 
 /** Shared by credential health checks and request fallback. GitHub also uses
@@ -49,12 +51,38 @@ export function isGitHubCredentialRejected(
  * translated/upstream error text or retry mutations after an auth failure. */
 export class GitHubApiError extends Error {
   readonly credentialRejected: boolean;
+  readonly retryAt: number | null;
 
   constructor(readonly status: number, message: string, headers: Headers) {
     super(`GitHub API error (${status}): ${message}`);
     this.name = "GitHubApiError";
     this.credentialRejected = isGitHubCredentialRejected(status, headers, message);
+    this.retryAt = status === 429 || (status === 403 && !this.credentialRejected)
+      ? retryDeadline(headers) : null;
   }
+}
+
+function retryDeadline(headers: Headers): number {
+  const now = Date.now();
+  const reset = Number(headers.get("x-ratelimit-reset")) * 1000;
+  const after = Number(headers.get("retry-after")) * 1000;
+  return Math.max(now + 60_000,
+    headers.get("x-ratelimit-remaining") === "0" && Number.isFinite(reset) ? reset : 0,
+    Number.isFinite(after) && after > 0 ? now + after : 0);
+}
+const cooldowns = new Map<string, number>();
+function cooldownKey(token: string, url: string): string {
+  const parsed = new URL(url);
+  const bucket = /^\/(?:api\/v3\/)?search(?:\/|$)/.test(parsed.pathname) ? "search"
+    : /^\/(?:api\/)?graphql$/.test(parsed.pathname) ? "graphql" : "core";
+  return `${parsed.origin}:${bucket}:${createHash("sha256").update(token).digest("hex")}`;
+}
+function rememberCooldown(token: string, url: string, retryAt: number | null): void {
+  if (!retryAt) return;
+  if (cooldowns.size >= 2048) for (const [key, until] of cooldowns) if (until <= Date.now()) cooldowns.delete(key);
+  if (cooldowns.size >= 2048) cooldowns.delete(cooldowns.keys().next().value!);
+  const key = cooldownKey(token, url);
+  cooldowns.set(key, Math.max(retryAt, cooldowns.get(key) ?? 0));
 }
 
 function ghHeaders(token: string, extra?: Record<string, string>): Record<string, string> {
@@ -100,11 +128,21 @@ async function timedFetch(url: string, init: RequestInit): Promise<Response> {
  */
 export async function ghSend(token: string, req: GhRequest): Promise<Response> {
   const method = req.method ?? "GET";
-  return timedFetch(withQuery(req.url, method, req.params), {
+  const key = cooldownKey(token, req.url), until = cooldowns.get(key);
+  if (until && until > Date.now() && new URL(req.url).pathname !== "/rate_limit") {
+    throw new GitHubApiError(429, "GitHub requests are paused until quota recovers", new Headers({ "retry-after": String(Math.ceil((until - Date.now()) / 1000)) }));
+  }
+  if (until && until <= Date.now()) cooldowns.delete(key);
+  const response = await timedFetch(withQuery(req.url, method, req.params), {
     method,
+    redirect: req.redirect,
     headers: ghHeaders(token, req.headers),
     body: method !== "GET" ? JSON.stringify(req.params ?? {}) : undefined,
   });
+  if (response.status === 429 || response.headers.get("x-ratelimit-remaining") === "0" || (response.status === 403 && response.headers.has("retry-after"))) {
+    rememberCooldown(token, req.url, retryDeadline(response.headers));
+  }
+  return response;
 }
 
 /**
@@ -112,18 +150,15 @@ export async function ghSend(token: string, req: GhRequest): Promise<Response> {
  * GitHub's own error message. This is the contract `githubFetch` relies on.
  */
 export async function ghFetch<T = unknown>(token: string, req: GhRequest): Promise<T> {
-  const method = req.method ?? "GET";
-  const res = await timedFetch(withQuery(req.url, method, req.params), {
-    method,
-    headers: ghHeaders(token, req.headers),
-    body: method !== "GET" ? JSON.stringify(req.params ?? {}) : undefined,
-  });
+  const res = await ghSend(token, req);
 
   if (res.status === 204) return { success: true } as T;
 
   const data = (await res.json()) as T & { message?: string };
   if (!res.ok) {
-    throw new GitHubApiError(res.status, (data as { message?: string }).message ?? "Unknown", res.headers);
+    const error = new GitHubApiError(res.status, (data as { message?: string }).message ?? "Unknown", res.headers);
+    rememberCooldown(token, req.url, error.retryAt);
+    throw error;
   }
   return data;
 }
@@ -135,11 +170,7 @@ export async function ghFetch<T = unknown>(token: string, req: GhRequest): Promi
  */
 export async function ghFetchSoft<T = unknown>(token: string, req: GhRequest): Promise<T | null> {
   try {
-    const method = req.method ?? "GET";
-    const res = await timedFetch(withQuery(req.url, method, req.params), {
-      method,
-      headers: ghHeaders(token, req.headers),
-    });
+    const res = await ghSend(token, req);
     if (!res.ok) return null;
     return (await res.json()) as T;
   } catch {

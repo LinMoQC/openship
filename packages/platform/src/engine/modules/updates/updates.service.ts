@@ -401,7 +401,7 @@ async function scanProjects(ctx: RequestContext | null, rows: Project[]): Promis
       if (!hasDeployedSide(project)) return;
       const actor = ctx ?? (await backgroundCtxFor(project.organizationId, ctxByOrg));
       if (await releaseStore.binding(project.id)) {
-        if (actor) { const { getPlatformKernel } = await import("../../lib/platform"); await getPlatformKernel().releases.state(actor, project.id, { fresh: true }); supported += 1; }
+        if (actor) { const { getPlatformKernel } = await import("../../lib/platform"); await getPlatformKernel().releases.state(actor, project.id, { fresh: !!ctx }); supported += 1; }
         return;
       }
       const upstream = await pollUpstream(actor, project);

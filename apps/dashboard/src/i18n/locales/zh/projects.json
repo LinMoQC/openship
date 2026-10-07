@@ -608,6 +608,7 @@
     "githubConnect": "连接我的 GitHub 账号",
     "githubLinking": "正在连接",
     "githubSetup": "平台尚未配置 GitHub OAuth，请管理员配置后再连接",
-    "githubLinkError": "无法连接 GitHub 账号"
+    "githubLinkError": "无法连接 GitHub 账号",
+    "retryAt": "可重新检测时间"
   }
 }

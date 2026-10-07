@@ -16,7 +16,7 @@ function run(row: NonNullable<Awaited<ReturnType<typeof repos.releases.run>>>): 
 export const releaseStore: ReleaseStore = {
   async binding(id) { const row = await repos.releases.binding(id); return row ? binding(row) : null; },
   async bind(ctx, projectId, input) { return binding(await repos.releases.bind({ id: generateId("rlb"), projectId, organizationId: ctx.organizationId, config: json(input) })); },
-  async cache(id) { const row = await repos.releases.binding(id); if (!row?.lastState) return null; const state = row.lastState as unknown as ReleaseState; return { ...state, stale: !row.checkedAt }; },
+  async cache(id) { const row = await repos.releases.binding(id); if (!row?.lastState) return null; const state = row.lastState as unknown as ReleaseState; return { ...state, stale: state.stale || !row.checkedAt }; },
   saveState: state => repos.releases.cache(state.binding.projectId, json(state), new Date(state.checkedAt), state.binding.revision),
   async plan(id) { const row = await repos.releases.plan(id); return row ? plan(row) : null; },
   async createPlan(p) { await repos.releases.createPlan({ id: p.id, projectId: p.projectId, organizationId: p.organizationId, bindingRevision: p.bindingRevision, snapshot: json({ current: p.current, target: p.target, checks: p.checks }), summaryHash: p.summaryHash, expiresAt: new Date(p.expiresAt), createdAt: new Date(p.createdAt) }); },

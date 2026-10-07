@@ -39,6 +39,7 @@ export type ReleaseStateKind = "current" | "available" | "configuration" | "drif
 export interface ReleaseState {
   binding: ReleaseBinding; kind: ReleaseStateKind; current: ReleaseObservation;
   target: ReleaseTarget | null; checks: ReleaseCheck[]; checkedAt: string;
+  inspectedAt?: string; retryAt?: string; retryScope?: string;
   stale: boolean; error: string | null;
 }
 export interface ReleasePlan {
@@ -106,7 +107,7 @@ export const ReleaseTargetSchema = Type.Object({
   releaseId: id, images: Type.Record(Type.String(), ReleaseImageSchema), ossGitSha: Type.Union([sha, Type.Null()]), services: Type.Array(id, { uniqueItems: true }),
   eventKey: nullableHash, acceptedReceipt: Type.Union([Type.Record(Type.String(), Type.Unknown()), Type.Null()]), manifest: Type.Record(Type.String(), Type.Unknown()),
 });
-export const ReleaseStateSchema = Type.Object({ binding: ReleaseBindingSchema, kind: Type.Union([Type.Literal("current"), Type.Literal("available"), Type.Literal("configuration"), Type.Literal("drift"), Type.Literal("unknown"), Type.Literal("blocked")]), current: ReleaseObservationSchema, target: Type.Union([ReleaseTargetSchema, Type.Null()]), checks: Type.Array(ReleaseCheckSchema), checkedAt: date, stale: Type.Boolean(), error: Type.Union([Type.String(), Type.Null()]) });
+export const ReleaseStateSchema = Type.Object({ binding: ReleaseBindingSchema, kind: Type.Union([Type.Literal("current"), Type.Literal("available"), Type.Literal("configuration"), Type.Literal("drift"), Type.Literal("unknown"), Type.Literal("blocked")]), current: ReleaseObservationSchema, target: Type.Union([ReleaseTargetSchema, Type.Null()]), checks: Type.Array(ReleaseCheckSchema), checkedAt: date, inspectedAt: Type.Optional(date), retryAt: Type.Optional(date), retryScope: Type.Optional(hash), stale: Type.Boolean(), error: Type.Union([Type.String(), Type.Null()]) });
 /** Cached, non-sensitive card metadata. It contains no controller identity,
  * raw manifest, environment values or workflow credential. */
 export const ReleaseOverviewSchema = Type.Object({

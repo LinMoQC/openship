@@ -27,4 +27,11 @@ describe("safe GitOps inspection diagnostics", () => {
     expect(releaseUpdateStatus("available", [])).toMatchObject({ kind: "update_available" });
     expect(releaseUpdateStatus("unknown", [{ detail: "malformed" }]).message).not.toBe("malformed");
   });
+  it("preserves a safe retry deadline and explains legacy host ownership", () => {
+    const deadline = Date.now() + 600_000;
+    expect(githubReleaseError({ status: 429, retryAt: deadline, message: "private response" })).toMatchObject({ retryAt: new Date(deadline).toISOString() });
+    const ownership = releaseInspectionFailure(new AppError("private response", 403, "LOCAL_HOST_ACCESS_DENIED"));
+    expect(ownership.key).toBe("inspection.runtime.ownership");
+    expect(ownership.detail).toContain("工作区"); expect(ownership.detail).not.toContain("private response");
+  });
 });

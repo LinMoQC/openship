@@ -608,6 +608,7 @@
     "githubConnect": "自分の GitHub アカウントを接続",
     "githubLinking": "接続中",
     "githubSetup": "このプラットフォームでは GitHub OAuth が設定されていません。接続する前に管理者に設定を依頼してください。",
-    "githubLinkError": "GitHub アカウントを接続できませんでした"
+    "githubLinkError": "GitHub アカウントを接続できませんでした",
+    "retryAt": "再確認できる時刻"
   }
 }
