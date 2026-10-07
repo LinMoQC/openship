@@ -19,6 +19,9 @@ import { decrypt } from "../../lib/encryption";
 import { releaseTopologyVerifier } from "./release-topology";
 import { checkReleaseEnvironment, type ReleaseEnvironmentGroup } from "../../../gitops-environment";
 import { mapWithLimit } from "../../lib/map-with-limit";
+import { inspectBoundHostConfiguration } from "../../../gitops-host-configuration";
+import { assertRetainedTaskContainer } from "../../../gitops-artifacts";
+import { releaseServiceArtifacts } from "./release-artifacts";
 
 interface Image { image: string; digest: string; gitSha?: string; migrationsChanged?: boolean; tag?: string; }
 interface Manifest { schemaVersion: 2; stack: string; releaseId: string; services: Record<string, Image>; infrastructure?: Record<string, Image>; ossGitSha?: string; migrationEpoch?: string; [key: string]: unknown; }
@@ -171,21 +174,24 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
     if (!(runtime instanceof DockerRuntime)) fail("GitOps requires Docker runtime attestation");
     if (stack.hostConfig) {
       try {
-        const hashes = await runtime.inspectReleaseHostConfiguration(stack.hostConfig.root, Object.keys(stack.hostConfig.files));
+        const hashes = await inspectBoundHostConfiguration(runtime, b.stack, stack.hostConfig);
         check("configuration.files", "服务器配置文件", releaseHash(hashes) === releaseHash(stack.hostConfig.files) ? "pass" : "fail", "逐项核对准确配置目录内的文件内容摘要，仅显示验证状态");
       } catch { check("configuration.files", "服务器配置文件", "unknown", "服务器配置路径或文件内容摘要无法确认"); }
     }
-    const deployedRows = await repos.service.listByDeployment(active.id);
-    const targetTopology = await releaseTopologyVerifier(ctx, b, active, parsed);
+    const savedRows = await repos.service.listByDeployment(active.id);
+    const actualImages = { ...actualManifest?.services, ...actualManifest?.infrastructure };
+    const deployedRows = await releaseServiceArtifacts(active, rows, savedRows, Object.keys(actualImages));
+    const targetTopology = await releaseTopologyVerifier(ctx, b, active, parsed, deployedRows);
     let topology: Awaited<ReturnType<typeof releaseTopologyVerifier>> | null = null;
-    try { topology = await releaseTopologyVerifier(ctx, b, active); }
+    try { topology = await releaseTopologyVerifier(ctx, b, active, undefined, deployedRows); }
     catch { check("runtime.topology", "准确部署拓扑", "unknown", "已部署配置、端口、网络或卷归属无法确认"); }
     let verified = true;
-    for (const [name, expected] of Object.entries({ ...actualManifest?.services, ...actualManifest?.infrastructure })) {
+    for (const [name, expected] of Object.entries(actualImages)) {
       const service = rows.find(s => s.name === name), row = deployedRows.find(s => s.serviceId === service?.id);
       if (!row?.containerId) { verified = false; check(`runtime.${name}`, `${name} 实际容器`, "unknown", "未取得准确容器 ID"); continue; }
       try {
         const actual = await runtime.inspectReleaseContainer(row.containerId, expected.image);
+        assertRetainedTaskContainer(active, name, row, actual);
         const targetResult = targetTopology(name, actual);
         check(`target.topology.${name}`, `${name} 目标拓扑`, targetResult.status, targetResult.status === "pass" ? "目标保留现有端口、网络和卷归属" : targetResult.detail + "，需先协调拓扑变化");
         if (topology) {

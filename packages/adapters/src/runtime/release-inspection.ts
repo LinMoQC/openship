@@ -87,6 +87,9 @@ export async function inspectContainerImage(docker: Dockerode, id: string, image
   if (!digest || !/^sha256:[a-f0-9]{64}$/.test(digest)) throw new Error("Runtime image has no verifiable repository digest");
   return { image, digest, imageId: container.Image, running: container.State.Running,
     projectId: container.Config.Labels?.["openship.project"] ?? null,
+    serviceName: container.Config.Labels?.["openship.service"] ?? null,
+    deploymentId: container.Config.Labels?.["openship.deployment"] ?? null,
+    command: container.Config.Cmd ?? null, entrypoint: container.Config.Entrypoint ?? null,
     networkMode: container.HostConfig.NetworkMode ?? "", pidMode: container.HostConfig.PidMode ?? "",
     health: container.State.Health?.Status ?? null, exitCode: container.State.ExitCode, ports: container.HostConfig.PortBindings ?? {},
     networks: Object.keys(container.NetworkSettings.Networks ?? {}).sort(),
