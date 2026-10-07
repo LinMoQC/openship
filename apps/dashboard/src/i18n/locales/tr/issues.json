@@ -49,6 +49,10 @@
     "edge_absent": "Edge kurulu değil",
     "mail_down": "E-posta motoru durdu",
     "update_available": "Güncelleme mevcut",
+    "release_unknown": "Sürüm doğrulanmadı",
+    "release_blocked": "Yayın engellendi",
+    "release_drift": "Çalışan sürüm farklı",
+    "release_configuration": "Yapılandırma değişti",
     "component_behind": "Bileşen güncellemesi mevcut",
     "monitoring_offline": "Masaüstü çevrimdışı",
     "mail_certificate": "Posta sertifikası"

@@ -36,6 +36,10 @@ export type IssueKind =
   | "mail_certificate"
   // Version drift
   | "update_available"
+  | "release_unknown"
+  | "release_blocked"
+  | "release_drift"
+  | "release_configuration"
   | "component_behind";
 
 /** A concrete call that fixes the issue — path already substituted. */

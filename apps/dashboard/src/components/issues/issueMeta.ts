@@ -47,6 +47,10 @@ export const KIND_ICON: Record<IssueKind, IconName> = {
   mail_down: "mail",
   mail_certificate: "lock",
   update_available: "arrow-up-circle",
+  release_unknown: "help-circle",
+  release_blocked: "lock",
+  release_drift: "warning",
+  release_configuration: "wrench",
   component_behind: "arrow-up-circle",
 };
 

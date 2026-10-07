@@ -3,13 +3,11 @@ import type { ReleaseBinding, ReleasePlan, ReleaseRun } from "@repo/contracts";
 import type { ExecutionContext } from "../../../context";
 import type { WorkflowIdentity } from "../../../releases";
 import { getUserToken, githubFetch } from "../github/github.auth";
+import { githubReleaseError } from "../../../release-diagnostics";
 export async function githubRead<T>(ctx: ExecutionContext, b: ReleaseBinding, path: string): Promise<T> {
   const [owner, repo] = b.repository.split("/");
-  try { return await githubFetch<T>({ ctx, owner, repo, url: `https://api.github.com/repos/${b.repository}/${path}` }); }
-  catch (error) {
-    const status = error && typeof error === "object" && "status" in error && typeof error.status === "number" ? error.status : 503;
-    throw new AppError("GitHub release data is unavailable", status, "RELEASE_SOURCE_UNAVAILABLE");
-  }
+  try { return await githubFetch<T>({ ctx, owner, repo, allowAnonymous: false, url: `https://api.github.com/repos/${b.repository}/${path}` }); }
+  catch (error) { throw githubReleaseError(error); }
 }
 export async function githubFile(ctx: ExecutionContext, b: ReleaseBinding, path: string, ref: string): Promise<string> {
   const file = await githubRead<{ content?: string; encoding?: string }>(ctx, b, `contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(ref)}`);

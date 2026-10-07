@@ -49,6 +49,10 @@
     "edge_absent": "エッジが未インストール",
     "mail_down": "メールエンジンが停止しています",
     "update_available": "更新があります",
+    "release_unknown": "バージョン未確認",
+    "release_blocked": "リリースがブロックされています",
+    "release_drift": "実行中のバージョンが異なります",
+    "release_configuration": "設定に変更があります",
     "component_behind": "コンポーネントの更新があります",
     "monitoring_offline": "デスクトップがオフライン",
     "mail_certificate": "メール証明書"

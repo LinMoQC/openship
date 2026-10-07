@@ -60,6 +60,17 @@ describe("GitHub repository reads with rejected credentials (#944)", () => {
     expect(await githubFetch(options)).toEqual({ public: true });
     expect(wire).toHaveBeenCalledOnce();
   });
+  it("reports a structured connection requirement when a private source has no authorized credential", async () => {
+    h.localToken.mockResolvedValue(null); h.tokenFor.mockResolvedValue(null);
+    wire.mockResolvedValue(reply(404, { message: "Not Found" }));
+    await expect(githubFetch(options)).rejects.toMatchObject({ statusCode: 403, code: "GITHUB_CONNECTION_REQUIRED" });
+    expect(wire).toHaveBeenCalledOnce();
+  });
+  it("does not wait for an anonymous source probe when GitOps requires an authorized identity", async () => {
+    h.localToken.mockResolvedValue(null); h.tokenFor.mockResolvedValue(null);
+    await expect(githubFetch({ ...options, allowAnonymous: false })).rejects.toMatchObject({ code: "GITHUB_CONNECTION_REQUIRED" });
+    expect(wire).not.toHaveBeenCalled();
+  });
 
   it("fails a private repository read when both authenticated and anonymous access fail", async () => {
     h.tokenFor.mockResolvedValue(null);

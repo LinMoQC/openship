@@ -20,7 +20,7 @@ import { mayUseInstanceGitIdentity } from "./github-instance-access";
 import crypto from "crypto";
 import { repos, db, schema, eq, and } from "@repo/db";
 import { APIError } from "better-auth/api";
-import { safeErrorMessage } from "@repo/core";
+import { AppError, safeErrorMessage } from "@repo/core";
 import { env, localGitHubAppConfiguration } from "../../config/env";
 import { auth } from "../../lib/auth";
 import { cacheStore } from "../../lib/cache-store/index";
@@ -583,6 +583,8 @@ export interface GitHubFetchOptions {
    *  underlying `tokenFor` dispatcher (PAT → installation → OAuth chain).
    *  See `github.token.ts` for the resolution order. */
   ctx: RequestContext;
+  /** Public source browsing may fall back anonymously; bound GitOps inspection requires an authorized identity. */
+  allowAnonymous?: boolean;
   url: string;
   method?: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
   owner?: string;
@@ -712,14 +714,14 @@ export async function githubFetch<T = unknown>(opts: GitHubFetchOptions): Promis
 
   // Public github.com reads also work when a saved credential was revoked.
   // Enterprise sources must never resolve a same-named public GitHub repo.
-  if (readOnly && !customApiBase && opts.url.startsWith("https://api.github.com/")) {
+  if (readOnly && opts.allowAnonymous !== false && !customApiBase && opts.url.startsWith("https://api.github.com/")) {
     const publicData = await ghFetchPublic<T>({
       url: opts.url, params: opts.params, headers: opts.headers,
     });
     if (publicData !== null) return publicData;
   }
   if (authError) throw authError;
-  throw new Error("No GitHub access token available. Please connect your GitHub account.");
+  throw new AppError("No GitHub access token available. Please connect your GitHub account.", 403, "GITHUB_CONNECTION_REQUIRED");
 }
 
 // ─── User status helpers ─────────────────────────────────────────────────────

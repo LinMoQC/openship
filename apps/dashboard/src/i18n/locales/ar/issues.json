@@ -49,6 +49,10 @@
     "edge_absent": "الحافة غير مثبَّتة",
     "mail_down": "محرّك البريد متوقف",
     "update_available": "يتوفر تحديث",
+    "release_unknown": "لم يتم التحقق من الإصدار",
+    "release_blocked": "الإصدار محظور",
+    "release_drift": "الإصدار الجاري مختلف",
+    "release_configuration": "تغيرت الإعدادات",
     "component_behind": "يتوفر تحديث للمكوّن",
     "monitoring_offline": "سطح المكتب غير متصل",
     "mail_certificate": "شهادة البريد"

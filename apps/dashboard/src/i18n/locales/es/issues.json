@@ -49,6 +49,10 @@
     "edge_absent": "Edge no instalado",
     "mail_down": "El motor de correo está detenido",
     "update_available": "Actualización disponible",
+    "release_unknown": "Versión sin verificar",
+    "release_blocked": "Publicación bloqueada",
+    "release_drift": "La versión en ejecución difiere",
+    "release_configuration": "Configuración modificada",
     "component_behind": "Actualización de componente disponible",
     "monitoring_offline": "Escritorio sin conexión",
     "mail_certificate": "Certificado de correo"

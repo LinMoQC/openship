@@ -53,6 +53,9 @@ export function IssueRow({
   const Icon = KIND_ICON[issue.kind] ?? UNKNOWN_KIND_ICON;
   const adapting = issue.details?.adaptationRequired === true;
   const kindLabel = adapting ? t.projects.release.adaptationPending : c.kinds[issue.kind] ?? issue.kind;
+  const releaseEnvironment = issue.details?.gitops === true && ["preview", "production"].includes(String(issue.details.environment))
+    ? issue.details.environment === "preview" ? "PRT" : t.projects.sidebar.production : null;
+  const applicationName = typeof issue.details?.applicationName === "string" ? issue.details.applicationName : null;
   const compact = density === "compact";
   const actionSize = !compact && "h-8 px-3 text-[13px]";
   const actionClass = cn(ACTION_TONE[tone], actionSize);
@@ -101,8 +104,8 @@ export function IssueRow({
       density={density}
       icon={Icon}
       title={
-        <Link href={issue.target.href} className="truncate hover:text-primary">
-          {issue.title}
+        <Link href={issue.target.href} className="flex min-w-0 items-center gap-1 truncate hover:text-primary" aria-label={issue.title}>
+          {releaseEnvironment && applicationName ? <><span className="min-w-0 truncate">{applicationName}</span><span className="shrink-0">· {releaseEnvironment}</span></> : issue.title}
         </Link>
       }
       label={kindLabel}

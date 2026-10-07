@@ -64,6 +64,19 @@ describe("GitOps release operations", () => {
     const x = setup(), first = (await x.api.state(ctx, "p")).data; vi.mocked(x.deps.inspect).mockRejectedValue(new Error("offline"));
     const result = (await x.api.state(ctx, "p", { fresh: true })).data; expect(result.current).toEqual(first.current); expect(result.kind).toBe("unknown"); expect(result.stale).toBe(true);
   });
+  it("a failed refresh reports the current connection failure while preserving the last verified version", async () => {
+    const x = setup(), first = (await x.api.state(ctx, "p")).data;
+    vi.mocked(x.deps.inspect).mockRejectedValue(new AppError("private credential", 403, "GITHUB_USER_CONNECTION_REQUIRED"));
+    const failed = (await x.api.state(ctx, "p", { fresh: true })).data;
+    expect(failed.current).toEqual(first.current); expect(failed.checkedAt).toBe(first.checkedAt);
+    expect(failed.kind).toBe("unknown"); expect(failed.stale).toBe(true);
+    expect(failed.checks[0]).toMatchObject({ key: "inspection.github.connection", status: "unknown", blocking: true });
+    expect(failed.error).toContain("GitHub"); expect(JSON.stringify(failed)).not.toContain("private credential");
+    vi.mocked(x.deps.inspect).mockResolvedValue(structuredClone(x.fresh));
+    const recovered = (await x.api.state(ctx, "p", { fresh: true })).data;
+    expect(recovered.kind).toBe("current"); expect(recovered.stale).toBe(false);
+    expect(recovered.checks.some(check => check.key.startsWith("inspection."))).toBe(false);
+  });
   it("timestamps an inspection before waiting for GitHub or the runtime", async () => {
     const x = setup();
     vi.mocked(x.deps.inspect).mockImplementation(async () => { x.advance(30_000); return structuredClone(x.fresh); });
