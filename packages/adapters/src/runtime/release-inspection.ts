@@ -22,8 +22,9 @@ export async function inspectRegistryImage(ref: string, architecture: string, au
   const origin = `https://${host}`;
   const basic = auth && "username" in auth && auth.username && auth.password ? `Basic ${Buffer.from(`${auth.username}:${auth.password}`).toString("base64")}` : undefined;
   let authorization = basic;
-  async function request(url: string): Promise<Response> {
-    const response = await fetchImpl(url, { redirect: "error", signal: AbortSignal.timeout(10_000), headers: { Accept: accept, ...(authorization ? { Authorization: authorization } : {}) } });
+  async function request(url: string, blob = false): Promise<Response> {
+    const redirect = blob ? "manual" : "error";
+    const response = await fetchImpl(url, { redirect, signal: AbortSignal.timeout(10_000), headers: { Accept: accept, ...(authorization ? { Authorization: authorization } : {}) } });
     if (response.status !== 401) return response;
     const challenge = response.headers.get("www-authenticate") ?? "";
     const realm = /realm="([^"]+)"/.exec(challenge)?.[1];
@@ -38,7 +39,25 @@ export async function inspectRegistryImage(ref: string, architecture: string, au
     const token = data.token ?? data.access_token;
     if (!token) throw new Error("Registry returned no pull token");
     authorization = `Bearer ${token}`;
-    return fetchImpl(url, { redirect: "error", signal: AbortSignal.timeout(10_000), headers: { Accept: accept, Authorization: authorization } });
+    return fetchImpl(url, { redirect, signal: AbortSignal.timeout(10_000), headers: { Accept: accept, Authorization: authorization } });
+  }
+  async function configBlob(url: string): Promise<Response> {
+    let response = await request(url, true);
+    const signal = AbortSignal.timeout(10_000);
+    for (let hops = 0; [301, 302, 303, 307, 308].includes(response.status); hops++) {
+      const location = response.headers.get("location");
+      await response.body?.cancel();
+      if (hops >= 3) throw new Error("Too many registry blob redirects");
+      const target = location ? new URL(location, url) : null;
+      // GHCR serves private config blobs from signed GitHub storage URLs.
+      // Only that storage host may receive a redirected GET, and
+      // no registry Basic/Bearer credential is forwarded outside the registry.
+      if (host !== "ghcr.io" || !target || target.protocol !== "https:" || target.hostname !== "pkg-containers.githubusercontent.com" || target.port || target.username || target.password)
+        throw new Error("Untrusted registry blob redirect");
+      url = target.href;
+      response = await fetchImpl(url, { redirect: "manual", signal, headers: { Accept: accept } });
+    }
+    return response;
   }
   const response = await request(`${origin}/v2/${repository}/manifests/${digest}`);
   if (!response.ok || response.headers.get("docker-content-digest") !== digest) throw new Error("Registry image does not exist, digest differs, or pull permission is missing");
@@ -50,7 +69,7 @@ export async function inspectRegistryImage(ref: string, architecture: string, au
     if (!manifest.manifests.some(m => m.platform?.os === "linux" && m.platform.architecture === arch && /^sha256:[a-f0-9]{64}$/.test(m.digest ?? ""))) throw new Error("Image architecture does not match the deployment host");
   } else {
     if (!/^sha256:[a-f0-9]{64}$/.test(manifest.config?.digest ?? "")) throw new Error("Registry image config is unavailable");
-    const config = await request(`${origin}/v2/${repository}/blobs/${manifest.config!.digest}`);
+    const config = await configBlob(`${origin}/v2/${repository}/blobs/${manifest.config!.digest}`);
     if (!config.ok) throw new Error("Registry image config is unavailable");
     const configBytes = new Uint8Array(await config.arrayBuffer());
     if (`sha256:${createHash("sha256").update(configBytes).digest("hex")}` !== manifest.config!.digest) throw new Error("Registry image config digest differs");
