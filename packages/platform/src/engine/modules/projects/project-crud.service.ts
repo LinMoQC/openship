@@ -4,6 +4,7 @@
 
 import { activeDeploymentForProject, findActiveDeployment, listActiveServiceDeployments } from "@repo/platform/engine/lib/active-deployment";
 import { requireGitopsRelease } from "../releases/release-gate";
+import { projectReleaseOverview } from "./project-release-overview";
 import {
   repos,
   type Deployment,
@@ -304,6 +305,7 @@ export async function enrichProject(p: Project) {
     activeMigration,
     managementMode: releaseBinding ? "gitops" as const : "source" as const,
     releaseEnvironment: releaseBinding?.config.environment ?? null,
+    releaseOverview: releaseBinding ? projectReleaseOverview(releaseBinding) : null,
     ...readEnabled(p),
     ...readActiveDeploymentSummary(activeDep),
     // isCloud decides the fallback when nothing is configured: the metered free
@@ -380,6 +382,7 @@ export async function enrichProjectsBatch(
       activeMigration: readActiveMigration(activeMigrations.get(p.id)),
       managementMode: releaseBindings.has(p.id) ? "gitops" as const : "source" as const,
       releaseEnvironment: releaseBindings.get(p.id)?.config.environment ?? null,
+      releaseOverview: releaseBindings.has(p.id) ? projectReleaseOverview(releaseBindings.get(p.id)!) : null,
       ...readEnabled(p),
       ...readActiveDeploymentSummary(activeDep),
       // isCloud decides the fallback when nothing is configured: the metered
@@ -1604,7 +1607,7 @@ export async function ensureProject(data: EnsureProjectBody, organizationId: str
  */
 export async function listProjects(
   organizationId: string,
-  opts?: { page?: number; perPage?: number; gitProvider?: string; canRead?: (projectId: string) => Promise<boolean> },
+  opts?: { page?: number; perPage?: number; gitProvider?: string; canRead?: (projectId: string) => Promise<boolean>; includeReleaseEnvironments?: boolean },
 ) {
   const page = opts?.page ?? 1;
   const perPage = opts?.perPage ?? 20;
@@ -1625,8 +1628,16 @@ export async function listProjects(
     if (result.rows.length < batchSize || batch * batchSize >= result.total) break;
   }
 
+  // Permission and organization filtering above precedes environment expansion.
+  // Ordinary source groups still select one display row; explicitly bound
+  // release environments each have their own current version and action.
+  const bound = opts?.includeReleaseEnvironments ? new Set((await repos.releases.bindings()).map(b => b.projectId)) : new Set<string>();
   const displays = Array.from(byGroup.values())
-    .map(selectDisplayProject)
+    .flatMap(rows => {
+      const display = selectDisplayProject(rows);
+      const environments = rows.filter(row => bound.has(row.id));
+      return display && !bound.has(display.id) ? [display, ...environments] : environments.length ? environments : [display];
+    })
     .filter((p): p is Project => !!p)
     .sort((a, b) => (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0));
 

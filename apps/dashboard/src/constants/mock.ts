@@ -1,4 +1,5 @@
 import type { ReleaseSource } from "@repo/core";
+import type { ReleaseOverview } from "@repo/contracts";
 
 /**
  * Shared domain types used across the dashboard.
@@ -48,8 +49,11 @@ export interface Project {
   activeDeploymentId?: string | null;
   latestDeploymentId?: string | null;
   latestDeploymentStatus?: string | null;
-  /** Human version (v1, v2, …) of the live release — from the active deployment. */
+  /** Deployment sequence number, independent of the application's release. */
   activeVersion?: number | null;
+  managementMode?: "gitops" | "source";
+  releaseEnvironment?: string | null;
+  releaseOverview?: ReleaseOverview | null;
   /** Status of the live release (e.g. `partial_failure`). */
   activeDeploymentStatus?: string | null;
   /** True when the live release is a partial-failure deploy awaiting keep/reject. */

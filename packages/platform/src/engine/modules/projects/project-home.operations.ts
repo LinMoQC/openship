@@ -28,6 +28,7 @@ export async function getProjectHome(ctx: ExecutionContext) {
     result = await projectService.listProjects(organizationId, {
       page: 1,
       perPage: 100,
+      includeReleaseEnvironments: true,
       ...(restricted && { canRead: (id: string) => authorization.checkPermissionOnResource(ctx, { resourceType: "project", resourceId: id, action: "read" }) }),
     });
   } catch (err) {
