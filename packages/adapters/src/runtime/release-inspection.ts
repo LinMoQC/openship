@@ -85,6 +85,14 @@ export async function inspectContainerImage(docker: Dockerode, id: string, image
   const ref = actual.RepoDigests?.find(d => canonicalRegistryImage(d).canonical === repository);
   const digest = ref?.split("@")[1];
   if (!digest || !/^sha256:[a-f0-9]{64}$/.test(digest)) throw new Error("Runtime image has no verifiable repository digest");
+  // An image VOLUME creates an anonymous mount even when Compose has no
+  // volumes. Only attest Docker's implicit, local, writable mounts when there
+  // is no caller-supplied mount or inherited container volume at all.
+  const noRequestedMounts = !(container.HostConfig.Binds?.length || container.HostConfig.Mounts?.length || container.HostConfig.VolumesFrom?.length || Object.keys(container.HostConfig.Tmpfs ?? {}).length);
+  const implicitImageMounts = noRequestedMounts ? container.Mounts.filter(m =>
+    m.Type === "volume" && m.Driver === "local" && m.RW === true && !m.Mode && /^[a-f0-9]{64}$/.test(m.Name ?? "") &&
+    Object.hasOwn(actual.Config.Volumes ?? {}, m.Destination) && Object.hasOwn(container.Config.Volumes ?? {}, m.Destination)
+  ).map(m => ({ source: m.Name!, target: m.Destination, readOnly: false, type: "volume" })) : [];
   return { image, digest, imageId: container.Image, running: container.State.Running,
     projectId: container.Config.Labels?.["openship.project"] ?? null,
     serviceName: container.Config.Labels?.["openship.service"] ?? null,
@@ -94,5 +102,6 @@ export async function inspectContainerImage(docker: Dockerode, id: string, image
     health: container.State.Health?.Status ?? null, exitCode: container.State.ExitCode, ports: container.HostConfig.PortBindings ?? {},
     networks: Object.keys(container.NetworkSettings.Networks ?? {}).sort(),
     mounts: container.Mounts.map(m => ({ source: m.Name ?? m.Source, target: m.Destination, readOnly: !m.RW, type: m.Type })),
+    implicitImageMounts,
   };
 }

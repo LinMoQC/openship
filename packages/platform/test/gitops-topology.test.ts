@@ -28,4 +28,15 @@ describe("actual GitOps runtime topology", () => {
   it("reports unknown rather than assuming anonymous volume identity", () => {
     expect(checkReleaseTopology({ ports: [], volumes: ["/data"] }, actual, options).status).toBe("unknown");
   });
+  it("attests image-created anonymous mounts only for a successfully completed job", () => {
+    const mount = { source: "a".repeat(64), target: "/var/lib/redpanda/data", readOnly: false, type: "volume" };
+    const job = { ports: [], volumes: [], advanced: { runToCompletion: true, externalNetworkName: "magic-prt" } };
+    const completed = { ...actual, ports: {}, mounts: [mount], implicitImageMounts: [mount], running: false, exitCode: 0 };
+    expect(checkReleaseTopology(job, completed, options).status).toBe("pass");
+    for (const changed of [{ ...completed, implicitImageMounts: [] }, { ...completed, running: true }, { ...completed, exitCode: 1 }, { ...completed, mounts: [{ ...mount, source: "foreign" }] }, { ...completed, mounts: [{ ...mount, readOnly: true }] }, { ...completed, mounts: [...completed.mounts, { ...mount, target: "/extra" }] }]) {
+      expect(checkReleaseTopology(job, changed, options).status).toBe("fail");
+    }
+    expect(checkReleaseTopology({ ...job, advanced: { externalNetworkName: "magic-prt" } }, completed, options).status).toBe("fail");
+    expect(checkReleaseTopology({ ...job, volumes: ["owned:/var/lib/redpanda/data"] }, completed, options).status).toBe("fail");
+  });
 });
