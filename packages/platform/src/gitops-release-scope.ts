@@ -21,7 +21,7 @@ export function productionReleaseScope(services: ScopeService[], deployed: Scope
 export interface RecoveryScopeInput {
   deployedHash: string; targetHash: string; branchCommit: string;
   active: { status: string; commitSha: string | null };
-  expected: string[]; unconverged: string[];
+  expected: string[]; unconverged: string[]; tasks: string[];
 }
 
 /**
@@ -29,11 +29,15 @@ export interface RecoveryScopeInput {
  * be unfinished: a partial_failure left some services on old containers or
  * crash-looping. Only that exact revision may be resumed, and only the services
  * whose actual container is missing, unhealthy or on another digest are rebuilt.
+ * Completion tasks rerun too: only a ready deployment can prove a task that a
+ * scoped deploy leaves untouched, and the partial one never will.
  * An empty result means there is nothing to recover.
  */
 export function productionRecoveryScope(input: RecoveryScopeInput): string[] {
   if (input.deployedHash !== input.targetHash || input.active.status !== "partial_failure" || input.active.commitSha !== input.branchCommit) return [];
-  return [...new Set(input.unconverged.filter(name => input.expected.includes(name)))].sort();
+  const unconverged = input.unconverged.filter(name => input.expected.includes(name));
+  if (!unconverged.length) return [];
+  return [...new Set([...unconverged, ...input.tasks.filter(name => input.expected.includes(name))])].sort();
 }
 
 /**

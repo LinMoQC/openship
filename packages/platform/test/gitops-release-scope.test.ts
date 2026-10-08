@@ -39,9 +39,15 @@ describe("runtime service scope", () => {
 describe("production recovery scope", () => {
   const branch = "c".repeat(40);
   const base = { deployedHash: "h", targetHash: "h", branchCommit: branch, active: { status: "partial_failure", commitSha: branch },
-    expected: ["gateway", "nginx", "platform-api", "relay"], unconverged: ["relay", "platform-api", "gateway", "relay"] };
+    expected: ["gateway", "migrate", "nginx", "platform-api", "relay"], unconverged: ["relay", "platform-api", "gateway", "relay"], tasks: [] as string[] };
   it("rebuilds only the unconverged bound services of the unfinished revision", () => {
     expect(productionRecoveryScope(base)).toEqual(["gateway", "platform-api", "relay"]);
+  });
+  it("reruns bound completion tasks, whose proof the partial deployment cannot provide", () => {
+    expect(productionRecoveryScope({ ...base, tasks: ["migrate", "legacy-task"] })).toEqual(["gateway", "migrate", "platform-api", "relay"]);
+  });
+  it("is empty when everything converged, even with tasks", () => {
+    expect(productionRecoveryScope({ ...base, unconverged: [], tasks: ["migrate"] })).toEqual([]);
   });
   it("ignores names outside the bound set", () => {
     expect(productionRecoveryScope({ ...base, unconverged: ["legacy", "nginx"] })).toEqual(["nginx"]);

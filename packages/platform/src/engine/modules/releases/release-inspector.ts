@@ -219,7 +219,8 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
     // every other service must still verify, and nothing else may change.
     const recovery = b.environment === "production" && !rollback && !verification && !selected.length
       ? productionRecoveryScope({ deployedHash: manifestHash(deployedManifest), targetHash: manifestHash(manifest), branchCommit: branch.sha,
-          active, expected: b.expectedServices, unconverged: Object.keys(actualImages).filter(name => !converged.has(name)) })
+          active, expected: b.expectedServices, unconverged: Object.keys(actualImages).filter(name => !converged.has(name)),
+          tasks: rows.filter(s => s.advanced?.runToCompletion === true).map(s => s.name) })
       : [];
     if (recovery.length) {
       selected = recovery;
