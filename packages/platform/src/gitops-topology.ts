@@ -14,6 +14,10 @@ export interface ReleaseTopology {
 interface ExpectedServiceTopology {
   ports: string[]; volumes: string[]; advanced?: ComposeAdvanced | null;
 }
+/** A target prerequisite failure must not erase the incumbent's attestation. */
+export function missingTargetTopology(required: ReadonlyArray<{ variable: string }>): { status: "fail"; detail: string } {
+  return { status: "fail", detail: `目标缺少必需变量 ${[...new Set(required.map(row => row.variable))].sort().join("、")}，拓扑尚未就绪` };
+}
 const sorted = (values: unknown[]) => values.map(value => JSON.stringify(value)).sort().join("\n");
 export function checkReleaseTopology(service: ExpectedServiceTopology, actual: ReleaseTopology, options: {
   slug: string; namespaceVolumes: boolean; containerIds: Record<string, string>;
