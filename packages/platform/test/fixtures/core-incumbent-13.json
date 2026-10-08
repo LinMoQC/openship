@@ -1,0 +1,214 @@
+{
+  "source": "b375a6d6e773a3427be5f79d5778c3cd89852336",
+  "stack": {
+    "expectedServices": [
+      "magic-postgres",
+      "magic-redis",
+      "redpanda",
+      "redpanda-init",
+      "migrate",
+      "platform-api",
+      "cliproxy",
+      "agent-service",
+      "interview-agent",
+      "relay",
+      "keeper",
+      "harvester",
+      "gateway",
+      "nginx",
+      "prometheus",
+      "grafana"
+    ],
+    "services": [
+      {
+        "name": "platform-api",
+        "image": "ghcr.io/magic-resume/magic-core/platform-api"
+      },
+      {
+        "name": "agent-service",
+        "image": "ghcr.io/magic-resume/magic-core/agent-service"
+      },
+      {
+        "name": "interview-agent",
+        "image": "ghcr.io/magic-resume/magic-core/interview-agent"
+      },
+      {
+        "name": "gateway",
+        "image": "ghcr.io/magic-resume/magic-core/gateway"
+      },
+      {
+        "name": "relay",
+        "image": "ghcr.io/magic-resume/magic-core/relay"
+      },
+      {
+        "name": "keeper",
+        "image": "ghcr.io/magic-resume/magic-core/keeper"
+      },
+      {
+        "name": "harvester",
+        "image": "ghcr.io/magic-resume/magic-core/harvester"
+      }
+    ],
+    "infrastructure": [
+      {
+        "name": "magic-postgres",
+        "image": "pgvector/pgvector"
+      },
+      {
+        "name": "magic-redis",
+        "image": "redis"
+      },
+      {
+        "name": "redpanda",
+        "image": "redpandadata/redpanda"
+      },
+      {
+        "name": "redpanda-init",
+        "image": "redpandadata/redpanda"
+      },
+      {
+        "name": "cliproxy",
+        "image": "eceasy/cli-proxy-api"
+      },
+      {
+        "name": "nginx",
+        "image": "nginx"
+      },
+      {
+        "name": "prometheus",
+        "image": "prom/prometheus"
+      },
+      {
+        "name": "grafana",
+        "image": "grafana/grafana"
+      }
+    ]
+  },
+  "manifest": {
+    "schemaVersion": 2,
+    "stack": "magic-core",
+    "releaseId": "magic-core:d4d4b474d2f6",
+    "updatedAt": "2026-09-29T18:41:12.000Z",
+    "migrationEpoch": "sha256:10d6519d240f4fccc8370f54669a982e7b0b1f51d169946f3d42c5a35bf2b6b1",
+    "services": {
+      "platform-api": {
+        "image": "ghcr.io/magic-resume/magic-core/platform-api",
+        "tag": "rel-20260811-d4d4b474d2f6",
+        "digest": "sha256:10d6519d240f4fccc8370f54669a982e7b0b1f51d169946f3d42c5a35bf2b6b1",
+        "gitSha": "d4d4b474d2f6997c0cc0b3a7101962438c423595",
+        "migrationsChanged": false,
+        "bootstrap": true
+      },
+      "agent-service": {
+        "image": "ghcr.io/magic-resume/magic-core/agent-service",
+        "tag": "rel-20260811-117857bd8e5e",
+        "digest": "sha256:440494d09f99eaf84d125450c31cebd3ddbc7ecf2d6cd0e030588cfbf0df49d5",
+        "gitSha": "117857bd8e5e8e590923336d35ce020d121d2697",
+        "migrationsChanged": false,
+        "bootstrap": true
+      },
+      "gateway": {
+        "image": "ghcr.io/magic-resume/magic-core/gateway",
+        "tag": "rel-20260811-117857bd8e5e",
+        "digest": "sha256:65a92787fd2626189325292312f187d57f072cfa5c34c0b2be50700590d7efea",
+        "gitSha": "117857bd8e5e8e590923336d35ce020d121d2697",
+        "migrationsChanged": false,
+        "bootstrap": true
+      },
+      "relay": {
+        "image": "ghcr.io/magic-resume/magic-core/relay",
+        "tag": "rel-20260811-117857bd8e5e",
+        "digest": "sha256:f66913954e38bb9725d1f65a6fb519595222509d60c819a6728f9f2a7b26383f",
+        "gitSha": "117857bd8e5e8e590923336d35ce020d121d2697",
+        "migrationsChanged": false,
+        "bootstrap": true
+      },
+      "keeper": {
+        "image": "ghcr.io/magic-resume/magic-core/keeper",
+        "tag": "rel-20260811-117857bd8e5e",
+        "digest": "sha256:a77a72f7b63f5c4458efebd93c78d4dd282756bd6882193999b521cc68c1bfee",
+        "gitSha": "117857bd8e5e8e590923336d35ce020d121d2697",
+        "migrationsChanged": false,
+        "bootstrap": true
+      },
+      "harvester": {
+        "image": "ghcr.io/magic-resume/magic-core/harvester",
+        "tag": "rel-20260811-117857bd8e5e",
+        "digest": "sha256:e598742c3351cdd5076c13b545d0fc2d843de7e1bdf060132283f73f6b2e4956",
+        "gitSha": "117857bd8e5e8e590923336d35ce020d121d2697",
+        "migrationsChanged": false,
+        "bootstrap": true
+      }
+    },
+    "infrastructure": {
+      "magic-postgres": {
+        "image": "pgvector/pgvector",
+        "digest": "sha256:a20a57d7aa5217a6af0a391ccf69f4a8512406d6c14be08132f801468cc3cc62"
+      },
+      "magic-redis": {
+        "image": "redis",
+        "digest": "sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2"
+      },
+      "cliproxy": {
+        "image": "eceasy/cli-proxy-api",
+        "digest": "sha256:3f7a734784f4cc2c86f6268929caff1b0c178fe600fdaa12cefe884dc4cae841"
+      },
+      "nginx": {
+        "image": "nginx",
+        "digest": "sha256:4a73073bd557c65b759505da037898b61f1be6cbcc3c2c3aeac22d2a470c1752"
+      },
+      "prometheus": {
+        "image": "prom/prometheus",
+        "digest": "sha256:6559acbd5d770b15bb3c954629ce190ac3cbbdb2b7f1c30f0385c4e05104e218"
+      },
+      "grafana": {
+        "image": "grafana/grafana",
+        "digest": "sha256:5781759b3d27734d4d548fcbaf60b1180dbf4290e708f01f292faa6ae764c5e6"
+      }
+    },
+    "bootstrap": true
+  },
+  "locked": {
+    "services": {
+      "magic-postgres": {
+        "image": "pgvector/pgvector@sha256:a20a57d7aa5217a6af0a391ccf69f4a8512406d6c14be08132f801468cc3cc62"
+      },
+      "magic-redis": {
+        "image": "redis@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2"
+      },
+      "migrate": {
+        "image": "ghcr.io/magic-resume/magic-core/platform-api@sha256:10d6519d240f4fccc8370f54669a982e7b0b1f51d169946f3d42c5a35bf2b6b1"
+      },
+      "platform-api": {
+        "image": "ghcr.io/magic-resume/magic-core/platform-api@sha256:10d6519d240f4fccc8370f54669a982e7b0b1f51d169946f3d42c5a35bf2b6b1"
+      },
+      "cliproxy": {
+        "image": "eceasy/cli-proxy-api@sha256:3f7a734784f4cc2c86f6268929caff1b0c178fe600fdaa12cefe884dc4cae841"
+      },
+      "agent-service": {
+        "image": "ghcr.io/magic-resume/magic-core/agent-service@sha256:440494d09f99eaf84d125450c31cebd3ddbc7ecf2d6cd0e030588cfbf0df49d5"
+      },
+      "relay": {
+        "image": "ghcr.io/magic-resume/magic-core/relay@sha256:f66913954e38bb9725d1f65a6fb519595222509d60c819a6728f9f2a7b26383f"
+      },
+      "keeper": {
+        "image": "ghcr.io/magic-resume/magic-core/keeper@sha256:a77a72f7b63f5c4458efebd93c78d4dd282756bd6882193999b521cc68c1bfee"
+      },
+      "harvester": {
+        "image": "ghcr.io/magic-resume/magic-core/harvester@sha256:e598742c3351cdd5076c13b545d0fc2d843de7e1bdf060132283f73f6b2e4956"
+      },
+      "gateway": {
+        "image": "ghcr.io/magic-resume/magic-core/gateway@sha256:65a92787fd2626189325292312f187d57f072cfa5c34c0b2be50700590d7efea"
+      },
+      "nginx": {
+        "image": "nginx@sha256:4a73073bd557c65b759505da037898b61f1be6cbcc3c2c3aeac22d2a470c1752"
+      },
+      "prometheus": {
+        "image": "prom/prometheus@sha256:6559acbd5d770b15bb3c954629ce190ac3cbbdb2b7f1c30f0385c4e05104e218"
+      },
+      "grafana": {
+        "image": "grafana/grafana@sha256:5781759b3d27734d4d548fcbaf60b1180dbf4290e708f01f292faa6ae764c5e6"
+      }
+    }
+  }
+}

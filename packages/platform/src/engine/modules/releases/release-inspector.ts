@@ -10,15 +10,14 @@ import { gitopsConfigurationHash, observedGitopsConfigurationHash, renderGitopsC
 import { githubBlob, githubFile, githubRead } from "./release-github";
 import { resolveDeploymentRuntimeForRead, disposeRuntime } from "../../lib/deployment-runtime";
 import { parseComposeFile, blockingComposeFields } from "../../lib/compose-parser";
-import { migrationDelta, migrationEvidenceMatches } from "../../../gitops-migrations";
-import { createMigrationChecksumCache } from "../../../gitops-migration-checksums";
-const migrationChecksum = createMigrationChecksumCache();
+import { migrationInputsChanged, migrationEvidenceMatches } from "../../../gitops-migrations";
+import { observedManifestContract } from "../../../gitops-observed-manifest";
+import { inspectMigrationExecution } from "./release-migrations";
 import { serverEnvironmentHash } from "./release-gate";
 import { releaseStore } from "./release-store";
 import { decrypt } from "../../lib/encryption";
 import { releaseTopologyVerifier } from "./release-topology";
 import { checkReleaseEnvironment, type ReleaseEnvironmentGroup } from "../../../gitops-environment";
-import { mapWithLimit } from "../../lib/map-with-limit";
 import { inspectBoundHostConfiguration } from "../../../gitops-host-configuration";
 import { assertRetainedTaskContainer } from "../../../gitops-artifacts";
 import { releaseServiceArtifacts } from "./release-artifacts";
@@ -55,7 +54,9 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
   if (releaseHash(b.probes) !== releaseHash([stack.probes?.[b.environment]])) fail("External probe does not match the bound GitOps environment");
   check("activation", "环境发布开关", stack.activation[b.environment] ? "pass" : "fail", stack.activation[b.environment] ? "已启用" : "此环境尚未通过接管与恢复验收");
   const branch = await githubRead<{ sha: string }>(ctx, b, `commits/${encodeURIComponent(b.targetBranch)}`);
-  const deployedManifest = parseManifest(YAML.parse(await githubFile(ctx, b, b.manifestPath, branch.sha)), stack);
+  const branchManifest = YAML.parse(await githubFile(ctx, b, b.manifestPath, branch.sha));
+  const branchCompose = YAML.parse(await githubFile(ctx, b, stack.composePath, branch.sha));
+  const deployedManifest = parseManifest(branchManifest, observedManifestContract(stack, branchManifest, branchCompose));
   let manifest = structuredClone(deployedManifest), commit = branch.sha, eventKey: string | null = null, acceptedReceipt: Record<string, unknown> | null = null;
   let selected: string[] = [];
   const rollback = input.action === "rollback";
@@ -127,7 +128,7 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
       const compare = await githubRead<{ status: string; total_commits: number; files?: Array<{ filename: string }> }>(ctx, { ...b, repository: stack.repository }, `compare/${before.gitSha}...${p.gitSha}`);
       if (!["ahead", "identical"].includes(compare.status) || compare.total_commits >= 250 || (compare.files?.length ?? 0) >= 300) fail("Source ancestry or complete change scope cannot be verified");
       if (compare.status === "identical" && before.digest !== p.digest && (b.stack !== "commercial-web" || manifest.ossGitSha === p.ossGitSha)) fail("Identical source produced a different digest");
-      const migrationsChanged = p.migrationsChanged === true || (name === "platform-api" && compare.files?.some(f => /^packages\/db\/prisma\/migrations\//.test(f.filename)) === true);
+      const migrationsChanged = p.migrationsChanged === true || (name === "platform-api" && migrationInputsChanged(compare.files ?? []));
       if (migrationsChanged && name !== "platform-api") fail("Only the migration-owning service can change database migrations");
       if (b.stack === "commercial-web" && p.ossGitSha) {
         if (!/^[a-f0-9]{40}$/.test(String(p.ossGitSha)) || !manifest.ossGitSha) fail("OSS provenance is missing");
@@ -146,7 +147,7 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
     }
     if (input.manifestCommit && input.manifestCommit !== commit) fail("The base manifest changed. Generate a fresh plan.");
   }
-  if (b.environment === "production" && !rollback) selected = stack.services.filter(s => deployedManifest.services[s.name]!.digest !== manifest.services[s.name]!.digest).flatMap(s => manifest.services[s.name]!.migrationsChanged ? s.deployServicesWithMigration ?? [s.name] : s.deployServices ?? [s.name]);
+  if (b.environment === "production" && !rollback) selected = stack.services.filter(s => deployedManifest.services[s.name]?.digest !== manifest.services[s.name]!.digest).flatMap(s => manifest.services[s.name]!.migrationsChanged ? s.deployServicesWithMigration ?? [s.name] : s.deployServices ?? [s.name]);
   const images: Record<string, ReleaseImage> = Object.fromEntries(Object.entries({ ...manifest.services, ...manifest.infrastructure }).map(([name, i]) => [name, { image: i.image, digest: i.digest, gitSha: i.gitSha ?? null }]));
   const template = await githubFile(ctx, b, stack.templatePath, main.sha);
   const configurationHash = gitopsConfigurationHash(template, stack);
@@ -167,7 +168,9 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
   if (!active || active.organizationId !== b.organizationId || active.environment !== b.environment) { check("runtime.active", "活动部署", "unknown", "当前环境没有可确认的活动部署"); return { current, target, checks }; }
   // A desired branch can advance before deployment. Source metadata for the
   // running image must come from the incumbent's own immutable commit.
-  const actualManifest = active.commitSha ? parseManifest(YAML.parse(await githubFile(ctx, b, b.manifestPath, active.commitSha)), stack) : null;
+  const activeManifest = active.commitSha ? YAML.parse(await githubFile(ctx, b, b.manifestPath, active.commitSha)) : null;
+  const activeCompose = active.commitSha ? YAML.parse(await githubFile(ctx, b, stack.composePath, active.commitSha)) : null;
+  const actualManifest = activeManifest ? parseManifest(activeManifest, observedManifestContract(stack, activeManifest, activeCompose)) : null;
   check("runtime.source", "当前版本来源", actualManifest ? "pass" : "unknown", actualManifest ? "使用活动部署自身的固定清单与源码信息" : "活动部署缺少可确认的清单提交");
   const { runtime } = await resolveDeploymentRuntimeForRead(active);
   try {
@@ -222,24 +225,21 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
       const database = deployedRows.find(row => row.serviceId === rows.find(s => s.name === "magic-postgres")?.id);
       try {
         if (!database?.containerId) throw new Error("Database container is unknown");
-        const tree = await githubRead<{ truncated: boolean; tree: Array<{ path: string; sha: string; type: string }> }>(ctx, { ...b, repository: stack.repository }, `git/trees/${image.gitSha}?recursive=1`);
-        if (tree.truncated) throw new Error("Target source tree is truncated");
-        const targetMigrations = await mapWithLimit(tree.tree.filter(f => f.type === "blob" && /^packages\/db\/prisma\/migrations\/[^/]+\/migration\.sql$/.test(f.path)), 8, async file => {
-          const checksum = await migrationChecksum(stack.repository, file.sha, () => githubRead<{ content: string; encoding: string }>(ctx, { ...b, repository: stack.repository }, `git/blobs/${file.sha}`));
-          return { name: file.path.split("/")[4]!, blobSha: file.sha, checksum };
-        });
-        if (!targetMigrations.length) throw new Error("Target migration inventory is missing");
-        const delta = migrationDelta(targetMigrations, await runtime.inspectPrismaMigrations(database.containerId));
+        const execution = await inspectMigrationExecution(ctx, b, stack.repository, image.gitSha!, runtime, database.containerId);
+        const delta = execution.delta;
+        target.migration = { phase: execution.phase, policyHash: execution.policyHash, sourceInventoryHash: execution.sourceInventoryHash,
+          inventoryHash: delta.inventoryHash, deferredMigrations: execution.deferredMigrations, pendingMigrations: delta.pending, databaseContainerId: database.containerId };
+        check("migration.phase", "镜像迁移阶段", "pass", execution.phase === "compatibility-a" ? "兼容 A：保留旧表，删除迁移仍未执行" : execution.phase === "complete" ? "删除迁移已在真实数据库执行，仅允许一致重跑" : "使用准确源码的完整迁移目录");
         check("migration.history", "实际数据库迁移记录", delta.failed.length || delta.unexpected.length || delta.modified.length ? "fail" : "pass", `${delta.pending.length} 条待迁移，${delta.failed.length} 条失败，${delta.unexpected.length} 条不属于目标版本，${delta.modified.length} 条内容不一致`);
         if (delta.pending.length) {
           check("migration.scope", "Compose 迁移任务", target.services.includes("migrate") ? "pass" : "fail", "有待迁移时准确服务范围必须包含既有 migrate 任务");
           try {
             const evidence = JSON.parse(await githubFile(ctx, b, `evidence/${b.stack}/${b.environment}/${image.gitSha}.json`, "release-audit"));
-            const valid = migrationEvidenceMatches(evidence, { gitSha: image.gitSha!, digest: image.digest, environment: b.environment, deploymentId: active.id, databaseContainerId: database.containerId }, delta);
+            const valid = migrationEvidenceMatches(evidence, { gitSha: image.gitSha!, digest: image.digest, environment: b.environment, deploymentId: active.id, databaseContainerId: database.containerId, execution }, delta);
             check("migration.evidence", "备份与隔离迁移演练", valid ? "pass" : "fail", valid ? "准确目标、当前数据库与动态迁移清单已有验证依据" : "演练依据不匹配当前数据库、准确目标或迁移清单");
           } catch { check("migration.evidence", "备份与隔离迁移演练", "unknown", "缺少准确目标的备份、隔离恢复与迁移验证依据"); }
         }
-      } catch { check("migration.history", "实际数据库迁移记录", "unknown", "目标迁移目录或当前数据库记录无法确认"); }
+      } catch (error) { check("migration.history", "实际数据库迁移记录", error instanceof AppError && ["RELEASE_MIGRATION_POLICY_INVALID", "RELEASE_MIGRATION_LEDGER_INVALID"].includes(error.code ?? "") ? "fail" : "unknown", "目标迁移目录、执行策略或当前数据库记录无法确认"); }
     }
     for (const [name, image] of Object.entries(images)) { try { await runtime.inspectReleaseImage(`${image.image}@${image.digest}`); check(`image.${name}`, `${name} 镜像`, "pass", "镜像存在、摘要与主机架构匹配，拉取权限有效"); } catch { check(`image.${name}`, `${name} 镜像`, "unknown", "镜像存在性、架构或拉取权限无法确认"); } }
   } finally { disposeRuntime(runtime); }

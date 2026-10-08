@@ -13,6 +13,8 @@ import { assertDeploymentsAvailable } from "../../../deployment-maintenance";
 import { assertReleaseHostConfiguration } from "./release-topology";
 import { resolveDeploymentRuntimeForRead, disposeRuntime } from "../../lib/deployment-runtime";
 import { DockerRuntime } from "@repo/adapters";
+import { inspectMigrationExecution } from "./release-migrations";
+import { migrationExecutionMatches } from "../../../gitops-migrations";
 
 export const requireGitopsRelease = (id: string) => requireUnmanagedProject(id, releaseStore.binding);
 export async function serverEnvironmentHash(projectId: string, environment: string) {
@@ -37,10 +39,26 @@ export const assertGitopsCommand = createGitopsGate({
       throw new AppError("Deployment manifest differs from the frozen release plan", 409, "RELEASE_EXECUTION_TARGET_MISMATCH");
     const templatePath = `stacks/${binding.stack}/compose.template.yml`;
     const template = await githubFile(ctx, binding, templatePath, command.commitSha!);
-    const config = YAML.parse(await githubFile(ctx, binding, "platform.yaml", plan.target.workflowSha)) as { stacks: Array<GitopsComposeContract & { name: string; templatePath: string; composePath: string }> };
+    const config = YAML.parse(await githubFile(ctx, binding, "platform.yaml", plan.target.workflowSha)) as { stacks: Array<GitopsComposeContract & { name: string; repository: string; templatePath: string; composePath: string }> };
     const stack = config.stacks?.find(s => s.name === binding.stack);
     if (!stack || gitopsConfigurationHash(template, stack) !== plan.target.configurationHash)
       throw new AppError("Compose template differs from the frozen release plan", 409, "RELEASE_EXECUTION_CONFIG_MISMATCH");
+    if (binding.stack === "magic-core" && plan.target.services.includes("platform-api")) {
+      const expected = plan.target.migration, project = await repos.project.findById(binding.projectId);
+      const active = project?.activeDeploymentId ? await repos.deployment.findById(project.activeDeploymentId) : null;
+      const rows = await repos.service.listByProject(binding.projectId), saved = active ? await repos.service.listByDeployment(active.id) : [];
+      const database = saved.find(row => row.serviceId === rows.find(service => service.name === "magic-postgres")?.id);
+      const image = plan.target.images["platform-api"];
+      if (!expected || !active || !image?.gitSha || database?.containerId !== expected.databaseContainerId)
+        throw new AppError("Migration phase or actual database changed; generate a fresh release plan", 409, "RELEASE_EXECUTION_MIGRATION_MISMATCH");
+      const { runtime } = await resolveDeploymentRuntimeForRead(active);
+      try {
+        if (!(runtime instanceof DockerRuntime)) throw new Error("Actual database host cannot be confirmed");
+        const execution = await inspectMigrationExecution(ctx, binding, stack.repository, image.gitSha, runtime, expected.databaseContainerId);
+        if (!migrationExecutionMatches(expected, execution))
+          throw new AppError("Migration phase, immutable SQL inventory or database history changed", 409, "RELEASE_EXECUTION_MIGRATION_MISMATCH");
+      } finally { disposeRuntime(runtime); }
+    }
     if (stack.hostConfig) {
       const project = await repos.project.findById(binding.projectId);
       const active = project?.activeDeploymentId ? await repos.deployment.findById(project.activeDeploymentId) : null;

@@ -27,6 +27,7 @@ export interface ReleaseTarget {
   releaseId: string; images: Record<string, ReleaseImage>; ossGitSha: string | null;
   services: string[]; eventKey: string | null; acceptedReceipt: Record<string, unknown> | null;
   manifest: Record<string, unknown>;
+  migration?: { phase: "source" | "compatibility-a" | "complete"; policyHash: string | null; sourceInventoryHash: string; inventoryHash: string; deferredMigrations: string[]; pendingMigrations: string[]; databaseContainerId: string };
 }
 export interface ReleaseCheck {
   key: string; label: string; status: "pass" | "fail" | "unknown"; blocking: boolean; detail: string;
@@ -106,6 +107,8 @@ export const ReleaseTargetSchema = Type.Object({
   action: Type.Union([Type.Literal("release"), Type.Literal("rollback"), Type.Literal("verify")]), workflowSha: sha, manifestCommit: sha, manifestHash: hash, configurationHash: hash,
   releaseId: id, images: Type.Record(Type.String(), ReleaseImageSchema), ossGitSha: Type.Union([sha, Type.Null()]), services: Type.Array(id, { uniqueItems: true }),
   eventKey: nullableHash, acceptedReceipt: Type.Union([Type.Record(Type.String(), Type.Unknown()), Type.Null()]), manifest: Type.Record(Type.String(), Type.Unknown()),
+  migration: Type.Optional(Type.Object({ phase: Type.Union([Type.Literal("source"), Type.Literal("compatibility-a"), Type.Literal("complete")]), policyHash: nullableHash,
+    sourceInventoryHash: hash, inventoryHash: hash, deferredMigrations: Type.Array(id, { uniqueItems: true }), pendingMigrations: Type.Array(id, { uniqueItems: true }), databaseContainerId: id })),
 });
 export const ReleaseStateSchema = Type.Object({ binding: ReleaseBindingSchema, kind: Type.Union([Type.Literal("current"), Type.Literal("available"), Type.Literal("configuration"), Type.Literal("drift"), Type.Literal("unknown"), Type.Literal("blocked")]), current: ReleaseObservationSchema, target: Type.Union([ReleaseTargetSchema, Type.Null()]), checks: Type.Array(ReleaseCheckSchema), checkedAt: date, inspectedAt: Type.Optional(date), retryAt: Type.Optional(date), retryScope: Type.Optional(hash), stale: Type.Boolean(), error: Type.Union([Type.String(), Type.Null()]) });
 /** Cached, non-sensitive card metadata. It contains no controller identity,
