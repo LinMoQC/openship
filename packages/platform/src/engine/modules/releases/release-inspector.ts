@@ -7,6 +7,7 @@ import type { ReleaseBinding, ReleaseCheck, ReleaseImage, ReleasePlanInput, Rele
 import type { ExecutionContext } from "../../../context";
 import { manifestHash, releaseHash } from "../../../releases";
 import { gitopsConfigurationHash, observedGitopsConfigurationHash, renderGitopsCompose, selectedImageExpectations } from "../../../gitops-compose";
+import { productionReleaseScope, runtimeScopeCheck } from "../../../gitops-release-scope";
 import { githubBlob, githubFile, githubRead } from "./release-github";
 import { resolveDeploymentRuntimeForRead, disposeRuntime } from "../../lib/deployment-runtime";
 import { parseComposeFile, blockingComposeFields } from "../../lib/compose-parser";
@@ -148,7 +149,7 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
     }
     if (input.manifestCommit && input.manifestCommit !== commit) fail("The base manifest changed. Generate a fresh plan.");
   }
-  if (b.environment === "production" && !rollback) selected = stack.services.filter(s => deployedManifest.services[s.name]?.digest !== manifest.services[s.name]!.digest).flatMap(s => manifest.services[s.name]!.migrationsChanged ? s.deployServicesWithMigration ?? [s.name] : s.deployServices ?? [s.name]);
+  if (b.environment === "production" && !rollback) selected = productionReleaseScope(stack.services, deployedManifest, manifest);
   const images: Record<string, ReleaseImage> = Object.fromEntries(Object.entries({ ...manifest.services, ...manifest.infrastructure }).map(([name, i]) => [name, { image: i.image, digest: i.digest, gitSha: i.gitSha ?? null }]));
   const template = await githubFile(ctx, b, stack.templatePath, main.sha);
   const configurationHash = gitopsConfigurationHash(template, stack);
@@ -163,7 +164,8 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
   checks.push(...checkReleaseEnvironment(stack.releaseChecks?.environmentGroups ?? [], env));
   check("compose.scope", "服务集合与支持能力", releaseHash(parsed!.services.map(s => s.name).sort()) === releaseHash([...b.expectedServices].sort()) && !blockingComposeFields(parsed!.unsupported).length ? "pass" : "fail", "检查完整服务集合、端口、卷、外部网络与支持字段");
   const rows = await repos.service.listByProject(project.id);
-  check("runtime.scope", "平台服务集合", releaseHash(rows.map(s => s.name).sort()) === releaseHash([...b.expectedServices].sort()) ? "pass" : "fail", "服务数量或名称变化需要先明确协调");
+  const runtimeScope = runtimeScopeCheck(rows.map(s => s.name), b.expectedServices, selected);
+  check("runtime.scope", "平台服务集合", runtimeScope.status, runtimeScope.added.length && runtimeScope.status === "pass" ? `本次发布同步新增 ${runtimeScope.added.join("、")}` : "服务数量或名称变化需要先明确协调");
   const active = project.activeDeploymentId ? await repos.deployment.findById(project.activeDeploymentId) : null;
   const current: ReleaseObservation = { serverEnvironmentHash: await serverEnvironmentHash(project.id, b.environment), deploymentId: active?.id ?? null, images: {}, configurationHash: null, ossGitSha: null, verified: false };
   if (!active || active.organizationId !== b.organizationId || active.environment !== b.environment) { check("runtime.active", "活动部署", "unknown", "当前环境没有可确认的活动部署"); return { current, target, checks }; }
