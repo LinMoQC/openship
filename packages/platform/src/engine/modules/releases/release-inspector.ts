@@ -12,6 +12,7 @@ import { resolveDeploymentRuntimeForRead, disposeRuntime } from "../../lib/deplo
 import { parseComposeFile, blockingComposeFields } from "../../lib/compose-parser";
 import { migrationInputsChanged, migrationEvidenceMatches } from "../../../gitops-migrations";
 import { observedManifestContract } from "../../../gitops-observed-manifest";
+import { missingTargetTopology } from "../../../gitops-topology";
 import { inspectMigrationExecution } from "./release-migrations";
 import { serverEnvironmentHash } from "./release-gate";
 import { releaseStore } from "./release-store";
@@ -184,7 +185,9 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
     const savedRows = await repos.service.listByDeployment(active.id);
     const actualImages = { ...actualManifest?.services, ...actualManifest?.infrastructure };
     const deployedRows = await releaseServiceArtifacts(active, rows, savedRows, Object.keys(actualImages));
-    const targetTopology = await releaseTopologyVerifier(ctx, b, active, parsed, deployedRows);
+    // Missing target variables block the target, not observation of the
+    // incumbent's own immutable Compose document and actual containers.
+    const targetTopology = parsed.missingRequired.length ? null : await releaseTopologyVerifier(ctx, b, active, parsed, deployedRows);
     let topology: Awaited<ReturnType<typeof releaseTopologyVerifier>> | null = null;
     try { topology = await releaseTopologyVerifier(ctx, b, active, undefined, deployedRows); }
     catch { check("runtime.topology", "准确部署拓扑", "unknown", "已部署配置、端口、网络或卷归属无法确认"); }
@@ -195,7 +198,7 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
       try {
         const actual = await runtime.inspectReleaseContainer(row.containerId, expected.image);
         assertRetainedTaskContainer(active, name, row, actual);
-        const targetResult = targetTopology(name, actual);
+        const targetResult = targetTopology ? targetTopology(name, actual) : missingTargetTopology(parsed.missingRequired);
         check(`target.topology.${name}`, `${name} 目标拓扑`, targetResult.status, targetResult.status === "pass" ? "目标保留现有端口、网络和卷归属" : targetResult.detail + "，需先协调拓扑变化");
         if (topology) {
           const result = topology(name, actual);
