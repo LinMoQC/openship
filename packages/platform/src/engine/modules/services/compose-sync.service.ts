@@ -8,6 +8,7 @@ import type { ExecutionContext } from "../../../context";
 import type { TSyncComposeDocumentBody } from "@repo/contracts";
 import { syncComposeServices } from "./service.service";
 import { assertGitopsCommand } from "../releases/release-gate";
+import { gitopsComposeServiceInputs } from "../../../gitops-compose";
 
 /** CI sends the locked source; project secrets are resolved only inside the API. */
 export async function syncComposeDocument(
@@ -55,7 +56,7 @@ export async function syncComposeDocument(
   if (stored.some((service) => !expected.includes(service.name))) {
     throw new ValidationError("Compose sync would remove an existing service; reconcile explicitly first");
   }
-  const services = parsed.services.map(({ environmentMeta: _meta, ...service }) => service);
+  const services = gitopsComposeServiceInputs(parsed.services);
   const rows = await syncComposeServices(ctx, projectId, services);
   return maskServicesEnv(rows.filter((row) => row != null));
 }

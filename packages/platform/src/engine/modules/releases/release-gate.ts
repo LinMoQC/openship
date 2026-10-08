@@ -3,7 +3,7 @@ import { AppError } from "@repo/core";
 import { repos, toComposeSpec, composeWritePatch, composeSpecsEqual } from "@repo/db";
 import { createGitopsGate, requireUnmanagedProject, type GitopsCommand } from "../../../gitops-gate";
 import { manifestHash, releaseHash } from "../../../releases";
-import { gitopsConfigurationHash, renderGitopsCompose, type GitopsComposeContract } from "../../../gitops-compose";
+import { gitopsComposeServiceInputs, gitopsConfigurationHash, renderGitopsCompose, type GitopsComposeContract } from "../../../gitops-compose";
 import { releaseStore } from "./release-store";
 import { githubFile, releaseWorkflow } from "./release-github";
 import { parseComposeFile } from "../../lib/compose-parser";
@@ -79,7 +79,7 @@ export const assertGitopsCommand = createGitopsGate({
         for (const row of await repos.project.listEnvVars(binding.projectId, binding.environment, null)) env[row.key] = decrypt(row.value);
         const parsed = parseComposeFile(locked, { env });
         const rows = await repos.service.listByProject(binding.projectId);
-        if (parsed.missingRequired.length || rows.length !== parsed.services.length || parsed.services.some(service => {
+        if (parsed.missingRequired.length || rows.length !== parsed.services.length || gitopsComposeServiceInputs(parsed.services).some(service => {
           const stored = rows.find(row => row.name === service.name);
           return !stored || !stored.enabled || !composeSpecsEqual(toComposeSpec(stored), composeWritePatch(service, stored, true));
         })) throw new AppError("Stored services differ from the immutable Compose document; sync the registered target first", 409, "RELEASE_EXECUTION_CONFIG_MISMATCH");
