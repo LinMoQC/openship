@@ -412,6 +412,17 @@ const SIGTERM_EXIT_CODE = 143;
  * instead of killing the command instantly. Same reason `setsid` is probed rather
  * than assumed: no `setsid` degrades to the old single-child kill, never to a
  * command that won't start.
+ *
+ * The wrapper must reap every process it started before it exits. An orphan is
+ * reaped by the container's PID 1, and when PID 1 is the app itself that is not
+ * harmless: postgres's postmaster reads an unknown child that died by a signal
+ * as a crashed backend and resets every connection. Standing the watchdog down
+ * used to TERM its subshell and exit without waiting, which handed exactly that
+ * orphan to PID 1 on every exec. So the stand-down is `kill` + `wait`, and the
+ * watchdog traps TERM to reap its own `sleep` and exit 0 rather than die by it.
+ * The deadline path is only clean for a single-process command: a shell cannot
+ * reap grandchildren, so a multi-process tree killed at the deadline can still
+ * orphan a member. Commands run against a database container must `exec`.
  */
 const IN_CONTAINER_EXEC_WATCHDOG = [
   "if command -v setsid >/dev/null 2>&1; then",
@@ -426,11 +437,17 @@ const IN_CONTAINER_EXEC_WATCHDOG = [
   // wrapper and the exec itself.
   "  __ost=$__osc",
   "fi",
-  '{ sleep "$2" && { kill -TERM "$__ost" 2>/dev/null || kill -TERM "$__osc" 2>/dev/null; }; } >/dev/null 2>&1 &',
+  "{",
+  "  trap 'kill -TERM $__oss 2>/dev/null; wait $__oss 2>/dev/null; exit 0' TERM",
+  '  sleep "$2" &',
+  "  __oss=$!",
+  '  wait $__oss && { kill -TERM "$__ost" 2>/dev/null || kill -TERM "$__osc" 2>/dev/null; }',
+  "} >/dev/null 2>&1 &",
   "__osw=$!",
   "wait $__osc 2>/dev/null",
   "__osr=$?",
   "kill -TERM $__osw 2>/dev/null",
+  "wait $__osw 2>/dev/null",
   "exit $__osr",
 ].join("\n");
 

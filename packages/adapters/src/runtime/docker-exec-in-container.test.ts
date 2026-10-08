@@ -1,5 +1,5 @@
 import Dockerode from "dockerode";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
 
@@ -297,6 +297,64 @@ describe("buildInContainerExecCmd — the container enforces the deadline", () =
     expect(r.elapsedMs).toBeLessThan(4_000);
     expect(r.stderr).toBe(""); // no shell job-control noise on the timeout path
   }, 10_000);
+
+  it("reaps its own watchdog before exiting, so nothing is left for the container's PID 1", async () => {
+    // A deadline unique to this run makes its watchdog `sleep` identifiable in `ps`.
+    const seconds = 4_000 + (process.pid % 900);
+    const leftovers = () =>
+      execFileSync("ps", ["-A", "-o", "pid=,command="], { encoding: "utf8" })
+        .split("\n")
+        .map((line) => line.trim().match(/^(\d+)\s+(.*)$/))
+        .filter((m): m is RegExpMatchArray => !!m && m[2] === `sleep ${seconds}`)
+        .map((m) => Number(m[1]));
+    try {
+      const r = await runWatchdog("echo fast", seconds * 1_000);
+      expect(r.code).toBe(0);
+      expect(leftovers()).toEqual([]);
+    } finally {
+      for (const pid of leftovers()) process.kill(pid, "SIGKILL");
+    }
+  });
+
+  // The field case: in a container whose PID 1 is postgres, every orphan is
+  // reaped by the postmaster, and one that died by a signal reads as a crashed
+  // backend — it resets every connection. A child subreaper stands in for that
+  // PID 1 here; it needs prctl, so this one only runs on Linux.
+  it.runIf(process.platform === "linux")(
+    "never hands PID 1 an orphan, on the fast path or at the deadline",
+    () => {
+      const reaper = [
+        "import ctypes, json, os, sys",
+        "ctypes.CDLL(None).prctl(36, 1, 0, 0, 0)  # PR_SET_CHILD_SUBREAPER",
+        "wrapper = os.fork()",
+        "if wrapper == 0:",
+        "    devnull = os.open(os.devnull, os.O_WRONLY)",
+        "    os.dup2(devnull, 1); os.dup2(devnull, 2)",
+        "    os.execvp(sys.argv[1], sys.argv[1:])",
+        "orphans = []",
+        "while True:",
+        "    try: pid, status = os.wait()",
+        "    except ChildProcessError: break",
+        "    if pid != wrapper:",
+        "        orphans.append(os.WTERMSIG(status) if os.WIFSIGNALED(status) else 'exit')",
+        "print(json.dumps(orphans))",
+      ].join("\n");
+      const orphansOf = (command: string, timeoutMs: number) =>
+        JSON.parse(
+          execFileSync("python3", ["-c", reaper, ...buildInContainerExecCmd(command, timeoutMs)], {
+            encoding: "utf8",
+            timeout: 10_000,
+          }),
+        );
+      expect(orphansOf("echo fast", 2_000)).toEqual([]);
+      // At the deadline only a single-process command is clean: dash keeps an
+      // intermediate `sh` for `sh -c "sleep 30"`, and when the group TERM kills
+      // it first its child is orphaned dead-by-signal. The database probes all
+      // `exec psql`, which is the shape pinned here.
+      expect(orphansOf("exec sleep 30", 1_000)).toEqual([]);
+    },
+    15_000,
+  );
 
   it("leaves the command alone when the image has no `sleep` to arm the watchdog", async () => {
     // Degrade to "no watchdog", never to "kill immediately".
