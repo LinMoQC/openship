@@ -45,6 +45,6 @@ export async function releaseTopologyVerifier(ctx: ExecutionContext, binding: Re
     if (!configured || !stored) return { status: "unknown" as const, detail: "当前服务没有准确部署配置" };
     if (actual.projectId !== project.id) return { status: "fail" as const, detail: "实际容器不属于当前项目" };
     if (actual.serviceName !== name) return { status: "fail" as const, detail: "实际容器不属于当前服务" };
-    return checkReleaseTopology(configured, actual, { slug: project.slug!, namespaceVolumes: stored.namespaceVolumes, containerIds: ids });
+    return checkReleaseTopology(configured, actual, { slug: project.slug!, namespaceVolumes: stored.namespaceVolumes, containerIds: ids, allowAddedMounts: targetCompose !== undefined });
   };
 }
