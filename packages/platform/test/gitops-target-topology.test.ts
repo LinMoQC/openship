@@ -29,6 +29,18 @@ describe("incumbent topology with an incomplete expanded target", () => {
     expect(checkReleaseTopology(service, actual, { slug: "core-production", namespaceVolumes: false, containerIds: {} }).status).toBe("pass");
     expect(checkReleaseTopology(service, { ...actual, networks: ["foreign-net"] }, { slug: "core-production", namespaceVolumes: false, containerIds: {} }).status).toBe("fail");
   });
+  it("lets a target add a mount but never change, drop or shadow a running one", () => {
+    const options = { slug: "core-production", namespaceVolumes: false, containerIds: {}, allowAddedMounts: true };
+    const actual = { ports: {}, networks: ["net"], networkMode: "net", pidMode: "", mounts: [{ source: "data", target: "/data", readOnly: false, type: "volume" }] };
+    const target = (volumes: string[]) => ({ ports: [], volumes, advanced: { externalNetworkName: "net", externalVolumeNames: volumes.map(v => v.split(":")[0]!) } });
+    const addition = checkReleaseTopology(target(["data:/data", "logs:/logs"]), actual, options);
+    expect(addition).toEqual({ status: "pass", detail: "保留现有挂载，目标新增 /logs" });
+    expect(checkReleaseTopology(target(["other:/data", "logs:/logs"]), actual, options).status).toBe("fail");
+    expect(checkReleaseTopology(target(["logs:/logs"]), actual, options).status).toBe("fail");
+    expect(checkReleaseTopology(target(["data:/data:ro"]), actual, options).status).toBe("fail");
+    // The deployed-versus-actual check stays strict.
+    expect(checkReleaseTopology(target(["data:/data", "logs:/logs"]), actual, { ...options, allowAddedMounts: false }).status).toBe("fail");
+  });
   it("reports only deduplicated variable names, never interpolation messages or values", () => {
     const blocked = missingTargetTopology([{ variable: "B" }, { variable: "A" }, { variable: "B" }]);
     expect(blocked).toEqual({ status: "fail", detail: "目标缺少必需变量 A、B，拓扑尚未就绪" });

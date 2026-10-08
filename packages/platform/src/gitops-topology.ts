@@ -21,6 +21,8 @@ export function missingTargetTopology(required: ReadonlyArray<{ variable: string
 const sorted = (values: unknown[]) => values.map(value => JSON.stringify(value)).sort().join("\n");
 export function checkReleaseTopology(service: ExpectedServiceTopology, actual: ReleaseTopology, options: {
   slug: string; namespaceVolumes: boolean; containerIds: Record<string, string>;
+  /** Target checks only: the target may add mounts, never change or drop one. */
+  allowAddedMounts?: boolean;
 }): { status: "pass" | "fail" | "unknown"; detail: string } {
   const reasons: string[] = [];
   const expectedPorts = parsePortBindings(service.ports).portBindings;
@@ -55,6 +57,15 @@ export function checkReleaseTopology(service: ExpectedServiceTopology, actual: R
   // Running services, failed jobs and any explicit volume remain strict.
   const implicit = service.advanced?.runToCompletion === true && actual.running === false && actual.exitCode === 0 && !service.volumes.length
     ? new Set((actual.implicitImageMounts ?? []).map(mount => JSON.stringify(mount))) : new Set<string>();
-  if (sorted(expectedMounts) !== sorted(actual.mounts.filter(mount => !implicit.has(JSON.stringify(mount))))) reasons.push("卷、挂载路径或读写权限不一致");
+  const actualMounts = actual.mounts.filter(mount => !implicit.has(JSON.stringify(mount)));
+  const mountKey = (m: ReleaseTopology["mounts"][number]) => `${m.type}|${m.source}|${m.target}|${m.readOnly ? "ro" : "rw"}`;
+  const expectedKeys = new Set(expectedMounts.map(mountKey)), actualKeys = new Set(actualMounts.map(mountKey));
+  const added = expectedMounts.filter(m => !actualKeys.has(mountKey(m)));
+  // Every running mount must survive unchanged; an addition may not reuse a
+  // mount point, so it can never shadow or replace data the service holds.
+  const additive = options.allowAddedMounts === true && actualMounts.every(m => expectedKeys.has(mountKey(m)))
+    && added.every(m => !actualMounts.some(a => a.target === m.target));
+  if (sorted(expectedMounts) !== sorted(actualMounts) && !additive) reasons.push("卷、挂载路径或读写权限不一致");
+  if (!reasons.length && additive && added.length) return { status: "pass", detail: `保留现有挂载，目标新增 ${added.map(m => m.target).join("、")}` };
   return { status: reasons.length ? "fail" : "pass", detail: reasons.join("、") || "端口、监听地址、网络及卷归属与已部署清单一致" };
 }
