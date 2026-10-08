@@ -3,6 +3,18 @@ import YAML from "yaml";
 import { releaseHash } from "./releases";
 import type { ReleaseImage } from "@repo/contracts";
 import type { ReleaseCheck } from "@repo/contracts";
+import type { ComposeService } from "./engine/lib/compose-parser";
+
+/** Canonical parser provenance for both the server-side sync writer and its
+ * execution gate. The generic writer infers an empty template map for services
+ * without an environment declaration; freeze that same explicit map when
+ * verifying the stored result instead of comparing it with an absent marker. */
+export function gitopsComposeServiceInputs(services: readonly ComposeService[]) {
+  return services.map(({ environmentMeta: _meta, ...service }) => ({
+    ...service,
+    environmentTemplates: service.environmentTemplates ?? {},
+  }));
+}
 
 /** Completion jobs such as Core's migrate are not independent release images.
  * Attest a selected job through its explicit immutable Compose image instead
