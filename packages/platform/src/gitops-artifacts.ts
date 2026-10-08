@@ -25,6 +25,15 @@ function taskSpec(deployment: ArtifactDeployment, name: string) {
   if (matches.length !== 1) throw new Error("Task snapshot is ambiguous or missing");
   return matches[0]!;
 }
+function executionAdvanced(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value ?? null;
+  const advanced = { ...value as Record<string, unknown> };
+  // Newer Compose parsers record an empty template-key list even when no
+  // environment substitution is configured. It adds no execution semantics.
+  // Preserve nonempty and malformed markers so real provenance changes fail.
+  if (Array.isArray(advanced.environmentTemplateKeys) && advanced.environmentTemplateKeys.length === 0) delete advanced.environmentTemplateKeys;
+  return advanced;
+}
 function taskTreeHash(deployment: ArtifactDeployment, name: string) {
   const meta = snapshot(deployment), visited = new Set<string>(), tree: Record<string, unknown> = {};
   function visit(name: string) {
@@ -33,7 +42,7 @@ function taskTreeHash(deployment: ArtifactDeployment, name: string) {
     const spec = taskSpec(deployment, name);
     // Runtime-affecting fields only; mutable UI flags (everDeployed, routing)
     // cannot stand in for the execution captured by this deployment.
-    tree[name] = Object.fromEntries(["kind", "image", "build", "dockerfile", "buildArgs", "ports", "volumes", "command", "commandArgv", "environment", "dependsOn", "restart", "advanced"].map(key => [key, spec[key] ?? null]));
+    tree[name] = Object.fromEntries(["kind", "image", "build", "dockerfile", "buildArgs", "ports", "volumes", "command", "commandArgv", "environment", "dependsOn", "restart", "advanced"].map(key => [key, key === "advanced" ? executionAdvanced(spec[key]) : spec[key] ?? null]));
     if (!Array.isArray(spec.dependsOn) || spec.dependsOn.some(dep => typeof dep !== "string")) throw new Error("Task dependency snapshot is unknown");
     for (const dependency of spec.dependsOn) visit(dependency);
   }
