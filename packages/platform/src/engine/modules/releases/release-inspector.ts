@@ -215,21 +215,6 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
       } catch { verified = false; check(`runtime.${name}`, `${name} 实际容器`, "unknown", "主机或镜像摘要无法确认"); }
     }
     current.verified = verified && actualManifest !== null;
-    // Resuming the same unfinished revision rebuilds exactly what never converged;
-    // every other service must still verify, and nothing else may change.
-    const recovery = b.environment === "production" && !rollback && !verification && !selected.length
-      ? productionRecoveryScope({ deployedHash: manifestHash(deployedManifest), targetHash: manifestHash(manifest), branchCommit: branch.sha,
-          active, expected: b.expectedServices, unconverged: Object.keys(actualImages).filter(name => !converged.has(name)),
-          tasks: rows.filter(s => s.advanced?.runToCompletion === true).map(s => s.name) })
-      : [];
-    if (recovery.length) {
-      selected = recovery;
-      target.services = recovery;
-      target.recovery = { deploymentId: active.id, services: recovery };
-      Object.assign(images, selectedImageExpectations(images, parsed.services, recovery));
-      for (const item of checks) if (recovery.some(name => item.key === `runtime.${name}`)) { item.blocking = false; item.detail += "；恢复发布将重建此服务"; }
-      check("recovery.scope", "未完成部署恢复", "pass", `继续部分失败的部署 ${active.id}，只重建未收敛的 ${recovery.join("、")}`);
-    }
     const oldTemplate = active.commitSha ? await githubFile(ctx, b, stack.templatePath, active.commitSha) : null;
     const oldConfig = active.commitSha ? YAML.parse(await githubFile(ctx, b, "platform.yaml", active.commitSha)) as { stacks: Stack[] } : null;
     const oldStack = oldConfig?.stacks?.find(s => s.name === b.stack);
@@ -241,6 +226,23 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
       targetTemplate: template, targetStack: stack, imageServices: Object.keys(actualImages), checks,
     }) : null;
     current.ossGitSha = actualManifest && releaseHash(current.images) === releaseHash(Object.fromEntries(Object.entries({ ...actualManifest.services, ...actualManifest.infrastructure }).map(([name, i]) => [name, { image: i.image, digest: i.digest, gitSha: i.gitSha ?? null }]))) ? actualManifest.ossGitSha ?? null : null;
+    // Resuming the same unfinished target rebuilds exactly what never converged;
+    // every other service must still verify, and nothing else may change.
+    const recovery = b.environment === "production" && !rollback && !verification && !selected.length
+      ? productionRecoveryScope({ activeStatus: active.status, activeHash: actualManifest ? manifestHash(actualManifest) : null,
+          deployedHash: manifestHash(deployedManifest), targetHash: manifestHash(manifest),
+          activeConfiguration: current.deploymentConfigurationHash ?? null, targetConfiguration: configurationHash,
+          expected: b.expectedServices, unconverged: Object.keys(actualImages).filter(name => !converged.has(name)),
+          tasks: rows.filter(s => s.advanced?.runToCompletion === true).map(s => s.name) })
+      : [];
+    if (recovery.length) {
+      selected = recovery;
+      target.services = recovery;
+      target.recovery = { deploymentId: active.id, services: recovery };
+      Object.assign(images, selectedImageExpectations(images, parsed.services, recovery));
+      for (const item of checks) if (recovery.some(name => item.key === `runtime.${name}`)) { item.blocking = false; item.detail += "；恢复发布将重建此服务"; }
+      check("recovery.scope", "未完成部署恢复", "pass", `继续部分失败的部署 ${active.id}，只重建未收敛的 ${recovery.join("、")}`);
+    }
     const retained = recovery.length ? Object.keys(actualImages).filter(name => !recovery.includes(name)) : null;
     check("runtime.manifest", "运行镜像与已部署清单", retained ? (retained.every(name => converged.has(name)) ? "pass" : "fail") : verified ? (Object.entries(current.images).every(([name, i]) => i.digest === (deployedManifest.services[name] ?? deployedManifest.infrastructure?.[name])?.digest) ? "pass" : "fail") : "unknown", "实际摘要与当前环境清单逐项比对");
     if (b.stack === "magic-core" && target.services.includes("platform-api")) {

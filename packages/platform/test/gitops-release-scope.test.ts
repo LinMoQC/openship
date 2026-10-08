@@ -37,8 +37,7 @@ describe("runtime service scope", () => {
 });
 
 describe("production recovery scope", () => {
-  const branch = "c".repeat(40);
-  const base = { deployedHash: "h", targetHash: "h", branchCommit: branch, active: { status: "partial_failure", commitSha: branch },
+  const base = { activeStatus: "partial_failure", activeHash: "h", deployedHash: "h", targetHash: "h" as string, activeConfiguration: "c", targetConfiguration: "c",
     expected: ["gateway", "migrate", "nginx", "platform-api", "relay"], unconverged: ["relay", "platform-api", "gateway", "relay"], tasks: [] as string[] };
   it("rebuilds only the unconverged bound services of the unfinished revision", () => {
     expect(productionRecoveryScope(base)).toEqual(["gateway", "platform-api", "relay"]);
@@ -52,13 +51,22 @@ describe("production recovery scope", () => {
   it("ignores names outside the bound set", () => {
     expect(productionRecoveryScope({ ...base, unconverged: ["legacy", "nginx"] })).toEqual(["nginx"]);
   });
-  it("refuses a target that differs from the deployed revision", () => {
+  it("still resumes when a later failed attempt appended an identical lock commit", () => {
+    // Only content is compared: the branch head may be another commit with the same manifest and configuration.
+    expect(productionRecoveryScope(base)).toEqual(["gateway", "platform-api", "relay"]);
+  });
+  it("refuses a target that differs from the deployed manifest", () => {
     expect(productionRecoveryScope({ ...base, targetHash: "other" })).toEqual([]);
   });
-  it("refuses an active deployment that is not a partial failure", () => {
-    expect(productionRecoveryScope({ ...base, active: { status: "ready", commitSha: branch } })).toEqual([]);
+  it("refuses a partial failure that attempted another manifest", () => {
+    expect(productionRecoveryScope({ ...base, activeHash: "older" })).toEqual([]);
+    expect(productionRecoveryScope({ ...base, activeHash: null })).toEqual([]);
   });
-  it("refuses a partial failure of another revision", () => {
-    expect(productionRecoveryScope({ ...base, active: { status: "partial_failure", commitSha: "d".repeat(40) } })).toEqual([]);
+  it("refuses a partial failure that attempted another configuration", () => {
+    expect(productionRecoveryScope({ ...base, activeConfiguration: "older" })).toEqual([]);
+    expect(productionRecoveryScope({ ...base, activeConfiguration: null })).toEqual([]);
+  });
+  it("refuses an active deployment that is not a partial failure", () => {
+    expect(productionRecoveryScope({ ...base, activeStatus: "ready" })).toEqual([]);
   });
 });

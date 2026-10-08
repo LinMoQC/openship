@@ -19,22 +19,27 @@ export function productionReleaseScope(services: ScopeService[], deployed: Scope
 }
 
 export interface RecoveryScopeInput {
-  deployedHash: string; targetHash: string; branchCommit: string;
-  active: { status: string; commitSha: string | null };
+  activeStatus: string;
+  /** Manifest hashes of the active deployment's own commit, the environment branch and the target. */
+  activeHash: string | null; deployedHash: string; targetHash: string;
+  /** Configuration hashes of the active deployment's own commit and the target. */
+  activeConfiguration: string | null; targetConfiguration: string;
   expected: string[]; unconverged: string[]; tasks: string[];
 }
 
 /**
  * A production release whose target is already the desired revision can still
  * be unfinished: a partial_failure left some services on old containers or
- * crash-looping. Only that exact revision may be resumed, and only the services
- * whose actual container is missing, unhealthy or on another digest are rebuilt.
- * Completion tasks rerun too: only a ready deployment can prove a task that a
- * scoped deploy leaves untouched, and the partial one never will.
+ * crash-looping. Only a deployment that attempted exactly this manifest and
+ * configuration may be resumed — compared by content, because a later failed
+ * attempt can append an identical lock commit to the environment branch — and
+ * only the services whose actual container is missing, unhealthy or on another
+ * digest are rebuilt. Completion tasks rerun too: only a ready deployment can
+ * prove a task that a scoped deploy leaves untouched, and the partial one never will.
  * An empty result means there is nothing to recover.
  */
 export function productionRecoveryScope(input: RecoveryScopeInput): string[] {
-  if (input.deployedHash !== input.targetHash || input.active.status !== "partial_failure" || input.active.commitSha !== input.branchCommit) return [];
+  if (input.activeStatus !== "partial_failure" || input.activeHash !== input.targetHash || input.deployedHash !== input.targetHash || input.activeConfiguration !== input.targetConfiguration) return [];
   const unconverged = input.unconverged.filter(name => input.expected.includes(name));
   if (!unconverged.length) return [];
   return [...new Set([...unconverged, ...input.tasks.filter(name => input.expected.includes(name))])].sort();
