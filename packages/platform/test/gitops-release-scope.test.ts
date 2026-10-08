@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { productionReleaseScope, runtimeScopeCheck } from "../src/gitops-release-scope";
+import { productionRecoveryScope, productionReleaseScope, runtimeScopeCheck } from "../src/gitops-release-scope";
 
 const services = [
   { name: "platform-api", deployServices: ["platform-api"], deployServicesWithMigration: ["migrate", "platform-api"] },
@@ -33,5 +33,26 @@ describe("runtime service scope", () => {
   });
   it("blocks a row outside the bound set", () => {
     expect(runtimeScopeCheck([...expected, "legacy"], expected, expected).status).toBe("fail");
+  });
+});
+
+describe("production recovery scope", () => {
+  const branch = "c".repeat(40);
+  const base = { deployedHash: "h", targetHash: "h", branchCommit: branch, active: { status: "partial_failure", commitSha: branch },
+    expected: ["gateway", "nginx", "platform-api", "relay"], unconverged: ["relay", "platform-api", "gateway", "relay"] };
+  it("rebuilds only the unconverged bound services of the unfinished revision", () => {
+    expect(productionRecoveryScope(base)).toEqual(["gateway", "platform-api", "relay"]);
+  });
+  it("ignores names outside the bound set", () => {
+    expect(productionRecoveryScope({ ...base, unconverged: ["legacy", "nginx"] })).toEqual(["nginx"]);
+  });
+  it("refuses a target that differs from the deployed revision", () => {
+    expect(productionRecoveryScope({ ...base, targetHash: "other" })).toEqual([]);
+  });
+  it("refuses an active deployment that is not a partial failure", () => {
+    expect(productionRecoveryScope({ ...base, active: { status: "ready", commitSha: branch } })).toEqual([]);
+  });
+  it("refuses a partial failure of another revision", () => {
+    expect(productionRecoveryScope({ ...base, active: { status: "partial_failure", commitSha: "d".repeat(40) } })).toEqual([]);
   });
 });

@@ -28,6 +28,8 @@ export interface ReleaseTarget {
   services: string[]; eventKey: string | null; acceptedReceipt: Record<string, unknown> | null;
   manifest: Record<string, unknown>;
   migration?: { phase: "source" | "compatibility-a" | "complete"; policyHash: string | null; sourceInventoryHash: string; inventoryHash: string; deferredMigrations: string[]; pendingMigrations: string[]; databaseContainerId: string };
+  /** Present only when this release resumes the active partial_failure deployment of the same revision. */
+  recovery?: { deploymentId: string; services: string[] };
 }
 export interface ReleaseCheck {
   key: string; label: string; status: "pass" | "fail" | "unknown"; blocking: boolean; detail: string;

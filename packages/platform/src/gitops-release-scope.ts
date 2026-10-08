@@ -18,6 +18,24 @@ export function productionReleaseScope(services: ScopeService[], deployed: Scope
   return [...new Set([...application, ...infrastructure])].sort();
 }
 
+export interface RecoveryScopeInput {
+  deployedHash: string; targetHash: string; branchCommit: string;
+  active: { status: string; commitSha: string | null };
+  expected: string[]; unconverged: string[];
+}
+
+/**
+ * A production release whose target is already the desired revision can still
+ * be unfinished: a partial_failure left some services on old containers or
+ * crash-looping. Only that exact revision may be resumed, and only the services
+ * whose actual container is missing, unhealthy or on another digest are rebuilt.
+ * An empty result means there is nothing to recover.
+ */
+export function productionRecoveryScope(input: RecoveryScopeInput): string[] {
+  if (input.deployedHash !== input.targetHash || input.active.status !== "partial_failure" || input.active.commitSha !== input.branchCommit) return [];
+  return [...new Set(input.unconverged.filter(name => input.expected.includes(name)))].sort();
+}
+
 /**
  * Platform service rows must equal the bound set, except that a release may add
  * services the bound set declares when every one of them is in its own scope:
