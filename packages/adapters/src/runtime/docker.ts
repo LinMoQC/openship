@@ -420,6 +420,9 @@ const SIGTERM_EXIT_CODE = 143;
  * used to TERM its subshell and exit without waiting, which handed exactly that
  * orphan to PID 1 on every exec. So the stand-down is `kill` + `wait`, and the
  * watchdog traps TERM to reap its own `sleep` and exit 0 rather than die by it.
+ * The deadline path is only clean for a single-process command: a shell cannot
+ * reap grandchildren, so a multi-process tree killed at the deadline can still
+ * orphan a member. Commands run against a database container must `exec`.
  */
 const IN_CONTAINER_EXEC_WATCHDOG = [
   "if command -v setsid >/dev/null 2>&1; then",

@@ -347,7 +347,11 @@ describe("buildInContainerExecCmd — the container enforces the deadline", () =
           }),
         );
       expect(orphansOf("echo fast", 2_000)).toEqual([]);
-      expect(orphansOf("sleep 30", 1_000)).toEqual([]);
+      // At the deadline only a single-process command is clean: dash keeps an
+      // intermediate `sh` for `sh -c "sleep 30"`, and when the group TERM kills
+      // it first its child is orphaned dead-by-signal. The database probes all
+      // `exec psql`, which is the shape pinned here.
+      expect(orphansOf("exec sleep 30", 1_000)).toEqual([]);
     },
     15_000,
   );
