@@ -25,6 +25,22 @@ describe("retained successful one-shot task attestation", () => {
     expect((await resolveReleaseServiceArtifacts(f.current, f.services, f.rows, ["init"], f.reader))[0]!.containerId).toBe("active-container");
     expect(f.reader.listByService).not.toHaveBeenCalled();
   });
+  it("preserves a completed task when parser metadata adds empty environment template keys to it and its dependency", async () => {
+    const f = fixture();
+    f.origin.meta = { ...f.origin.meta!, composeServices: [structuredClone(f.task), { ...f.database, advanced: {} }] };
+    f.current.meta = { ...f.current.meta!, composeServices: [
+      { ...f.task, advanced: { ...f.task.advanced, environmentTemplateKeys: [] } },
+      { ...f.database, advanced: { environmentTemplateKeys: [] } },
+    ] };
+    const before = structuredClone(f.rows);
+    expect((await resolveReleaseServiceArtifacts(f.current, f.services, f.rows, ["init"], f.reader))[0]!.sourceDeploymentId).toBe("origin");
+    expect(f.rows).toEqual(before);
+  });
+  it.each([{ keys: ["DATABASE_URL"] }, { keys: "[]" }, { keys: null }])("rejects nonempty or malformed environment template metadata $keys", async ({ keys }) => {
+    const f = fixture();
+    f.current.meta = { ...f.current.meta!, composeServices: [{ ...f.task, advanced: { ...f.task.advanced, environmentTemplateKeys: keys } }, f.database] };
+    await expect(resolveReleaseServiceArtifacts(f.current, f.services, f.rows, ["init"], f.reader)).rejects.toThrow();
+  });
   it.each(["project", "organization", "environment", "future", "not-ready", "host", "image", "command", "dependency", "targeted", "unknown-current", "failure-row", "no-current-row", "missing-source"])("rejects %s provenance", async changed => {
     const f = fixture();
     if (changed === "project") f.origin.projectId = "foreign";
