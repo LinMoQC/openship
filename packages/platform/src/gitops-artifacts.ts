@@ -34,20 +34,44 @@ function executionAdvanced(value: unknown) {
   if (Array.isArray(advanced.environmentTemplateKeys) && advanced.environmentTemplateKeys.length === 0) delete advanced.environmentTemplateKeys;
   return advanced;
 }
-function taskTreeHash(deployment: ArtifactDeployment, name: string) {
-  const meta = snapshot(deployment), visited = new Set<string>(), tree: Record<string, unknown> = {};
+function taskTree(spec: (name: string) => Record<string, unknown>, name: string) {
+  const visited = new Set<string>(), tree: Record<string, unknown> = {};
   function visit(name: string) {
     if (visited.has(name)) return;
     visited.add(name);
-    const spec = taskSpec(deployment, name);
+    const definition = spec(name);
     // Runtime-affecting fields only; mutable UI flags (everDeployed, routing)
     // cannot stand in for the execution captured by this deployment.
-    tree[name] = Object.fromEntries(["kind", "image", "build", "dockerfile", "buildArgs", "ports", "volumes", "command", "commandArgv", "environment", "dependsOn", "restart", "advanced"].map(key => [key, key === "advanced" ? executionAdvanced(spec[key]) : spec[key] ?? null]));
-    if (!Array.isArray(spec.dependsOn) || spec.dependsOn.some(dep => typeof dep !== "string")) throw new Error("Task dependency snapshot is unknown");
-    for (const dependency of spec.dependsOn) visit(dependency);
+    tree[name] = Object.fromEntries(["kind", "image", "build", "dockerfile", "buildArgs", "ports", "volumes", "command", "commandArgv", "environment", "dependsOn", "restart", "advanced"].map(key => [key, key === "advanced" ? executionAdvanced(definition[key]) : definition[key] ?? null]));
+    if (!Array.isArray(definition.dependsOn) || definition.dependsOn.some(dep => typeof dep !== "string")) throw new Error("Task dependency snapshot is unknown");
+    for (const dependency of definition.dependsOn) visit(dependency);
   }
   visit(name);
-  return releaseHash({ tree, host: Object.fromEntries(["runtimeMode", "serverId", "hasServer"].map(key => [key, meta[key] ?? null])) });
+  return tree;
+}
+function taskTreeHash(deployment: ArtifactDeployment, name: string) {
+  const meta = snapshot(deployment);
+  return releaseHash({ tree: taskTree(task => taskSpec(deployment, task), name), host: Object.fromEntries(["runtimeMode", "serverId", "hasServer"].map(key => [key, meta[key] ?? null])) });
+}
+/** The same execution tree from plain Compose definitions, so two revisions compare before any deploy. */
+export function composeTaskTreeHash(services: ReadonlyArray<Record<string, unknown>>, name: string) {
+  return releaseHash(taskTree(task => {
+    const matches = services.filter(service => service.name === task);
+    if (matches.length !== 1) throw new Error("Task definition is ambiguous or missing");
+    return matches[0]!;
+  }, name));
+}
+/**
+ * Completion tasks a scoped release leaves untouched must still be proven at
+ * acceptance by a past success with the same execution tree. When the target
+ * moves that tree, acceptance can only fail — after containers were replaced —
+ * so name them before anything deploys. Unknown definitions count as drift.
+ */
+export function untouchedTaskDrift(input: { tasks: string[]; selected: string[]; incumbent: ReadonlyArray<Record<string, unknown>>; target: ReadonlyArray<Record<string, unknown>> }): string[] {
+  return input.tasks.filter(name => !input.selected.includes(name)).filter(name => {
+    try { return composeTaskTreeHash(input.incumbent, name) !== composeTaskTreeHash(input.target, name); }
+    catch { return true; }
+  }).sort();
 }
 function deliberatelyExcluded(deployment: ArtifactDeployment, serviceId: string) {
   const ids = snapshot(deployment).targetServiceIds;

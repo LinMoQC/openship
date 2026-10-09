@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { productionRecoveryScope, productionReleaseScope, runtimeScopeCheck } from "../src/gitops-release-scope";
+import { productionRecoveryScope, productionReleaseScope, runtimeScopeCheck, unacceptedAttemptRecoveryScope } from "../src/gitops-release-scope";
 
 const services = [
   { name: "platform-api", deployServices: ["platform-api"], deployServicesWithMigration: ["migrate", "platform-api"] },
@@ -73,5 +73,36 @@ describe("production recovery scope", () => {
     expect(productionRecoveryScope({ ...base, active: { status: "ready", decision: null } })).toEqual([]);
     expect(productionRecoveryScope({ ...base, active: { status: "cancelled", decision: null } })).toEqual([]);
     expect(productionRecoveryScope({ ...base, active: { status: "failed", decision: "superseded" } })).toEqual([]);
+  });
+});
+
+describe("PRT recovery of an unaccepted attempt", () => {
+  // 2026-10-09: a harvester-only release replaced its container, then acceptance
+  // failed on an untouched task. The run ended action_required, its ready attempt
+  // was never activated and the incumbent no longer described what was running.
+  const base = { run: { stage: "action_required", deploymentId: "dep_attempt" }, attempt: { id: "dep_attempt", status: "ready" }, activeId: "dep_incumbent",
+    attemptHash: "h", deployedHash: "h", targetHash: "h" as string, attemptConfiguration: "c", targetConfiguration: "c",
+    expected: ["gateway", "harvester", "migrate", "redpanda-init"], unconverged: ["harvester"], tasks: ["migrate", "redpanda-init", "legacy-task"] };
+  it("rebuilds every service off the target digest plus every bound task", () => {
+    expect(unacceptedAttemptRecoveryScope(base)).toEqual(["harvester", "migrate", "redpanda-init"]);
+    expect(unacceptedAttemptRecoveryScope({ ...base, run: { stage: "failed", deploymentId: "dep_attempt" }, attempt: { id: "dep_attempt", status: "partial_failure" } })).toEqual(["harvester", "migrate", "redpanda-init"]);
+  });
+  it("leaves a run that is still active or was accepted alone", () => {
+    for (const stage of ["deploying", "verifying", "recovering", "accepted", "restored"])
+      expect(unacceptedAttemptRecoveryScope({ ...base, run: { stage, deploymentId: "dep_attempt" } })).toEqual([]);
+  });
+  it("needs the run's own ready attempt, distinct from the active deployment", () => {
+    expect(unacceptedAttemptRecoveryScope({ ...base, run: { stage: "action_required", deploymentId: null } })).toEqual([]);
+    expect(unacceptedAttemptRecoveryScope({ ...base, attempt: { id: "dep_other", status: "ready" } })).toEqual([]);
+    expect(unacceptedAttemptRecoveryScope({ ...base, activeId: "dep_attempt" })).toEqual([]);
+    expect(unacceptedAttemptRecoveryScope({ ...base, attempt: { id: "dep_attempt", status: "failed" } })).toEqual([]);
+  });
+  it("refuses an attempt of another manifest or configuration", () => {
+    expect(unacceptedAttemptRecoveryScope({ ...base, attemptHash: "older" })).toEqual([]);
+    expect(unacceptedAttemptRecoveryScope({ ...base, targetHash: "newer" })).toEqual([]);
+    expect(unacceptedAttemptRecoveryScope({ ...base, attemptConfiguration: null })).toEqual([]);
+  });
+  it("is empty when every container already runs the target", () => {
+    expect(unacceptedAttemptRecoveryScope({ ...base, unconverged: [] })).toEqual([]);
   });
 });

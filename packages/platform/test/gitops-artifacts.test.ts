@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { assertRetainedTaskContainer, resolveReleaseServiceArtifacts, type ArtifactDeployment, type ArtifactRow } from "../src/gitops-artifacts";
+import { assertRetainedTaskContainer, resolveReleaseServiceArtifacts, untouchedTaskDrift, type ArtifactDeployment, type ArtifactRow } from "../src/gitops-artifacts";
 
 function fixture() {
   const task = { name: "init", image: `docker.io/example/init@sha256:${"a".repeat(64)}`, commandArgv: ["configure"], dependsOn: ["database"], advanced: { runToCompletion: true }, environment: {}, volumes: [] };
@@ -87,5 +87,32 @@ describe("retained successful one-shot task attestation", () => {
     if (changed === "entrypoint") actual.entrypoint = ["other"];
     const verify = () => assertRetainedTaskContainer(f.current, "init", { ...f.historic, sourceDeploymentId: "origin" }, actual);
     if (changed === "valid") expect(verify).not.toThrow(); else expect(verify).toThrow();
+  });
+});
+
+describe("untouched task drift before a scoped release deploys", () => {
+  const compose = (over: Record<string, Record<string, unknown>> = {}) => [
+    { name: "redpanda", image: "redpanda@sha256:a", dependsOn: [], commandArgv: ["redpanda", "start"] },
+    { name: "redpanda-init", image: "redpanda@sha256:a", dependsOn: ["redpanda"], commandArgv: ["rpk cluster config set"], advanced: { runToCompletion: true } },
+    { name: "magic-postgres", image: "pg@sha256:p", dependsOn: [] },
+    { name: "migrate", image: "api@sha256:1", dependsOn: ["magic-postgres"], advanced: { runToCompletion: true } },
+    { name: "harvester", image: "harvester@sha256:1", dependsOn: ["magic-postgres"] },
+  ].map(service => ({ ...service, ...over[service.name] }));
+  const tasks = ["migrate", "redpanda-init"];
+  it("names a task whose command moved while the release leaves it untouched", () => {
+    // The exact 2026-10-09 failure: redpanda-init gained topic creation, harvester shipped alone.
+    const target = compose({ "redpanda-init": { commandArgv: ["rpk cluster config set && rpk topic create"] }, harvester: { image: "harvester@sha256:2" } });
+    expect(untouchedTaskDrift({ tasks, selected: ["harvester"], incumbent: compose(), target })).toEqual(["redpanda-init"]);
+    expect(untouchedTaskDrift({ tasks, selected: ["redpanda-init", "harvester"], incumbent: compose(), target })).toEqual([]);
+  });
+  it("follows the task's dependencies and the image it shares with its owner", () => {
+    expect(untouchedTaskDrift({ tasks, selected: ["redpanda"], incumbent: compose(), target: compose({ redpanda: { image: "redpanda@sha256:b" } }) })).toEqual([]);
+    expect(untouchedTaskDrift({ tasks, selected: ["harvester"], incumbent: compose(), target: compose({ redpanda: { image: "redpanda@sha256:b" } }) })).toEqual(["redpanda-init"]);
+    // migrate runs the platform-api image: a release without migrations still moves it.
+    expect(untouchedTaskDrift({ tasks, selected: ["platform-api"], incumbent: compose(), target: compose({ migrate: { image: "api@sha256:2" } }) })).toEqual(["migrate"]);
+  });
+  it("passes unchanged definitions and treats an unknown one as drift", () => {
+    expect(untouchedTaskDrift({ tasks, selected: ["harvester"], incumbent: compose(), target: compose({ harvester: { image: "harvester@sha256:2" } }) })).toEqual([]);
+    expect(untouchedTaskDrift({ tasks, selected: ["harvester"], incumbent: compose().filter(s => s.name !== "migrate"), target: compose() })).toEqual(["migrate"]);
   });
 });
