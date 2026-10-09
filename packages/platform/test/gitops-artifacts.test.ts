@@ -106,8 +106,10 @@ describe("untouched task drift before a scoped release deploys", () => {
     expect(untouchedTaskDrift({ tasks, selected: ["redpanda-init", "harvester"], incumbent: compose(), target })).toEqual([]);
   });
   it("follows the task's dependencies and the image it shares with its owner", () => {
-    expect(untouchedTaskDrift({ tasks, selected: ["redpanda"], incumbent: compose(), target: compose({ redpanda: { image: "redpanda@sha256:b" } }) })).toEqual([]);
-    expect(untouchedTaskDrift({ tasks, selected: ["harvester"], incumbent: compose(), target: compose({ redpanda: { image: "redpanda@sha256:b" } }) })).toEqual(["redpanda-init"]);
+    // A moved dependency moves the task's tree, even when the dependency itself ships.
+    const movedBroker = compose({ redpanda: { image: "redpanda@sha256:b" } });
+    expect(untouchedTaskDrift({ tasks, selected: ["redpanda"], incumbent: compose(), target: movedBroker })).toEqual(["redpanda-init"]);
+    expect(untouchedTaskDrift({ tasks, selected: ["redpanda", "redpanda-init"], incumbent: compose(), target: movedBroker })).toEqual([]);
     // migrate runs the platform-api image: a release without migrations still moves it.
     expect(untouchedTaskDrift({ tasks, selected: ["platform-api"], incumbent: compose(), target: compose({ migrate: { image: "api@sha256:2" } }) })).toEqual(["migrate"]);
   });
