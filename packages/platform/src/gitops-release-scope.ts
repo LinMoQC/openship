@@ -19,7 +19,7 @@ export function productionReleaseScope(services: ScopeService[], deployed: Scope
 }
 
 export interface RecoveryScopeInput {
-  activeStatus: string;
+  active: { status: string; decision: string | null };
   /** Manifest hashes of the active deployment's own commit, the environment branch and the target. */
   activeHash: string | null; deployedHash: string; targetHash: string;
   /** Configuration hashes of the active deployment's own commit and the target. */
@@ -36,10 +36,16 @@ export interface RecoveryScopeInput {
  * only the services whose actual container is missing, unhealthy or on another
  * digest are rebuilt. Completion tasks rerun too: only a ready deployment can
  * prove a task that a scoped deploy leaves untouched, and the partial one never will.
+ * Any newer deployment attempt marks a pending partial_failure cancelled with
+ * decision "superseded" — even one that never touched a container — while the
+ * partial one stays active and its containers keep serving. It is still unfinished.
  * An empty result means there is nothing to recover.
  */
+export function unfinishedDeployment(active: RecoveryScopeInput["active"]): boolean {
+  return active.status === "partial_failure" || (active.status === "cancelled" && active.decision === "superseded");
+}
 export function productionRecoveryScope(input: RecoveryScopeInput): string[] {
-  if (input.activeStatus !== "partial_failure" || input.activeHash !== input.targetHash || input.deployedHash !== input.targetHash || input.activeConfiguration !== input.targetConfiguration) return [];
+  if (!unfinishedDeployment(input.active) || input.activeHash !== input.targetHash || input.deployedHash !== input.targetHash || input.activeConfiguration !== input.targetConfiguration) return [];
   const unconverged = input.unconverged.filter(name => input.expected.includes(name));
   if (!unconverged.length) return [];
   return [...new Set([...unconverged, ...input.tasks.filter(name => input.expected.includes(name))])].sort();

@@ -37,7 +37,7 @@ describe("runtime service scope", () => {
 });
 
 describe("production recovery scope", () => {
-  const base = { activeStatus: "partial_failure", activeHash: "h", deployedHash: "h", targetHash: "h" as string, activeConfiguration: "c", targetConfiguration: "c",
+  const base = { active: { status: "partial_failure", decision: "pending" as string | null }, activeHash: "h", deployedHash: "h", targetHash: "h" as string, activeConfiguration: "c", targetConfiguration: "c",
     expected: ["gateway", "migrate", "nginx", "platform-api", "relay"], unconverged: ["relay", "platform-api", "gateway", "relay"], tasks: [] as string[] };
   it("rebuilds only the unconverged bound services of the unfinished revision", () => {
     expect(productionRecoveryScope(base)).toEqual(["gateway", "platform-api", "relay"]);
@@ -66,7 +66,12 @@ describe("production recovery scope", () => {
     expect(productionRecoveryScope({ ...base, activeConfiguration: "older" })).toEqual([]);
     expect(productionRecoveryScope({ ...base, activeConfiguration: null })).toEqual([]);
   });
-  it("refuses an active deployment that is not a partial failure", () => {
-    expect(productionRecoveryScope({ ...base, activeStatus: "ready" })).toEqual([]);
+  it("still resumes the active partial deployment after a newer attempt superseded its decision", () => {
+    expect(productionRecoveryScope({ ...base, active: { status: "cancelled", decision: "superseded" } })).toEqual(["gateway", "platform-api", "relay"]);
+  });
+  it("refuses an active deployment that is not an unfinished partial failure", () => {
+    expect(productionRecoveryScope({ ...base, active: { status: "ready", decision: null } })).toEqual([]);
+    expect(productionRecoveryScope({ ...base, active: { status: "cancelled", decision: null } })).toEqual([]);
+    expect(productionRecoveryScope({ ...base, active: { status: "failed", decision: "superseded" } })).toEqual([]);
   });
 });

@@ -229,7 +229,7 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
     // Resuming the same unfinished target rebuilds exactly what never converged;
     // every other service must still verify, and nothing else may change.
     const recovery = b.environment === "production" && !rollback && !verification && !selected.length
-      ? productionRecoveryScope({ activeStatus: active.status, activeHash: actualManifest ? manifestHash(actualManifest) : null,
+      ? productionRecoveryScope({ active: { status: active.status, decision: (active.meta as { composeDeployment?: { decision?: string } } | null)?.composeDeployment?.decision ?? null }, activeHash: actualManifest ? manifestHash(actualManifest) : null,
           deployedHash: manifestHash(deployedManifest), targetHash: manifestHash(manifest),
           activeConfiguration: current.deploymentConfigurationHash ?? null, targetConfiguration: configurationHash,
           expected: b.expectedServices, unconverged: Object.keys(actualImages).filter(name => !converged.has(name)),
