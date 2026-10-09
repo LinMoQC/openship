@@ -56,6 +56,9 @@ jobs:
         if: steps.resume.outputs.reused != 'true'
         working-directory: apps/api
         run: bunx tsc --noEmit -p tsconfig.scaling-e2e.json
+      - name: Pull Docker Hub images through a mirror
+        if: steps.resume.outputs.reused != 'true'
+        uses: ./.github/actions/docker-hub-mirror
       - name: Check Docker
         if: steps.resume.outputs.reused != 'true'
         run: docker info
