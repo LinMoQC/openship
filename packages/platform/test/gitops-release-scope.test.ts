@@ -78,23 +78,25 @@ describe("production recovery scope", () => {
 
 describe("PRT recovery of an unaccepted attempt", () => {
   // 2026-10-09: a harvester-only release replaced its container, then acceptance
-  // failed on an untouched task. The run ended action_required, its ready attempt
-  // was never activated and the incumbent no longer described what was running.
-  const base = { run: { stage: "action_required", deploymentId: "dep_attempt" }, attempt: { id: "dep_attempt", status: "ready" }, activeId: "dep_incumbent",
+  // failed on an untouched task. The run ended action_required while its ready
+  // deployment was already active, unaccepted, and kept failing the same proof.
+  const base = { run: { stage: "action_required", deploymentId: "dep_attempt" }, attempt: { id: "dep_attempt", status: "ready" },
     attemptHash: "h", deployedHash: "h", targetHash: "h" as string, attemptConfiguration: "c", targetConfiguration: "c",
     expected: ["gateway", "harvester", "migrate", "redpanda-init"], unconverged: ["harvester"], tasks: ["migrate", "redpanda-init", "legacy-task"] };
   it("rebuilds every service off the target digest plus every bound task", () => {
     expect(unacceptedAttemptRecoveryScope(base)).toEqual(["harvester", "migrate", "redpanda-init"]);
+    // The real case: harvester already runs the target; only the unproven task is off target.
+    expect(unacceptedAttemptRecoveryScope({ ...base, unconverged: ["redpanda-init"] })).toEqual(["migrate", "redpanda-init"]);
     expect(unacceptedAttemptRecoveryScope({ ...base, run: { stage: "failed", deploymentId: "dep_attempt" }, attempt: { id: "dep_attempt", status: "partial_failure" } })).toEqual(["harvester", "migrate", "redpanda-init"]);
   });
   it("leaves a run that is still active or was accepted alone", () => {
     for (const stage of ["deploying", "verifying", "recovering", "accepted", "restored"])
       expect(unacceptedAttemptRecoveryScope({ ...base, run: { stage, deploymentId: "dep_attempt" } })).toEqual([]);
   });
-  it("needs the run's own ready attempt, distinct from the active deployment", () => {
+  it("needs the run's own ready deployment", () => {
     expect(unacceptedAttemptRecoveryScope({ ...base, run: { stage: "action_required", deploymentId: null } })).toEqual([]);
     expect(unacceptedAttemptRecoveryScope({ ...base, attempt: { id: "dep_other", status: "ready" } })).toEqual([]);
-    expect(unacceptedAttemptRecoveryScope({ ...base, activeId: "dep_attempt" })).toEqual([]);
+    expect(unacceptedAttemptRecoveryScope({ ...base, attempt: null })).toEqual([]);
     expect(unacceptedAttemptRecoveryScope({ ...base, attempt: { id: "dep_attempt", status: "failed" } })).toEqual([]);
   });
   it("refuses an attempt of another manifest or configuration", () => {

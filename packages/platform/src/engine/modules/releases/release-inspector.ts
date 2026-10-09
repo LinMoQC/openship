@@ -22,7 +22,7 @@ import { releaseTopologyVerifier } from "./release-topology";
 import { checkReleaseEnvironment, type ReleaseEnvironmentGroup } from "../../../gitops-environment";
 import { inspectBoundHostConfiguration } from "../../../gitops-host-configuration";
 import { assertRetainedTaskContainer, untouchedTaskDrift } from "../../../gitops-artifacts";
-import { releaseServiceArtifacts } from "./release-artifacts";
+import { observedServiceArtifacts } from "./release-artifacts";
 
 interface Image { image: string; digest: string; gitSha?: string; migrationsChanged?: boolean; tag?: string; }
 interface Manifest { schemaVersion: 2; stack: string; releaseId: string; services: Record<string, Image>; infrastructure?: Record<string, Image>; ossGitSha?: string; migrationEpoch?: string; [key: string]: unknown; }
@@ -186,7 +186,7 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
     }
     const savedRows = await repos.service.listByDeployment(active.id);
     const actualImages = { ...actualManifest?.services, ...actualManifest?.infrastructure };
-    const deployedRows = await releaseServiceArtifacts(active, rows, savedRows, Object.keys(actualImages));
+    const { rows: deployedRows, unproven } = await observedServiceArtifacts(active, rows, savedRows, Object.keys(actualImages));
     // Missing target variables block the target, not observation of the
     // incumbent's own immutable Compose document and actual containers.
     const targetTopology = parsed.missingRequired.length ? null : await releaseTopologyVerifier(ctx, b, active, parsed, deployedRows);
@@ -197,7 +197,7 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
     const converged = new Set<string>(), convergedToTarget = new Set<string>();
     for (const [name, expected] of Object.entries(actualImages)) {
       const service = rows.find(s => s.name === name), row = deployedRows.find(s => s.serviceId === service?.id);
-      if (!row?.containerId) { verified = false; check(`runtime.${name}`, `${name} 实际容器`, "unknown", "未取得准确容器 ID"); continue; }
+      if (!row?.containerId) { verified = false; check(`runtime.${name}`, `${name} 实际容器`, "unknown", unproven.includes(name) ? "一次性任务的来源无法证明：其定义已不同于最近一次成功执行" : "未取得准确容器 ID"); continue; }
       try {
         const actual = await runtime.inspectReleaseContainer(row.containerId, expected.image);
         assertRetainedTaskContainer(active, name, row, actual);
@@ -246,7 +246,7 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
       const attemptStack = owned ? (YAML.parse(await githubFile(ctx, b, "platform.yaml", attempt.commitSha!)) as { stacks: Stack[] }).stacks?.find(s => s.name === b.stack) : undefined;
       const scope = unacceptedAttemptRecoveryScope({
         run: latest ? { stage: latest.stage, deploymentId: latest.deploymentId } : null,
-        attempt: owned ? { id: attempt.id, status: attempt.status } : null, activeId: active.id,
+        attempt: owned ? { id: attempt.id, status: attempt.status } : null,
         attemptHash: attemptManifest ? manifestHash(attemptManifest) : null, deployedHash: manifestHash(deployedManifest), targetHash: manifestHash(manifest),
         attemptConfiguration: attemptTemplate && attemptStack ? gitopsConfigurationHash(attemptTemplate, attemptStack) : null, targetConfiguration: configurationHash,
         expected: b.expectedServices, unconverged: Object.keys(images).filter(name => !convergedToTarget.has(name)),
