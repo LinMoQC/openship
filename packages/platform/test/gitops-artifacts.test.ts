@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { assertRetainedTaskContainer, resolveReleaseServiceArtifacts, untouchedTaskDrift, type ArtifactDeployment, type ArtifactRow } from "../src/gitops-artifacts";
+import { assertRetainedTaskContainer, resolveObservedServiceArtifacts, resolveReleaseServiceArtifacts, untouchedTaskDrift, type ArtifactDeployment, type ArtifactRow } from "../src/gitops-artifacts";
 
 function fixture() {
   const task = { name: "init", image: `docker.io/example/init@sha256:${"a".repeat(64)}`, commandArgv: ["configure"], dependsOn: ["database"], advanced: { runToCompletion: true }, environment: {}, volumes: [] };
@@ -116,5 +116,26 @@ describe("untouched task drift before a scoped release deploys", () => {
   it("passes unchanged definitions and treats an unknown one as drift", () => {
     expect(untouchedTaskDrift({ tasks, selected: ["harvester"], incumbent: compose(), target: compose({ harvester: { image: "harvester@sha256:2" } }) })).toEqual([]);
     expect(untouchedTaskDrift({ tasks, selected: ["harvester"], incumbent: compose().filter(s => s.name !== "migrate"), target: compose() })).toEqual(["migrate"]);
+  });
+});
+
+describe("observing an active deployment with an unprovable task", () => {
+  it("names the unprovable task and keeps resolving the rest instead of failing the whole inspection", async () => {
+    // 2026-10-09: the active PRT deployment's redpanda-init had a new command and
+    // no proven run, so the whole inspection threw and no recovery could be planned.
+    const f = fixture();
+    f.current.meta = { ...f.current.meta!, composeServices: [{ ...f.task, commandArgv: ["configure", "--topics"] }, f.database] };
+    const appRow: ArtifactRow = { ...f.rows[0]!, serviceId: "app", serviceName: "app", containerId: "app-container", status: "success" };
+    await expect(resolveReleaseServiceArtifacts(f.current, f.services, [...f.rows, appRow], ["init", "app"], f.reader)).rejects.toThrow();
+    const observed = await resolveObservedServiceArtifacts(f.current, f.services, [...f.rows, appRow], ["init", "app"], f.reader);
+    expect(observed.unproven).toEqual(["init"]);
+    expect(observed.rows.find(row => row.serviceId === "init")!.containerId).toBeNull();
+    expect(observed.rows.find(row => row.serviceId === "app")!.containerId).toBe("app-container");
+  });
+  it("resolves exactly like acceptance when every task is proven", async () => {
+    const f = fixture();
+    const observed = await resolveObservedServiceArtifacts(f.current, f.services, f.rows, ["init"], f.reader);
+    expect(observed.unproven).toEqual([]);
+    expect(observed.rows[0]).toMatchObject({ containerId: "original-container", sourceDeploymentId: "origin" });
   });
 });

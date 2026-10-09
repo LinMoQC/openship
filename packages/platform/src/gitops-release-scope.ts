@@ -54,8 +54,8 @@ export function productionRecoveryScope(input: RecoveryScopeInput): string[] {
 export interface UnacceptedAttemptInput {
   /** The binding's latest release run and the deployment it started. */
   run: { stage: string; deploymentId: string | null } | null;
+  /** The run's deployment. A ready GitOps deployment is activated before acceptance, so it is usually the active one. */
   attempt: { id: string; status: string } | null;
-  activeId: string;
   /** Manifest hashes of the attempt's own commit, the environment branch and the target. */
   attemptHash: string | null; deployedHash: string; targetHash: string;
   attemptConfiguration: string | null; targetConfiguration: string;
@@ -65,16 +65,16 @@ export interface UnacceptedAttemptInput {
 
 /**
  * The PRT twin of the production recovery. A release can replace containers and
- * still fail acceptance; the run then ends terminal and its ready attempt is
- * never activated, so the incumbent's record no longer describes what runs and
- * nothing can be planned. Only an attempt of exactly this manifest and
+ * still fail acceptance; the run then ends terminal while its ready deployment
+ * is already active, unaccepted, and keeps failing the same proof, so nothing
+ * can be planned. Only an attempt of exactly this manifest and
  * configuration may be resumed, rebuilding every service not on the target
  * digest plus every completion task so the new acceptance proves the whole stack.
  */
 export function unacceptedAttemptRecoveryScope(input: UnacceptedAttemptInput): string[] {
   const { run, attempt } = input;
   if (!run || !["action_required", "failed"].includes(run.stage) || !run.deploymentId || !attempt || attempt.id !== run.deploymentId ||
-      attempt.id === input.activeId || !["ready", "partial_failure"].includes(attempt.status)) return [];
+      !["ready", "partial_failure"].includes(attempt.status)) return [];
   if (input.attemptHash !== input.targetHash || input.deployedHash !== input.targetHash || input.attemptConfiguration !== input.targetConfiguration) return [];
   const unconverged = input.unconverged.filter(name => input.expected.includes(name));
   if (!unconverged.length) return [];

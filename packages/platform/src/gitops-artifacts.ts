@@ -110,6 +110,22 @@ export async function resolveReleaseServiceArtifacts(deployment: ArtifactDeploym
   return resolved;
 }
 
+/**
+ * Observation must survive one unprovable task: resolve each service alone and
+ * name the ones whose completion cannot be proven, so an inspection can still
+ * describe the runtime and plan a recovery instead of failing as a whole.
+ * Acceptance keeps the all-or-nothing resolveReleaseServiceArtifacts.
+ */
+export async function resolveObservedServiceArtifacts(deployment: ArtifactDeployment, services: ArtifactService[], rows: ArtifactRow[], names: string[], reader: ReleaseArtifactReader) {
+  let resolved: ReleaseServiceArtifact[] = rows;
+  const unproven: string[] = [];
+  for (const name of names) {
+    try { resolved = await resolveReleaseServiceArtifacts(deployment, services, resolved, [name], reader); }
+    catch { unproven.push(name); }
+  }
+  return { rows: resolved, unproven };
+}
+
 export function assertRetainedTaskContainer(deployment: ArtifactDeployment, name: string, artifact: ReleaseServiceArtifact, actual: {
   deploymentId: string | null; serviceName: string | null; projectId: string | null; running: boolean; exitCode: number; command: string[] | null; entrypoint: string | string[] | null;
 }) {
