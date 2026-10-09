@@ -7,7 +7,7 @@ import type { ReleaseBinding, ReleaseCheck, ReleaseImage, ReleasePlanInput, Rele
 import type { ExecutionContext } from "../../../context";
 import { manifestHash, releaseHash } from "../../../releases";
 import { gitopsConfigurationHash, observedGitopsConfigurationHash, renderGitopsCompose, selectedImageExpectations } from "../../../gitops-compose";
-import { productionReleaseScope, runtimeScopeCheck } from "../../../gitops-release-scope";
+import { productionRecoveryScope, productionReleaseScope, runtimeScopeCheck } from "../../../gitops-release-scope";
 import { githubBlob, githubFile, githubRead } from "./release-github";
 import { resolveDeploymentRuntimeForRead, disposeRuntime } from "../../lib/deployment-runtime";
 import { parseComposeFile, blockingComposeFields } from "../../lib/compose-parser";
@@ -194,6 +194,7 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
     try { topology = await releaseTopologyVerifier(ctx, b, active, undefined, deployedRows); }
     catch { check("runtime.topology", "准确部署拓扑", "unknown", "已部署配置、端口、网络或卷归属无法确认"); }
     let verified = true;
+    const converged = new Set<string>();
     for (const [name, expected] of Object.entries(actualImages)) {
       const service = rows.find(s => s.name === name), row = deployedRows.find(s => s.serviceId === service?.id);
       if (!row?.containerId) { verified = false; check(`runtime.${name}`, `${name} 实际容器`, "unknown", "未取得准确容器 ID"); continue; }
@@ -210,6 +211,7 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
         const healthy = task ? actual.exitCode === 0 && !actual.running : actual.running && (actual.health === null || actual.health === "healthy");
         current.images[name] = { image: actual.image, digest: actual.digest, gitSha: actual.digest === expected.digest ? expected.gitSha ?? null : null };
         check(`runtime.${name}`, `${name} 实际容器`, healthy ? "pass" : "fail", healthy ? "运行状态已确认" : "容器停止、不健康或任务未成功完成");
+        if (healthy && actual.digest === expected.digest) converged.add(name);
       } catch { verified = false; check(`runtime.${name}`, `${name} 实际容器`, "unknown", "主机或镜像摘要无法确认"); }
     }
     current.verified = verified && actualManifest !== null;
@@ -224,7 +226,25 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
       targetTemplate: template, targetStack: stack, imageServices: Object.keys(actualImages), checks,
     }) : null;
     current.ossGitSha = actualManifest && releaseHash(current.images) === releaseHash(Object.fromEntries(Object.entries({ ...actualManifest.services, ...actualManifest.infrastructure }).map(([name, i]) => [name, { image: i.image, digest: i.digest, gitSha: i.gitSha ?? null }]))) ? actualManifest.ossGitSha ?? null : null;
-    check("runtime.manifest", "运行镜像与已部署清单", verified ? (Object.entries(current.images).every(([name, i]) => i.digest === (deployedManifest.services[name] ?? deployedManifest.infrastructure?.[name])?.digest) ? "pass" : "fail") : "unknown", "实际摘要与当前环境清单逐项比对");
+    // Resuming the same unfinished target rebuilds exactly what never converged;
+    // every other service must still verify, and nothing else may change.
+    const recovery = b.environment === "production" && !rollback && !verification && !selected.length
+      ? productionRecoveryScope({ active: { status: active.status, decision: (active.meta as { composeDeployment?: { decision?: string } } | null)?.composeDeployment?.decision ?? null }, activeHash: actualManifest ? manifestHash(actualManifest) : null,
+          deployedHash: manifestHash(deployedManifest), targetHash: manifestHash(manifest),
+          activeConfiguration: current.deploymentConfigurationHash ?? null, targetConfiguration: configurationHash,
+          expected: b.expectedServices, unconverged: Object.keys(actualImages).filter(name => !converged.has(name)),
+          tasks: rows.filter(s => s.advanced?.runToCompletion === true).map(s => s.name) })
+      : [];
+    if (recovery.length) {
+      selected = recovery;
+      target.services = recovery;
+      target.recovery = { deploymentId: active.id, services: recovery };
+      Object.assign(images, selectedImageExpectations(images, parsed.services, recovery));
+      for (const item of checks) if (recovery.some(name => item.key === `runtime.${name}`)) { item.blocking = false; item.detail += "；恢复发布将重建此服务"; }
+      check("recovery.scope", "未完成部署恢复", "pass", `继续部分失败的部署 ${active.id}，只重建未收敛的 ${recovery.join("、")}`);
+    }
+    const retained = recovery.length ? Object.keys(actualImages).filter(name => !recovery.includes(name)) : null;
+    check("runtime.manifest", "运行镜像与已部署清单", retained ? (retained.every(name => converged.has(name)) ? "pass" : "fail") : verified ? (Object.entries(current.images).every(([name, i]) => i.digest === (deployedManifest.services[name] ?? deployedManifest.infrastructure?.[name])?.digest) ? "pass" : "fail") : "unknown", "实际摘要与当前环境清单逐项比对");
     if (b.stack === "magic-core" && target.services.includes("platform-api")) {
       const image = manifest.services["platform-api"]!;
       const database = deployedRows.find(row => row.serviceId === rows.find(s => s.name === "magic-postgres")?.id);

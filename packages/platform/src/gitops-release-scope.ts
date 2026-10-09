@@ -18,6 +18,39 @@ export function productionReleaseScope(services: ScopeService[], deployed: Scope
   return [...new Set([...application, ...infrastructure])].sort();
 }
 
+export interface RecoveryScopeInput {
+  active: { status: string; decision: string | null };
+  /** Manifest hashes of the active deployment's own commit, the environment branch and the target. */
+  activeHash: string | null; deployedHash: string; targetHash: string;
+  /** Configuration hashes of the active deployment's own commit and the target. */
+  activeConfiguration: string | null; targetConfiguration: string;
+  expected: string[]; unconverged: string[]; tasks: string[];
+}
+
+/**
+ * A production release whose target is already the desired revision can still
+ * be unfinished: a partial_failure left some services on old containers or
+ * crash-looping. Only a deployment that attempted exactly this manifest and
+ * configuration may be resumed — compared by content, because a later failed
+ * attempt can append an identical lock commit to the environment branch — and
+ * only the services whose actual container is missing, unhealthy or on another
+ * digest are rebuilt. Completion tasks rerun too: only a ready deployment can
+ * prove a task that a scoped deploy leaves untouched, and the partial one never will.
+ * Any newer deployment attempt marks a pending partial_failure cancelled with
+ * decision "superseded" — even one that never touched a container — while the
+ * partial one stays active and its containers keep serving. It is still unfinished.
+ * An empty result means there is nothing to recover.
+ */
+export function unfinishedDeployment(active: RecoveryScopeInput["active"]): boolean {
+  return active.status === "partial_failure" || (active.status === "cancelled" && active.decision === "superseded");
+}
+export function productionRecoveryScope(input: RecoveryScopeInput): string[] {
+  if (!unfinishedDeployment(input.active) || input.activeHash !== input.targetHash || input.deployedHash !== input.targetHash || input.activeConfiguration !== input.targetConfiguration) return [];
+  const unconverged = input.unconverged.filter(name => input.expected.includes(name));
+  if (!unconverged.length) return [];
+  return [...new Set([...unconverged, ...input.tasks.filter(name => input.expected.includes(name))])].sort();
+}
+
 /**
  * Platform service rows must equal the bound set, except that a release may add
  * services the bound set declares when every one of them is in its own scope:

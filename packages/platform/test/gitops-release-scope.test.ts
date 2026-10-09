@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { productionReleaseScope, runtimeScopeCheck } from "../src/gitops-release-scope";
+import { productionRecoveryScope, productionReleaseScope, runtimeScopeCheck } from "../src/gitops-release-scope";
 
 const services = [
   { name: "platform-api", deployServices: ["platform-api"], deployServicesWithMigration: ["migrate", "platform-api"] },
@@ -33,5 +33,45 @@ describe("runtime service scope", () => {
   });
   it("blocks a row outside the bound set", () => {
     expect(runtimeScopeCheck([...expected, "legacy"], expected, expected).status).toBe("fail");
+  });
+});
+
+describe("production recovery scope", () => {
+  const base = { active: { status: "partial_failure", decision: "pending" as string | null }, activeHash: "h", deployedHash: "h", targetHash: "h" as string, activeConfiguration: "c", targetConfiguration: "c",
+    expected: ["gateway", "migrate", "nginx", "platform-api", "relay"], unconverged: ["relay", "platform-api", "gateway", "relay"], tasks: [] as string[] };
+  it("rebuilds only the unconverged bound services of the unfinished revision", () => {
+    expect(productionRecoveryScope(base)).toEqual(["gateway", "platform-api", "relay"]);
+  });
+  it("reruns bound completion tasks, whose proof the partial deployment cannot provide", () => {
+    expect(productionRecoveryScope({ ...base, tasks: ["migrate", "legacy-task"] })).toEqual(["gateway", "migrate", "platform-api", "relay"]);
+  });
+  it("is empty when everything converged, even with tasks", () => {
+    expect(productionRecoveryScope({ ...base, unconverged: [], tasks: ["migrate"] })).toEqual([]);
+  });
+  it("ignores names outside the bound set", () => {
+    expect(productionRecoveryScope({ ...base, unconverged: ["legacy", "nginx"] })).toEqual(["nginx"]);
+  });
+  it("still resumes when a later failed attempt appended an identical lock commit", () => {
+    // Only content is compared: the branch head may be another commit with the same manifest and configuration.
+    expect(productionRecoveryScope(base)).toEqual(["gateway", "platform-api", "relay"]);
+  });
+  it("refuses a target that differs from the deployed manifest", () => {
+    expect(productionRecoveryScope({ ...base, targetHash: "other" })).toEqual([]);
+  });
+  it("refuses a partial failure that attempted another manifest", () => {
+    expect(productionRecoveryScope({ ...base, activeHash: "older" })).toEqual([]);
+    expect(productionRecoveryScope({ ...base, activeHash: null })).toEqual([]);
+  });
+  it("refuses a partial failure that attempted another configuration", () => {
+    expect(productionRecoveryScope({ ...base, activeConfiguration: "older" })).toEqual([]);
+    expect(productionRecoveryScope({ ...base, activeConfiguration: null })).toEqual([]);
+  });
+  it("still resumes the active partial deployment after a newer attempt superseded its decision", () => {
+    expect(productionRecoveryScope({ ...base, active: { status: "cancelled", decision: "superseded" } })).toEqual(["gateway", "platform-api", "relay"]);
+  });
+  it("refuses an active deployment that is not an unfinished partial failure", () => {
+    expect(productionRecoveryScope({ ...base, active: { status: "ready", decision: null } })).toEqual([]);
+    expect(productionRecoveryScope({ ...base, active: { status: "cancelled", decision: null } })).toEqual([]);
+    expect(productionRecoveryScope({ ...base, active: { status: "failed", decision: "superseded" } })).toEqual([]);
   });
 });
