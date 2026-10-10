@@ -51,6 +51,18 @@ describe("release admission and cutover ownership in real SQL", () => {
     expect((await repos.deployment.create(input))!.id).toBe(first!.id);
     await expect(repos.deployment.create({ ...input, commitSha: "b".repeat(40) })).rejects.toThrow("RELEASE_DEPLOYMENT_CONFLICT");
   });
+  it("the latest started run skips a later run that failed before deploying", async () => {
+    const f = await fixture(); await repos.releases.reserve(f.run, f.now);
+    const attempt = await repos.deployment.create({ projectId: f.project.id, organizationId: "org", branch: "deploy/prt", environment: "preview", commitSha: "a".repeat(40), meta: { releaseRunId: f.run.id }, status: "queued" });
+    await repos.releases.updateRun(f.run.id, { stage: "action_required" });
+    const retry = await repos.releases.createPlan({ ...f.plan, id: `${f.plan.id}-retry`, consumedAt: null });
+    await repos.releases.reserve({ ...f.run, id: `${f.run.id}-retry`, planId: retry.id, idempotencyKey: `retry_${sequence}_123456789` }, new Date(+f.now + 1000));
+    await repos.releases.updateRun(`${f.run.id}-retry`, { stage: "failed" });
+    expect((await repos.releases.latest(f.project.id))!.id).toBe(`${f.run.id}-retry`);
+    const started = await repos.releases.latestStarted(f.project.id);
+    expect(started!.id).toBe(f.run.id);
+    expect(started!.deploymentId).toBe(attempt!.id);
+  });
   it("a foreign journal ID cannot overwrite an existing service cutover", async () => {
     const f = await fixture();
     const record = { id: "journal-a", projectId: f.project.id, deploymentId: "dep-test", serviceName: "web", stage: "prepared", imageId: "sha256:old", incumbentId: "old-container", context: {} };

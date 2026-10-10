@@ -1,4 +1,4 @@
-import { desc, and, eq, inArray, sql } from "drizzle-orm";
+import { desc, and, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import type { Database } from "../client";
 import { releaseBinding, releasePlan, releaseRun, serviceCutoverJournal } from "../schema";
 const active = ["checking", "submitted", "dispatch_unknown", "queued", "syncing", "pulling", "deploying", "health", "verifying", "recovering"];
@@ -25,6 +25,7 @@ export function createReleasesRepo(db: Database) {
     plan: (id: string) => db.query.releasePlan.findFirst({ where: eq(releasePlan.id, id) }),
     async createPlan(input: typeof releasePlan.$inferInsert) { return (await db.insert(releasePlan).values(input).returning())[0]!; },
     latest: (projectId: string) => db.query.releaseRun.findFirst({ where: eq(releaseRun.projectId, projectId), orderBy: desc(releaseRun.createdAt) }),
+    latestStarted: (projectId: string) => db.query.releaseRun.findFirst({ where: and(eq(releaseRun.projectId, projectId), isNotNull(releaseRun.deploymentId)), orderBy: desc(releaseRun.createdAt) }),
     run: (id: string) => db.query.releaseRun.findFirst({ where: eq(releaseRun.id, id) }),
     runByKey: (projectId: string, key: string) => db.query.releaseRun.findFirst({ where: and(eq(releaseRun.projectId, projectId), eq(releaseRun.idempotencyKey, key)) }),
     active: (projectId: string) => db.query.releaseRun.findFirst({ where: and(eq(releaseRun.projectId, projectId), inArray(releaseRun.stage, active)) }),

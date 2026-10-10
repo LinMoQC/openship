@@ -14,6 +14,7 @@ function setup() {
     plan: async id => plans.get(id) ?? null, createPlan: async p => { plans.set(p.id, p); }, run: async id => runs.get(id) ?? null,
     byKey: async (p, key) => [...runs.values()].find(r => r.projectId === p && r.idempotencyKey === key) ?? null,
     latest: async () => [...runs.values()].at(-1) ?? null,
+    latestStarted: async () => [...runs.values()].filter(r => r.deploymentId).at(-1) ?? null,
     active: async () => [...runs.values()].find(r => r.stage === "submitted") ?? null,
     reserve: async r => { const same = [...runs.values()].find(x => x.idempotencyKey === r.idempotencyKey); if (same) return { run: same, created: false }; runs.set(r.id, r); plans.get(r.planId)!.consumedAt = now.toISOString(); return { run: r, created: true }; },
     updateRun: async (id, patch, expected) => { const row = runs.get(id); if (!row || (expected && row.stage !== expected)) return null; const next = { ...row, ...patch }; runs.set(id, next); return next; }, invalidate: vi.fn(async () => {}),
