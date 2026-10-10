@@ -218,6 +218,10 @@ jobs:
         if: steps.resume.outputs.reused != 'true'
         run: bun install --frozen-lockfile
 
+      - name: Pull Docker Hub images through a mirror
+        if: steps.resume.outputs.reused != 'true'
+        uses: ./.github/actions/docker-hub-mirror
+
       # Fail here rather than inside vitest, so "the runner lost Docker" is
       # distinguishable at a glance from "a rollback assertion broke".
       - name: Check the Docker daemon
