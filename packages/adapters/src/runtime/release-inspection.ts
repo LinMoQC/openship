@@ -12,6 +12,21 @@ export function canonicalRegistryImage(image: string) {
   const dockerHub = ["docker.io", "index.docker.io", "registry-1.docker.io"].includes(host);
   return { host: dockerHub ? "registry-1.docker.io" : host, repository, canonical: `${dockerHub ? "docker.io" : host}/${repository}`, dockerHub };
 }
+/**
+ * A digest the host already stores is deployed without a pull, so registry existence
+ * and pull permission cannot gate it. Repeating the remote check on every inspection
+ * only spends Docker Hub's anonymous quota until real releases are blocked.
+ */
+export function localReleaseImage(ref: string, architecture: string, image: { RepoDigests?: string[]; Os?: string; Architecture?: string } | null) {
+  const match = /^(.+)@(sha256:[a-f0-9]{64})$/.exec(ref);
+  if (!match || !image) return false;
+  const wanted = `${canonicalRegistryImage(match[1]!).canonical}@${match[2]}`;
+  const arch = architecture === "x86_64" ? "amd64" : architecture === "aarch64" ? "arm64" : architecture;
+  return image.Os === "linux" && image.Architecture === arch && (image.RepoDigests ?? []).some(d => {
+    const [name, digest] = d.split("@");
+    try { return !!name && `${canonicalRegistryImage(name).canonical}@${digest}` === wanted; } catch { return false; }
+  });
+}
 /** Read-only verification; neither credentials nor registry response bodies cross this boundary. */
 export async function inspectRegistryImage(ref: string, architecture: string, auth: Dockerode.AuthConfig | undefined, fetchImpl: typeof fetch = fetch) {
   const match = /^(.+)@(sha256:[a-f0-9]{64})$/.exec(ref);

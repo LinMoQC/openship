@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { canonicalRegistryImage, inspectRegistryImage } from "./release-inspection";
+import { canonicalRegistryImage, inspectRegistryImage, localReleaseImage } from "./release-inspection";
 const child = `sha256:${"a".repeat(64)}`;
 const body = JSON.stringify({ manifests: [{ digest: child, platform: { os: "linux", architecture: "amd64" } }] });
 const digest = `sha256:${createHash("sha256").update(body).digest("hex")}`;
@@ -80,5 +80,16 @@ describe("registry release attestation", () => {
       .mockResolvedValueOnce(new Response(null, { status: 307, headers: { location: "https://pkg-containers.githubusercontent.com/config" } }));
     await expect(inspectRegistryImage(`registry.example/magic/app@${singleDigest}`, "amd64", undefined, f)).rejects.toThrow("Untrusted");
     expect(f).toHaveBeenCalledTimes(2);
+  });
+  it("accepts a locally stored digest without a registry request, and only that exact digest", () => {
+    const ref = `pgvector/pgvector@${digest}`;
+    const stored = { Os: "linux", Architecture: "amd64", RepoDigests: [`pgvector/pgvector@${digest}`] };
+    expect(localReleaseImage(ref, "x86_64", stored)).toBe(true);
+    expect(localReleaseImage(`docker.io/library/redis@${digest}`, "x86_64", { ...stored, RepoDigests: [`redis@${digest}`] })).toBe(true);
+    expect(localReleaseImage(ref, "x86_64", { ...stored, RepoDigests: [`pgvector/pgvector@${configDigest}`] })).toBe(false);
+    expect(localReleaseImage(ref, "x86_64", { ...stored, RepoDigests: [`other/pgvector@${digest}`] })).toBe(false);
+    expect(localReleaseImage(ref, "aarch64", stored)).toBe(false);
+    expect(localReleaseImage(ref, "x86_64", null)).toBe(false);
+    expect(localReleaseImage("pgvector/pgvector:latest", "x86_64", stored)).toBe(false);
   });
 });
