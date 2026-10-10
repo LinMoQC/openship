@@ -238,7 +238,9 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
       : [];
     let recoveryDeploymentId = active.id, recoveryLabel = "部分失败的部署";
     if (!recovery.length && b.environment === "preview" && !rollback && !verification && !selected.length) {
-      const latest = await releaseStore.latest(b.projectId);
+      // A later run that failed before deploying (preflight, plan mismatch) changed no
+      // containers, so it must not hide the unaccepted attempt that is still active.
+      const latest = await releaseStore.latestStarted(b.projectId);
       const attempt = latest?.deploymentId ? await repos.deployment.findById(latest.deploymentId) : null;
       const owned = attempt && attempt.projectId === b.projectId && attempt.organizationId === b.organizationId && attempt.environment === b.environment && attempt.commitSha;
       const attemptManifest = owned ? YAML.parse(await githubFile(ctx, b, b.manifestPath, attempt.commitSha!)) : null;

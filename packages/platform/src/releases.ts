@@ -50,6 +50,8 @@ export interface ReleaseStore {
   run(id: string): Promise<ReleaseRun | null>;
   byKey(projectId: string, key: string): Promise<ReleaseRun | null>;
   latest(projectId: string): Promise<ReleaseRun | null>;
+  /** The newest run that started a deployment; runs that failed before deploying changed no containers. */
+  latestStarted(projectId: string): Promise<ReleaseRun | null>;
   active(projectId: string): Promise<ReleaseRun | null>;
   reserve(run: ReleaseRun, now: Date): Promise<{ run: ReleaseRun; created: boolean }>;
   updateRun(id: string, patch: Partial<ReleaseRun>, expectedStage?: string): Promise<ReleaseRun | null>;

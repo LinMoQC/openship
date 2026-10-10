@@ -21,6 +21,7 @@ export const releaseStore: ReleaseStore = {
   async plan(id) { const row = await repos.releases.plan(id); return row ? plan(row) : null; },
   async createPlan(p) { await repos.releases.createPlan({ id: p.id, projectId: p.projectId, organizationId: p.organizationId, bindingRevision: p.bindingRevision, snapshot: json({ current: p.current, target: p.target, checks: p.checks }), summaryHash: p.summaryHash, expiresAt: new Date(p.expiresAt), createdAt: new Date(p.createdAt) }); },
   async latest(id) { const row = await repos.releases.latest(id); return row ? run(row) : null; },
+  async latestStarted(id) { const row = await repos.releases.latestStarted(id); return row ? run(row) : null; },
   async run(id) { const row = await repos.releases.run(id); return row ? run(row) : null; },
   async byKey(id, key) { const row = await repos.releases.runByKey(id, key); return row ? run(row) : null; },
   async active(id) { const row = await repos.releases.active(id); return row ? run(row) : null; },
