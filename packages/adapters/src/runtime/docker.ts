@@ -1,4 +1,4 @@
-import { inspectRegistryImage, inspectContainerImage } from "./release-inspection";
+import { inspectRegistryImage, inspectContainerImage, localReleaseImage } from "./release-inspection";
 import { inspectHostConfiguration } from "./host-config-inspection";
 import { createHostExecutor } from "../system/executor";
 /**
@@ -4574,6 +4574,8 @@ export class DockerRuntime implements RuntimeAdapter {
 
   async inspectReleaseImage(ref: string) {
     const host = await this.docker.info();
+    const local = await this.docker.getImage(ref).inspect().catch(() => null);
+    if (localReleaseImage(ref, host.Architecture, local)) return { digest: ref.split("@")[1]!, architecture: local!.Architecture };
     const auth = this.connectionOptions?.resolveRegistryAuth ? await this.connectionOptions.resolveRegistryAuth(ref) : await resolveDockerAuth(ref);
     return inspectRegistryImage(ref, host.Architecture, auth);
   }
