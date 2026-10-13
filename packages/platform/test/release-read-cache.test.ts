@@ -24,6 +24,19 @@ describe("immutable release reads", () => {
     await githubRead(ctx, b, "commits/main"); await githubRead(ctx, b, "commits/main");
     expect(mocks.fetch).toHaveBeenCalledTimes(4);
   });
+  it.each([`git/commits/${sha}`, `git/trees/${sha}?recursive=1`])("coalesces fixed source metadata %s", async path => {
+    mocks.fetch.mockResolvedValue({ sha });
+    await Promise.all(Array.from({ length: 5 }, () => githubRead(ctx, b, path)));
+    await githubRead(ctx, b, path);
+    expect(mocks.fetch).toHaveBeenCalledOnce();
+  });
+  it("reads mutable commit and tree refs live", async () => {
+    mocks.fetch.mockResolvedValue({ sha });
+    for (const path of ["git/commits/main", "git/trees/main?recursive=1"]) {
+      await githubRead(ctx, b, path); await githubRead(ctx, b, path);
+    }
+    expect(mocks.fetch).toHaveBeenCalledTimes(4);
+  });
   it("isolates another user, organization, and controller token", async () => {
     mocks.fetch.mockResolvedValue({ result: "safe" });
     const path = `contents/scope?ref=${sha}`;

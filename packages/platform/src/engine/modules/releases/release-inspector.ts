@@ -9,6 +9,7 @@ import { manifestHash, releaseHash } from "../../../releases";
 import { gitopsConfigurationHash, observedGitopsConfigurationHash, renderGitopsCompose, selectedImageExpectations } from "../../../gitops-compose";
 import { productionRecoveryScope, productionReleaseScope, runtimeScopeCheck, unacceptedAttemptRecoveryScope } from "../../../gitops-release-scope";
 import { githubBlob, githubFile, githubRead } from "./release-github";
+import { verifiedSourceComparison } from "../../../gitops-source-comparison";
 import { resolveDeploymentRuntimeForRead, disposeRuntime } from "../../lib/deployment-runtime";
 import { parseComposeFile, blockingComposeFields } from "../../lib/compose-parser";
 import { migrationInputsChanged, migrationEvidenceMatches } from "../../../gitops-migrations";
@@ -127,8 +128,7 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
         fail("Invalid release event provenance");
       }
       const before = manifest.services[name]!;
-      const compare = await githubRead<{ status: string; total_commits: number; files?: Array<{ filename: string }> }>(ctx, { ...b, repository: stack.repository }, `compare/${before.gitSha}...${p.gitSha}`);
-      if (!["ahead", "identical"].includes(compare.status) || compare.total_commits >= 250 || (compare.files?.length ?? 0) >= 300) fail("Source ancestry or complete change scope cannot be verified");
+      const compare = await verifiedSourceComparison(path => githubRead(ctx, { ...b, repository: stack.repository }, path), before.gitSha!, String(p.gitSha));
       if (compare.status === "identical" && before.digest !== p.digest && (b.stack !== "commercial-web" || manifest.ossGitSha === p.ossGitSha)) fail("Identical source produced a different digest");
       const migrationsChanged = p.migrationsChanged === true || (name === "platform-api" && migrationInputsChanged(compare.files ?? []));
       if (migrationsChanged && name !== "platform-api") fail("Only the migration-owning service can change database migrations");
