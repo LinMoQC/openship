@@ -22,7 +22,8 @@ export async function githubRead<T>(ctx: ExecutionContext, b: ReleaseBinding, pa
   const [owner, repo] = b.repository.split("/");
   const blob = /^git\/blobs\/([a-f0-9]{40})$/.exec(path);
   const ref = new URL(`https://api.github.com/${path}`).searchParams.get("ref");
-  const immutable = !!blob || (path.startsWith("contents/") && /^[a-f0-9]{40}$/.test(ref ?? ""));
+  const immutable = !!blob || /^git\/(?:commits|trees)\/[a-f0-9]{40}(?:\?recursive=1)?$/.test(path)
+    || (path.startsWith("contents/") && /^[a-f0-9]{40}$/.test(ref ?? ""));
   // Ref heads are always read live. Only immutable Git identities may reuse content.
   const key = JSON.stringify([ctx.organizationId, ctx.userId, ctx.source, ctx.tokenScope?.tokenId, b.repository, path]);
   const load = async () => {
