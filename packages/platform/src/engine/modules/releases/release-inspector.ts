@@ -7,7 +7,7 @@ import type { ReleaseBinding, ReleaseCheck, ReleaseImage, ReleasePlanInput, Rele
 import type { ExecutionContext } from "../../../context";
 import { manifestHash, releaseHash } from "../../../releases";
 import { gitopsConfigurationHash, observedGitopsConfigurationHash, renderGitopsCompose, selectedImageExpectations } from "../../../gitops-compose";
-import { productionRecoveryScope, productionReleaseScope, runtimeScopeCheck, unacceptedAttemptRecoveryScope } from "../../../gitops-release-scope";
+import { productionRecoveryScope, productionReleaseScope, runtimeScopeCheck, selectedTaskRebuildScope, unacceptedAttemptRecoveryScope } from "../../../gitops-release-scope";
 import { githubBlob, githubFile, githubRead } from "./release-github";
 import { verifiedSourceComparison } from "../../../gitops-source-comparison";
 import { resolveDeploymentRuntimeForRead, disposeRuntime } from "../../lib/deployment-runtime";
@@ -273,7 +273,15 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
       check("task.scope", "范围外的一次性任务", drifted === null ? "unknown" : drifted.length ? "fail" : "pass",
         drifted === null ? "当前版本的任务定义无法解析" : drifted.length ? `${drifted.join("、")} 的定义随目标改变却不在发布范围内，替换容器后验收无法证明它，需加入范围` : "范围外的任务定义与当前版本一致");
     }
-    const retained = recovery.length ? Object.keys(actualImages).filter(name => !recovery.includes(name)) : null;
+    const rebuildingTasks = selectedTaskRebuildScope({ environment: b.environment, action: rollback ? "rollback" : verification ? "verify" : "release", selected,
+      tasks: rows.filter(s => s.advanced?.runToCompletion === true).map(s => s.name), expected: Object.keys(actualImages),
+      converged: [...converged].filter(name => current.images[name]?.digest === (deployedManifest.services[name] ?? deployedManifest.infrastructure?.[name])?.digest) });
+    for (const item of checks) if (rebuildingTasks.some(name => item.key === `runtime.${name}`)) {
+      item.blocking = false;
+      item.detail += "；本次准确范围将重新执行此一次性任务，并在发布后重新验收";
+    }
+    const retained = recovery.length ? Object.keys(actualImages).filter(name => !recovery.includes(name))
+      : rebuildingTasks.length ? Object.keys(actualImages).filter(name => !rebuildingTasks.includes(name)) : null;
     check("runtime.manifest", "运行镜像与已部署清单", retained ? (retained.every(name => converged.has(name)) ? "pass" : "fail") : verified ? (Object.entries(current.images).every(([name, i]) => i.digest === (deployedManifest.services[name] ?? deployedManifest.infrastructure?.[name])?.digest) ? "pass" : "fail") : "unknown", "实际摘要与当前环境清单逐项比对");
     if (b.stack === "magic-core" && target.services.includes("platform-api")) {
       const image = manifest.services["platform-api"]!;
