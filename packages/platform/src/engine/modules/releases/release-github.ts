@@ -85,7 +85,7 @@ export async function dispatchRelease(ctx: ExecutionContext, b: ReleaseBinding, 
   const inputs = plan.target.action === "rollback"
     ? { release_run_id: run.id, release_plan_hash: plan.summaryHash, environment: b.environment, release_id: plan.target.releaseId, manifest_commit: plan.target.manifestCommit, stack: b.stack, ...(b.environment === "production" ? { confirm_production: "production" } : {}) }
     : b.environment === "preview"
-    ? { release_run_id: run.id, release_plan_hash: plan.summaryHash, event_key: plan.target.eventKey ?? "", verify_only: plan.target.action === "verify", manifest_commit: plan.target.manifestCommit, stack: b.stack }
+    ? { release_run_id: run.id, release_plan_hash: plan.summaryHash, event_key: plan.target.eventKey ?? "", verify_only: plan.target.action === "verify", ...(plan.target.action === "configure" ? { configure_only: true } : {}), manifest_commit: plan.target.manifestCommit, stack: b.stack }
     : { release_run_id: run.id, release_plan_hash: plan.summaryHash, manifest_commit: plan.target.manifestCommit, stack: b.stack, confirm_production: "production" };
   await userRequest(ctx, `repos/${b.repository}/actions/workflows/${encodeURIComponent(workflow)}/dispatches`, "POST", { ref: b.workflowRef, inputs });
 }

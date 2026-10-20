@@ -7,7 +7,7 @@ import type { ReleaseBinding, ReleaseCheck, ReleaseImage, ReleasePlanInput, Rele
 import type { ExecutionContext } from "../../../context";
 import { manifestHash, releaseHash } from "../../../releases";
 import { gitopsConfigurationHash, observedGitopsConfigurationHash, renderGitopsCompose, selectedImageExpectations } from "../../../gitops-compose";
-import { productionRecoveryScope, productionReleaseScope, runtimeScopeCheck, selectedTaskRebuildScope, unacceptedAttemptRecoveryScope } from "../../../gitops-release-scope";
+import { configurationReleaseScope, productionRecoveryScope, productionReleaseScope, runtimeScopeCheck, selectedTaskRebuildScope, unacceptedAttemptRecoveryScope } from "../../../gitops-release-scope";
 import { githubBlob, githubFile, githubRead } from "./release-github";
 import { verifiedSourceComparison } from "../../../gitops-source-comparison";
 import { resolveDeploymentRuntimeForRead, disposeRuntime } from "../../lib/deployment-runtime";
@@ -64,7 +64,12 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
   let selected: string[] = [];
   const rollback = input.action === "rollback";
   const verification = input.action === "verify";
-  if (verification) {
+  const configuration = input.action === "configure";
+  if (!configuration && input.services) fail("Explicit services are valid only for a configuration release");
+  if (configuration) {
+    if (input.eventKey || (input.manifestCommit && input.manifestCommit !== commit)) fail("Configuration release requires the unchanged PRT manifest and no image event");
+    selected = configurationReleaseScope({ environment: b.environment, services: input.services ?? [], applications: stack.services.map(s => s.name), tasks: [] });
+  } else if (verification) {
     if (b.environment !== "preview") fail("Verification workflow is restricted to PRT");
     if (input.manifestCommit && input.manifestCommit !== commit) fail("Verification target changed. Generate a fresh plan.");
   } else if (rollback) {
@@ -154,7 +159,7 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
   const template = await githubFile(ctx, b, stack.templatePath, main.sha);
   const configurationHash = gitopsConfigurationHash(template, stack);
   const rawCompose = renderGitopsCompose(template, stack, manifest);
-  const target: ReleaseTarget = { action: verification ? "verify" : rollback ? "rollback" : "release", workflowSha: main.sha, manifestCommit: commit, manifestHash: manifestHash(manifest), configurationHash, releaseId: manifest.releaseId, images, ossGitSha: manifest.ossGitSha ?? null, services: [...new Set(selected)].sort(), eventKey, acceptedReceipt, manifest };
+  const target: ReleaseTarget = { action: configuration ? "configure" : verification ? "verify" : rollback ? "rollback" : "release", workflowSha: main.sha, manifestCommit: commit, manifestHash: manifestHash(manifest), configurationHash, releaseId: manifest.releaseId, images, ossGitSha: manifest.ossGitSha ?? null, services: [...new Set(selected)].sort(), eventKey, acceptedReceipt, manifest };
   const env: Record<string, string> = {};
   for (const row of await repos.project.listEnvVars(project.id, b.environment, null)) { try { env[row.key] = decrypt(row.value); } catch { fail("Saved environment configuration cannot be decrypted"); } }
   let parsed: ReturnType<typeof parseComposeFile>;
@@ -164,6 +169,7 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
   checks.push(...checkReleaseEnvironment(stack.releaseChecks?.environmentGroups ?? [], env));
   check("compose.scope", "服务集合与支持能力", releaseHash(parsed!.services.map(s => s.name).sort()) === releaseHash([...b.expectedServices].sort()) && !blockingComposeFields(parsed!.unsupported).length ? "pass" : "fail", "检查完整服务集合、端口、卷、外部网络与支持字段");
   const rows = await repos.service.listByProject(project.id);
+  if (configuration) configurationReleaseScope({ environment: b.environment, services: selected, applications: stack.services.map(s => s.name), tasks: rows.filter(s => s.advanced?.runToCompletion === true).map(s => s.name) });
   const runtimeScope = runtimeScopeCheck(rows.map(s => s.name), b.expectedServices, selected);
   check("runtime.scope", "平台服务集合", runtimeScope.status, runtimeScope.added.length && runtimeScope.status === "pass" ? `本次发布同步新增 ${runtimeScope.added.join("、")}` : "服务数量或名称变化需要先明确协调");
   const active = project.activeDeploymentId ? await repos.deployment.findById(project.activeDeploymentId) : null;
@@ -229,7 +235,7 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
     current.ossGitSha = actualManifest && releaseHash(current.images) === releaseHash(Object.fromEntries(Object.entries({ ...actualManifest.services, ...actualManifest.infrastructure }).map(([name, i]) => [name, { image: i.image, digest: i.digest, gitSha: i.gitSha ?? null }]))) ? actualManifest.ossGitSha ?? null : null;
     // Resuming the same unfinished target rebuilds exactly what never converged;
     // every other service must still verify, and nothing else may change.
-    let recovery = b.environment === "production" && !rollback && !verification && !selected.length
+    let recovery = b.environment === "production" && !rollback && !verification && !configuration && !selected.length
       ? productionRecoveryScope({ active: { status: active.status, decision: (active.meta as { composeDeployment?: { decision?: string } } | null)?.composeDeployment?.decision ?? null }, activeHash: actualManifest ? manifestHash(actualManifest) : null,
           deployedHash: manifestHash(deployedManifest), targetHash: manifestHash(manifest),
           activeConfiguration: current.deploymentConfigurationHash ?? null, targetConfiguration: configurationHash,
@@ -237,7 +243,7 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
           tasks: rows.filter(s => s.advanced?.runToCompletion === true).map(s => s.name) })
       : [];
     let recoveryDeploymentId = active.id, recoveryLabel = "部分失败的部署";
-    if (!recovery.length && b.environment === "preview" && !rollback && !verification && !selected.length) {
+    if (!recovery.length && b.environment === "preview" && !rollback && !verification && !configuration && !selected.length) {
       // A later run that failed before deploying (preflight, plan mismatch) changed no
       // containers, so it must not hide the unaccepted attempt that is still active.
       const latest = await releaseStore.latestStarted(b.projectId);
@@ -307,6 +313,7 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
     for (const [name, image] of Object.entries(images)) { try { await runtime.inspectReleaseImage(`${image.image}@${image.digest}`); check(`image.${name}`, `${name} 镜像`, "pass", "镜像存在、摘要与主机架构匹配，拉取权限有效"); } catch { check(`image.${name}`, `${name} 镜像`, "unknown", "镜像存在性、架构或拉取权限无法确认"); } }
   } finally { disposeRuntime(runtime); }
   if (!target.services.includes("platform-api")) check("migration", "数据库迁移", "pass", "本次准确服务范围不涉及数据库迁移所属服务");
+  if (configuration) check("configuration.target", "仅应用 PRT 配置", current.verified && active.status === "ready" && actualManifest !== null && manifestHash(actualManifest) === target.manifestHash && releaseHash(current.images) === releaseHash(target.images) && current.ossGitSha === target.ossGitSha ? "pass" : "fail", "保留当前准确镜像，只重建明确选择的应用服务；不运行迁移或基础设施任务");
   if (verification) check("verification.target", "准确目标无操作验收", current.verified && current.configurationHash === target.configurationHash && releaseHash(current.images) === releaseHash(target.images) && current.ossGitSha === target.ossGitSha ? "pass" : "fail", "仅验证当前已运行的准确目标，不创建部署或历史 accepted 回执");
   const activeRun = await releaseStore.active(b.projectId);
   check("release.concurrent", "当前发布", activeRun ? "fail" : "pass", activeRun ? `已有发布 ${activeRun.id} 正在执行` : "没有正在执行的发布", false);

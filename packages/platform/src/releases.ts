@@ -211,7 +211,7 @@ export function createReleaseOperations(authorization: Authorization, dependenci
       if (plan.consumedAt) conflict("RELEASE_PLAN_CONSUMED", "This plan has already been submitted");
       if (context.tokenScope || context.source === "mcp") throw new AppError("Connect your GitHub OAuth identity to submit releases", 403, "GITHUB_USER_CONNECTION_REQUIRED");
       const actor = await deps().githubActor(context, b);
-      const fresh = await deps().inspect(context, b, { action: plan.target.action, ...(plan.target.eventKey ? { eventKey: plan.target.eventKey } : {}), manifestCommit: plan.target.manifestCommit });
+      const fresh = await deps().inspect(context, b, { action: plan.target.action, ...(plan.target.action === "configure" ? { services: plan.target.services } : {}), ...(plan.target.eventKey ? { eventKey: plan.target.eventKey } : {}), manifestCommit: plan.target.manifestCommit });
       if (releaseHash(fresh.current) !== releaseHash(plan.current) || releaseHash(fresh.target) !== releaseHash(plan.target)) conflict("RELEASE_PLAN_CHANGED", "Runtime or target changed. Generate a new plan.");
       if (blocked(fresh.checks)) conflict("RELEASE_PREFLIGHT_BLOCKED", "Resolve every blocking check before submitting");
       const now = deps().now().toISOString();
@@ -302,7 +302,7 @@ export function createReleaseOperations(authorization: Authorization, dependenci
       // A retry after deployment began verifies ownership without resetting progress.
       if (run.workflowRunId) return { context, data: run };
       // Queued plans can exceed their expiry. Recheck the frozen plan and live gates before execution.
-      const fresh = await deps().inspect(context, b, { action: plan.target.action, eventKey: plan.target.eventKey ?? undefined, manifestCommit: plan.target.manifestCommit });
+      const fresh = await deps().inspect(context, b, { action: plan.target.action, ...(plan.target.action === "configure" ? { services: plan.target.services } : {}), eventKey: plan.target.eventKey ?? undefined, manifestCommit: plan.target.manifestCommit });
       if (plan.bindingRevision !== b.revision || releaseHash(fresh.current) !== releaseHash(plan.current) || releaseHash(fresh.target) !== releaseHash(plan.target)) {
         await deps().store.updateRun(id, { stage: "failed", error: "Runtime or target changed while queued. Generate a new plan." }, run.stage);
         conflict("RELEASE_PLAN_CHANGED", "Runtime or target changed while queued");

@@ -28,6 +28,17 @@ function setup() {
 }
 const key = { idempotencyKey: "idempotency_12345678" };
 describe("GitOps release operations", () => {
+  it("preserves the explicit configuration scope through submit and workflow registration", async () => {
+    const x = setup();
+    Object.assign(x.fresh.target, { action: "configure", services: ["admin"] });
+    const plan = (await x.api.plan(ctx, "p", { action: "configure", services: ["admin"] })).data;
+    const run = (await x.api.start(ctx, plan.id, key)).data;
+    expect(x.deps.inspect).toHaveBeenLastCalledWith(ctx, x.b, { action: "configure", services: ["admin"], manifestCommit: plan.target.manifestCommit });
+    x.workflow.title = `GitOps release ${run.id}`;
+    const controller = { ...ctx, tokenScope: { tokenId: "controller" } } as ExecutionContext;
+    await x.api.register(controller, run.id, { workflowRunId: "123" });
+    expect(x.deps.inspect).toHaveBeenLastCalledWith(controller, x.b, { action: "configure", services: ["admin"], eventKey: undefined, manifestCommit: plan.target.manifestCommit });
+  });
   it("backs off failed background reads and keeps their evidence stale", async () => {
     const x = setup();
     vi.mocked(x.deps.inspect).mockRejectedValue(new Error("offline"));
