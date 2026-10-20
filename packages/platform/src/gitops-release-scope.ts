@@ -94,3 +94,14 @@ export function runtimeScopeCheck(rows: string[], expected: string[], selected: 
   if (extra.length || have.size !== rows.length) return { status: "fail", added };
   return { status: added.every(name => selected.includes(name)) ? "pass" : "fail", added };
 }
+
+/** A PRT release can recreate its explicitly selected completion tasks when
+ * their old containers disappeared. Every retained image must still be proven;
+ * acceptance will attest the new task execution rather than inventing history. */
+export function selectedTaskRebuildScope(input: {
+  environment: string; action: string; selected: string[]; tasks: string[]; expected: string[]; converged: string[];
+}): string[] {
+  if (input.environment !== "preview" || input.action !== "release" || !input.selected.length) return [];
+  const unproven = input.expected.filter(name => !input.converged.includes(name));
+  return unproven.every(name => input.tasks.includes(name) && input.selected.includes(name)) ? unproven.sort() : [];
+}
