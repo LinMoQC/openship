@@ -32,7 +32,8 @@ export const releaseDependencies: ReleaseDependencies = {
     const receipt = progress.receipt;
     const noop = receipt?.status === "noop" && plan.target.services.length === 0;
     if (!receipt || (!noop && receipt.status !== "accepted") || receipt.projectId !== b.projectId || receipt.environment !== b.environment || receipt.workflowRun !== run.workflowRunId || typeof receipt.manifestCommit !== "string" || !/^[a-f0-9]{40}$/.test(receipt.manifestCommit) || manifestHash(receipt.manifest) !== plan.target.manifestHash || releaseHash(receipt.services) !== releaseHash(plan.target.services) || receipt.deploymentId !== progress.deploymentId) throw new AppError("Acceptance receipt does not match the frozen target and execution scope", 409, "RELEASE_ACCEPTANCE_MISMATCH");
-    const expectedKey = plan.target.action === "verify" ? releaseHash({ verificationRunId: run.id }) : plan.target.eventKey;
+    const expectedKey = plan.target.action === "verify" ? releaseHash({ verificationRunId: run.id }) : plan.target.action === "configure" ? releaseHash({ configurationRunId: run.id }) : plan.target.eventKey;
+    if (plan.target.action === "configure" && receipt.key !== expectedKey) throw new AppError("Configuration receipt does not belong to this saved run", 409, "RELEASE_ACCEPTANCE_MISMATCH");
     if (noop && (receipt.key !== expectedKey || receipt.deploymentId !== plan.current.deploymentId || plan.current.configurationHash !== plan.target.configurationHash)) throw new AppError("No-op target differs from the actual incumbent", 409, "RELEASE_ACCEPTANCE_MISMATCH");
     const saved = JSON.parse(await githubFile(ctx, b, noop ? `receipts/${expectedKey}.json` : `accepted/${b.stack}/${receipt.manifestCommit}.json`, "release-audit"));
     if (releaseHash(saved) !== releaseHash(receipt)) throw new AppError("Acceptance receipt is not the immutable GitOps record", 409, "RELEASE_ACCEPTANCE_MISMATCH");

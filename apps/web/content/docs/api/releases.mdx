@@ -28,6 +28,14 @@ revision, target digests, configuration and every blocking check. A changed targ
 requires a new plan. Consumed plans remain associated with their queued run and are checked again
 before execution.
 
+To apply saved PRT environment configuration without changing images, create an explicit
+`{ action: "configure", services: ["web"] }` plan. Its manifest must match the active ready
+deployment. Only named application services are eligible; production, infrastructure and
+completion tasks are refused. The bound preview workflow must handle `configure_only` using
+the saved run and plan hash. Execution retains the normal operator identity, exact scope,
+configuration hash, cutover recovery and acceptance checks. Direct environment apply remains
+blocked for GitOps projects.
+
 ## Operator identity and submission
 
 Use the Dashboard release workspace to connect the **currently signed-in user's GitHub account**.

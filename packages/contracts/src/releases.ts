@@ -22,7 +22,7 @@ export interface ReleaseBinding extends ReleaseBindingInput {
 }
 export interface ReleaseImage { image: string; digest: string; gitSha: string | null; }
 export interface ReleaseTarget {
-  action: "release" | "rollback" | "verify";
+  action: "release" | "rollback" | "verify" | "configure";
   workflowSha: string; manifestCommit: string; manifestHash: string; configurationHash: string;
   releaseId: string; images: Record<string, ReleaseImage>; ossGitSha: string | null;
   services: string[]; eventKey: string | null; acceptedReceipt: Record<string, unknown> | null;
@@ -59,7 +59,8 @@ export interface ReleaseRun {
   receipt: Record<string, unknown> | null; error: string | null; createdAt: string; updatedAt: string;
 }
 export const ReleasePlanInputSchema = Type.Object({
-  action: Type.Optional(Type.Union([Type.Literal("release"), Type.Literal("rollback"), Type.Literal("verify")])),
+  services: Type.Optional(services),
+  action: Type.Optional(Type.Union([Type.Literal("release"), Type.Literal("rollback"), Type.Literal("verify"), Type.Literal("configure")])),
   eventKey: Type.Optional(Type.String({ pattern: "^[a-f0-9]{64}$" })),
   manifestCommit: Type.Optional(sha),
 }, { additionalProperties: false });
@@ -106,7 +107,7 @@ export const ReleaseBindingSchema = Type.Object({ ...ReleaseBindingInputSchema.p
 export const ReleaseObservationSchema = Type.Object({ deploymentId: nullableId, images: Type.Record(Type.String(), ReleaseImageSchema), configurationHash: nullableHash, deploymentConfigurationHash: Type.Optional(nullableHash), serverEnvironmentHash: Type.Optional(nullableHash), ossGitSha: Type.Union([sha, Type.Null()]), verified: Type.Boolean() });
 export const ReleaseCheckSchema = Type.Object({ key: id, label: id, status: Type.Union([Type.Literal("pass"), Type.Literal("fail"), Type.Literal("unknown")]), blocking: Type.Boolean(), detail: Type.String() });
 export const ReleaseTargetSchema = Type.Object({
-  action: Type.Union([Type.Literal("release"), Type.Literal("rollback"), Type.Literal("verify")]), workflowSha: sha, manifestCommit: sha, manifestHash: hash, configurationHash: hash,
+  action: Type.Union([Type.Literal("release"), Type.Literal("rollback"), Type.Literal("verify"), Type.Literal("configure")]), workflowSha: sha, manifestCommit: sha, manifestHash: hash, configurationHash: hash,
   releaseId: id, images: Type.Record(Type.String(), ReleaseImageSchema), ossGitSha: Type.Union([sha, Type.Null()]), services: Type.Array(id, { uniqueItems: true }),
   eventKey: nullableHash, acceptedReceipt: Type.Union([Type.Record(Type.String(), Type.Unknown()), Type.Null()]), manifest: Type.Record(Type.String(), Type.Unknown()),
   migration: Type.Optional(Type.Object({ phase: Type.Union([Type.Literal("source"), Type.Literal("compatibility-a"), Type.Literal("complete")]), policyHash: nullableHash,

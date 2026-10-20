@@ -1,3 +1,4 @@
+import { AppError } from "@repo/contracts";
 interface ScopeImage { digest: string; migrationsChanged?: boolean }
 interface ScopeManifest { services: Record<string, ScopeImage>; infrastructure?: Record<string, ScopeImage> }
 interface ScopeService { name: string; deployServices?: string[]; deployServicesWithMigration?: string[] }
@@ -104,4 +105,13 @@ export function selectedTaskRebuildScope(input: {
   if (input.environment !== "preview" || input.action !== "release" || !input.selected.length) return [];
   const unproven = input.expected.filter(name => !input.converged.includes(name));
   return unproven.every(name => input.tasks.includes(name) && input.selected.includes(name)) ? unproven.sort() : [];
+}
+
+/** Configuration changes use the normal frozen plan and cutover journal.
+ * Only explicit PRT application services may be recreated on their current images. */
+export function configurationReleaseScope(input: { environment: string; services: string[]; applications: string[]; tasks: string[] }): string[] {
+  if (input.environment !== "preview" || !input.services.length || new Set(input.services).size !== input.services.length ||
+      input.services.some(name => !input.applications.includes(name) || input.tasks.includes(name)))
+    throw new AppError("Configuration release requires explicit PRT application services, excluding infrastructure and completion tasks", 409, "RELEASE_CONFIGURATION_SCOPE_INVALID");
+  return [...input.services].sort();
 }
