@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { selectedTaskRebuildScope } from "../src/gitops-release-scope";
 
-describe("PRT preflight for selected completion tasks", () => {
+describe("release preflight for selected completion tasks", () => {
   // The accepted incumbent retained a successful init task, but its exited
   // container was removed later. The next exact release reruns that task.
   const incident = { environment: "preview", action: "release", selected: ["migrate", "platform-api", "redpanda-init"],
@@ -19,8 +19,14 @@ describe("PRT preflight for selected completion tasks", () => {
     expect(selectedTaskRebuildScope({ ...incident, tasks: [] })).toEqual([]);
   });
 
-  it("leaves production, rollback and verification checks unchanged", () => {
-    expect(selectedTaskRebuildScope({ ...incident, environment: "production" })).toEqual([]);
+  it("allows a production release to rerun its selected missing task while retaining proven services", () => {
+    expect(selectedTaskRebuildScope({ ...incident, environment: "production" })).toEqual(["redpanda-init"]);
+    expect(selectedTaskRebuildScope({ ...incident, environment: "production", converged: ["platform-api"] })).toEqual([]);
+    expect(selectedTaskRebuildScope({ ...incident, environment: "production", selected: ["platform-api"] })).toEqual([]);
+  });
+
+  it("leaves unsupported environments, rollback and verification checks unchanged", () => {
+    expect(selectedTaskRebuildScope({ ...incident, environment: "development" })).toEqual([]);
     expect(selectedTaskRebuildScope({ ...incident, action: "rollback" })).toEqual([]);
     expect(selectedTaskRebuildScope({ ...incident, action: "verify" })).toEqual([]);
     expect(selectedTaskRebuildScope({ ...incident, selected: [] })).toEqual([]);
