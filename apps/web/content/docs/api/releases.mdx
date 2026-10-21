@@ -28,6 +28,14 @@ revision, target digests, configuration and every blocking check. A changed targ
 requires a new plan. Consumed plans remain associated with their queued run and are checked again
 before execution.
 
+External infrastructure images can use the same release event and acceptance flow only when
+their platform entry declares a reviewed `release.repository` and an exact
+`release.versions[tag]` source SHA and image digest. Undeclared versions, repositories,
+digests and migration requests are rejected. PRT replaces only the selected infrastructure
+service; production promotes its still-active accepted manifest. Infrastructure digest changes
+are included in rollback scope as well. Application source validation and operator gates remain
+in effect.
+
 To apply saved PRT environment configuration without changing images, create an explicit
 `{ action: "configure", services: ["web"] }` plan. Its manifest must match the active ready
 deployment. Only named application services are eligible; production, infrastructure and

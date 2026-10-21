@@ -24,10 +24,11 @@ import { checkReleaseEnvironment, type ReleaseEnvironmentGroup } from "../../../
 import { inspectBoundHostConfiguration } from "../../../gitops-host-configuration";
 import { assertRetainedTaskContainer, untouchedTaskDrift } from "../../../gitops-artifacts";
 import { observedServiceArtifacts } from "./release-artifacts";
+import { approvedInfrastructureRelease, type InfrastructureReleaseSpec } from "../../../gitops-infrastructure-release";
 
 interface Image { image: string; digest: string; gitSha?: string; migrationsChanged?: boolean; tag?: string; }
 interface Manifest { schemaVersion: 2; stack: string; releaseId: string; services: Record<string, Image>; infrastructure?: Record<string, Image>; ossGitSha?: string; migrationEpoch?: string; [key: string]: unknown; }
-interface Stack { releaseChecks?: { environmentGroups?: ReleaseEnvironmentGroup[] }; hostConfig?: { root: string; files: Record<string, string> }; probes: Record<string, string>; name: string; repository: string; composePath: string; templatePath: string; expectedServices: string[]; activation: Record<string, boolean>; services: Array<{ name: string; image: string; tagPattern: string; deployServices?: string[]; deployServicesWithMigration?: string[] }>; infrastructure?: Array<{ name: string; image: string }>; }
+interface Stack { releaseChecks?: { environmentGroups?: ReleaseEnvironmentGroup[] }; hostConfig?: { root: string; files: Record<string, string> }; probes: Record<string, string>; name: string; repository: string; composePath: string; templatePath: string; expectedServices: string[]; activation: Record<string, boolean>; services: Array<{ name: string; image: string; tagPattern: string; deployServices?: string[]; deployServicesWithMigration?: string[] }>; infrastructure?: InfrastructureReleaseSpec[]; }
 function fail(message: string): never { throw new AppError(message, 409, "RELEASE_SOURCE_INVALID"); }
 function parseManifest(value: unknown, stack: Stack): Manifest {
   const m = value as Manifest;
@@ -79,7 +80,7 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
     manifest = parseManifest(YAML.parse(await githubFile(ctx, b, b.manifestPath, commit)), stack);
     if (acceptedReceipt!.status !== "accepted" || acceptedReceipt!.environment !== b.environment || acceptedReceipt!.projectId !== b.projectId || acceptedReceipt!.manifestCommit !== commit || manifestHash(acceptedReceipt!.manifest) !== manifestHash(manifest)) fail("Rollback target has no matching accepted receipt for this project and environment");
     check("rollback.epoch", "回退迁移边界", (deployedManifest.migrationEpoch ?? null) === (manifest.migrationEpoch ?? null) ? "pass" : "fail", "跨迁移边界不可自动回退数据库结构");
-    selected = stack.services.filter(s => deployedManifest.services[s.name]!.digest !== manifest.services[s.name]!.digest).map(s => s.name);
+    selected = productionReleaseScope(stack.services.map(s => ({ name: s.name })), deployedManifest, manifest);
     check("rollback.acceptance", "准确历史验收回执", "pass", "回退目标是本环境已验收的不可变清单");
   } else if (b.environment === "production") {
     const previewBindings = (await repos.releases.bindings()).filter(row => row.organizationId === b.organizationId && row.config.stack === b.stack && row.config.environment === "preview");
@@ -128,14 +129,16 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
     if (input.eventKey && input.eventKey !== event?.key) fail("Selected event is not the next pending release for this stack");
     if (event) {
       const p = event.payload, name = String(p.service), spec = stack.services.find(s => s.name === name);
-      if (!spec || p.repository !== stack.repository || p.image !== spec.image || !new RegExp(spec.tagPattern).test(String(p.tag)) || !/^[a-f0-9]{40}$/.test(String(p.gitSha)) || !/^sha256:[a-f0-9]{64}$/.test(String(p.digest)) || p.schemaVersion !== 2 || typeof p.migrationsChanged !== "boolean" || p.releaseId !== `${b.stack}:${String(p.gitSha).slice(0, 12)}` || createHash("sha256").update(`${b.stack}/${name}/${p.digest}`).digest("hex") !== event.key) {
+      const infrastructure = approvedInfrastructureRelease(stack.infrastructure, p);
+      if ((!infrastructure && (!spec || p.repository !== stack.repository || p.image !== spec.image || !new RegExp(spec.tagPattern).test(String(p.tag)))) || !/^[a-f0-9]{40}$/.test(String(p.gitSha)) || !/^sha256:[a-f0-9]{64}$/.test(String(p.digest)) || p.schemaVersion !== 2 || typeof p.migrationsChanged !== "boolean" || p.releaseId !== `${b.stack}:${String(p.gitSha).slice(0, 12)}` || createHash("sha256").update(`${b.stack}/${name}/${p.digest}`).digest("hex") !== event.key) {
         // Validate the producer's stable SHA-256 key separately from canonical JSON hashes.
         fail("Invalid release event provenance");
       }
-      const before = manifest.services[name]!;
-      const compare = await verifiedSourceComparison(path => githubRead(ctx, { ...b, repository: stack.repository }, path), before.gitSha!, String(p.gitSha));
-      if (compare.status === "identical" && before.digest !== p.digest && (b.stack !== "commercial-web" || manifest.ossGitSha === p.ossGitSha)) fail("Identical source produced a different digest");
-      const migrationsChanged = p.migrationsChanged === true || (name === "platform-api" && migrationInputsChanged(compare.files ?? []));
+      const targetImages = infrastructure ? manifest.infrastructure! : manifest.services;
+      const before = targetImages[name]!;
+      const compare = infrastructure ? null : await verifiedSourceComparison(path => githubRead(ctx, { ...b, repository: stack.repository }, path), before.gitSha!, String(p.gitSha));
+      if (compare?.status === "identical" && before.digest !== p.digest && (b.stack !== "commercial-web" || manifest.ossGitSha === p.ossGitSha)) fail("Identical source produced a different digest");
+      const migrationsChanged = p.migrationsChanged === true || (name === "platform-api" && migrationInputsChanged(compare?.files ?? []));
       if (migrationsChanged && name !== "platform-api") fail("Only the migration-owning service can change database migrations");
       if (b.stack === "commercial-web" && p.ossGitSha) {
         if (!/^[a-f0-9]{40}$/.test(String(p.ossGitSha)) || !manifest.ossGitSha) fail("OSS provenance is missing");
@@ -143,13 +146,13 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
         if (!["ahead", "identical"].includes(oss.status)) fail("OSS source history diverged or moved backwards");
       }
       eventKey = event.key;
-      if (manifest.services[name]!.digest !== p.digest) {
-        manifest.services[name] = { image: String(p.image), digest: String(p.digest), gitSha: String(p.gitSha), migrationsChanged, tag: String(p.tag) };
+      if (targetImages[name]!.digest !== p.digest) {
+        targetImages[name] = { image: String(p.image), digest: String(p.digest), gitSha: String(p.gitSha), migrationsChanged, tag: String(p.tag) };
         manifest.releaseId = String(p.releaseId);
         delete manifest.bootstrap;
         if (p.ossGitSha) manifest.ossGitSha = String(p.ossGitSha);
         if (migrationsChanged) manifest.migrationEpoch = String(p.digest);
-        selected = migrationsChanged ? spec.deployServicesWithMigration ?? [name] : spec.deployServices ?? [name];
+        selected = infrastructure ? [name] : migrationsChanged ? spec!.deployServicesWithMigration ?? [name] : spec!.deployServices ?? [name];
       }
     }
     if (input.manifestCommit && input.manifestCommit !== commit) fail("The base manifest changed. Generate a fresh plan.");
