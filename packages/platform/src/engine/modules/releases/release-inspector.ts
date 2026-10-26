@@ -9,6 +9,7 @@ import { manifestHash, releaseHash } from "../../../releases";
 import { gitopsConfigurationHash, observedGitopsConfigurationHash, renderGitopsCompose, selectedImageExpectations } from "../../../gitops-compose";
 import { configurationReleaseScope, productionRecoveryScope, productionReleaseScope, runtimeScopeCheck, selectedTaskRebuildScope, unacceptedAttemptRecoveryScope } from "../../../gitops-release-scope";
 import { githubBlob, githubFile, githubRead } from "./release-github";
+import { pendingInboxEvents } from "./release-inbox";
 import { verifiedSourceComparison } from "../../../gitops-source-comparison";
 import { resolveDeploymentRuntimeForRead, disposeRuntime } from "../../lib/deployment-runtime";
 import { parseComposeFile, blockingComposeFields } from "../../lib/compose-parser";
@@ -114,15 +115,7 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
         receipts = await githubRead(ctx, b, `contents/receipts?ref=${audit.sha}`);
         if (receipts.length >= 1000) fail("Release receipt listing may be truncated");
       } catch (error) { if (!(error instanceof AppError) || error.statusCode !== 404) throw error; }
-      const receiptByName = new Map(receipts.map(file => [file.name, file.sha]));
-      for (const file of files.filter(f => /^[a-f0-9]{64}\.json$/.test(f.name))) {
-        const event = JSON.parse(await githubBlob(ctx, b, file.sha));
-        if (event.payload?.stack !== b.stack) continue;
-        let terminal = false;
-        const receiptSha = receiptByName.get(`${event.key}.json`);
-        if (receiptSha) { const receipt = JSON.parse(await githubBlob(ctx, b, receiptSha)); terminal = ["accepted", "superseded", "duplicate", "noop"].includes(receipt.status); }
-        if (!terminal) pending.push(event);
-      }
+      pending.push(...await pendingInboxEvents(sha => githubBlob(ctx, b, sha), b.stack, files, receipts));
     } catch (error) { if (!(error instanceof AppError) || error.statusCode !== 404) throw error; }
     pending.sort((a, z) => a.receivedAt.localeCompare(z.receivedAt));
     const event = pending[0];
