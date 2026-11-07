@@ -13,6 +13,7 @@
  * is the one special case (a sidecar container vs the host's `postgresql` unit).
  */
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import type { CommandExecutor } from "@repo/adapters";
 import { safeErrorMessage } from "@repo/core";
 import { mapWithLimit } from "../../lib/map-with-limit";
@@ -189,11 +190,19 @@ function firstLine(text: string): string {
 export async function checkMailHealth(
   exec: CommandExecutor,
 ): Promise<MailComponentHealth[]> {
-  const probe = await resolveMailEngine(exec).catch(() => null);
-  if (probe?.flavor === "none") {
+  let probe;
+  try {
+    probe = await resolveMailEngine(exec);
+  } catch (error) {
+    observeCaughtError(error, "platform/engine/modules/mail/mail-health.service");
+    return MAIL_COMPONENTS.map((comp) => ({
+      ...describe(comp), status: "unknown" as const, detail: firstLine(safeErrorMessage(error)),
+    }));
+  }
+  if (probe.flavor === "none") {
     return MAIL_COMPONENTS.map((comp) => ({ ...describe(comp), status: "missing" as const }));
   }
-  const flavor = probe?.flavor ?? "container";
+  const flavor = probe.flavor;
   // Leave SSH channels for the queue, state and TLS checks that share this
   // connection. OpenSSH defaults to ten sessions; nine unbounded daemon probes
   // alongside those reads made healthy services intermittently report unknown.
@@ -217,11 +226,13 @@ const SERVING_COMPONENTS: readonly string[] = ["postfix", "dovecot"];
  * nine-component sweep: this runs on the scan / install pre-flight path.
  */
 export async function mailIsServing(exec: CommandExecutor): Promise<boolean> {
-  const probe = await resolveMailEngine(exec).catch(() => null);
-  if (!probe || probe.flavor === "none" || !probe.running) return false;
+  const probe = await resolveMailEngine(exec);
+  if (probe.flavor === "none" || !probe.running) return false;
   const comps = MAIL_COMPONENTS.filter((c) => SERVING_COMPONENTS.includes(c.key));
   if (comps.length !== SERVING_COMPONENTS.length) return false; // catalog drifted
   const states = await Promise.all(comps.map((c) => probeUnit(exec, probe.flavor, c)));
+  const unknown = states.find((state) => state.status === "unknown");
+  if (unknown) throw new Error(unknown.detail ?? "Mail service health could not be checked");
   return states.every((s) => s.status === "active");
 }
 
@@ -258,6 +269,7 @@ async function probeUnit(
     const raw = await exec.exec(mailUnitProbeCommand(flavor, comp.key, comp.unit));
     return { ...base, ...parseMailUnitProbe(flavor, comp.key, comp.unit, raw) };
   } catch (err) {
+    observeCaughtError(err, "platform/engine/modules/mail/mail-health.service");
     return { ...base, status: "unknown", detail: firstLine(safeErrorMessage(err)) };
   }
 }

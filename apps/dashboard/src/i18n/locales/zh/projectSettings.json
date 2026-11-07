@@ -1,4 +1,139 @@
 {
+  "appInstall": {
+    "configurationLoading": "正在加载应用配置…",
+    "catalogLoadFailed": "无法加载应用详情。请重试后再安装。",
+    "routingLoadFailed": "无法加载已保存的路由配置。请重试后再安装。",
+    "retryConfiguration": "重试",
+    "hostFitHint": "你可以继续，但此机器上的性能可能受限。",
+    "cloudFitTitle": "此应用需要更高的 Cloud 套餐",
+    "upgradePlan": "升级套餐",
+    "checkingCapacity": "正在检查容量…",
+    "checkCapacityAgain": "重新检查",
+    "cloudFitUnavailable": "无法检查容量。部署时将再次检查。",
+    "withoutDomainsTitle": "不配置域名，继续吗？",
+    "withoutDomainsBody": "这些 Web 端点只能通过其发布的端口访问。你可以稍后在项目中添加域名。",
+    "withoutDomainsCloudBody": "这些 Web 端点在 Cloud 上将没有公共 URL。此应用中的其他服务仍可访问它们。你可以稍后在项目中添加域名。",
+    "addDomains": "添加域名",
+    "continueWithoutDomains": "不配置域名，继续",
+    "generatedDomainsTitle": "使用免费域名？",
+    "generatedDomainsBody": "这些端点将获得免费的公共 URL。你也可以在安装前自行选择名称。",
+    "useGeneratedDomains": "使用免费域名",
+    "editDomains": "编辑域名",
+    "routePortCloudDesc": "仅限此 Cloud 工作区内部访问。添加域名即可获得公共 URL。",
+    "exposeTitle": "域名与路由",
+    "install": "安装",
+    "installing": "正在安装…",
+    "advanced": "高级部署选项",
+    "nameLabel": "名称",
+    "nameHint": "此应用在 Openship 中的显示名称。",
+    "domainTitle": "部署位置",
+    "domainFree": "免费子域名",
+    "domainFreeHint": "{domain} 上的免费子域名",
+    "domainCustom": "您自己的域名",
+    "domainCustomPlaceholder": "app.example.com",
+    "domainNone": "无公开 URL",
+    "domainNoneHint": "仅限内部访问 — 无公开地址。",
+    "customRequired": "请输入您的域名，或选择其他选项。",
+    "progressPreparing": "正在准备…",
+    "progressDeploying": "正在部署…",
+    "progressLive": "您的应用已上线",
+    "openApp": "打开应用",
+    "goToApp": "前往应用",
+    "installFailed": "安装失败",
+    "installFailedBody": "在所有组件运行前已停止。技术详情中包含完整的构建日志。",
+    "installCancelledSelf": "您已停止此安装。",
+    "installCancelledBody": "已创建的容器和镜像已移除，数据卷已保留 — 重新安装时将复用它们。已上线的组件保持不变。",
+    "settledAtPhase": "在 {phase} 阶段停止",
+    "viewDetails": "查看技术详情",
+    "showLogs": "显示日志",
+    "hideLogs": "隐藏日志",
+    "deployLogs": "部署日志",
+    "logsWaiting": "等待输出中…",
+    "logsEmpty": "未捕获到任何输出。",
+    "back": "返回",
+    "phaseImages": "准备镜像中",
+    "phaseServices": "启动服务中",
+    "phaseAppSetup": "完成设置中",
+    "phaseReady": "运行中",
+    "phaseQueued": "排队中…",
+    "stepperTitle": "安装步骤",
+    "firstLoginTitle": "首次登录",
+    "firstLoginUser": "用户名",
+    "firstLoginPassword": "密码",
+    "destinationTitle": "安装目标",
+    "destinationHint": "选择此应用运行的服务器或云端。",
+    "descMore": "展开",
+    "descLess": "收起",
+    "needsTitle": "所需资源",
+    "needsMemory": "{value} 内存",
+    "needsCpu": "{value}",
+    "hostFitTitle": "此服务器配置低于 {app} 的要求",
+    "hostFitMemory": "需要 {needed} 内存 — 当前仅有 {available}",
+    "hostFitCpu": "需要 {needed} — 当前仅有 {available}",
+    "routePortLabel": "仅端口（无域名）",
+    "routePortDesc": "通过主机地址和端口访问 — 无需域名或 Cloud。",
+    "routeFreeLabel": "免费子域名",
+    "routeFreeDesc": "{domain} 上的免费子域名，由 Openship Cloud 路由。",
+    "routeFreeNeedsCloud": "连接 Openship Cloud 以使用免费子域名。",
+    "routeCustomLabel": "您自己的域名",
+    "routeCustomDesc": "将您拥有的域名指向此应用。",
+    "routeDomainLabel": "域名",
+    "routeDomainDesc": "通过域名访问 — 免费子域名或您自己的域名。",
+    "httpBadge": "Web",
+    "tcpBadge": "数据库",
+    "tcpPublishLabel": "发布端口",
+    "tcpPublishDesc": "在主机上发布该端口，以便外部工具连接。",
+    "tcpInternalLabel": "仅内部访问",
+    "tcpInternalDesc": "仅此应用内的其他服务可访问。",
+    "tcpFirewallNote": "在服务器防火墙上开放端口 {port} 以从外部连接。",
+    "desktopReachNote": "在桌面端可通过 localhost 访问 — 或在“服务器 → 端口”中转发远程服务器的端口。",
+    "statusInstalling": "安装中",
+    "statusLive": "运行中",
+    "statusCancelled": "已取消",
+    "statusFailed": "失败",
+    "stopInstall": "停止安装",
+    "stopping": "正在停止…",
+    "installCancelled": "安装已取消",
+    "startOver": "重新开始",
+    "breadcrumbApps": "应用",
+    "appEyebrow": "应用",
+    "stopFailed": "无法停止安装",
+    "progressStep": "步骤 {current} / {total}",
+    "progressServicesReady": "{total} 个服务中有 {done} 个已就绪",
+    "summaryTitle": "配置",
+    "summaryDestination": "目标位置",
+    "summaryServices": "服务",
+    "mail": {
+      "title": "配置邮件",
+      "subtitle": "在您自己的域名上部署 Web 邮件，或连接现有邮箱。",
+      "chooseSelf": "自建邮件服务器",
+      "chooseSelfDesc": "在您的服务器上部署完整的 SMTP/IMAP + Web 邮件 (iRedMail) — 我们为您完成所有配置。",
+      "chooseConnect": "连接现有邮箱",
+      "chooseConnectDesc": "仅部署 Web 邮件界面，指向任意外部 SMTP/IMAP 服务商 — Amazon SES、Oracle Cloud、Gmail、Fastmail 等。",
+      "provider": "服务商",
+      "presets": {
+        "custom": "自定义",
+        "ses": "Amazon SES",
+        "gmail": "Gmail",
+        "fastmail": "Fastmail"
+      },
+      "sendOnlyNote": "{provider} 仅用于发送邮件 — 它不存储邮箱。IMAP 必须指向您实际存储邮件的位置。",
+      "sendOnlyNoInbox": "还没有收件箱？在此处配置邮件服务器，然后通过 {provider} 中继发送 →",
+      "imapOnOurServer": "邮箱从 {host}（此实例自身的邮件服务器）读取。仅发件经过 {provider}。",
+      "relayNote": "此实例已运行邮件服务器。如果邮箱位于其上，请改为在其“投递 → 发送”标签页中配置发送中继：IMAP 保持本地，仅发送按域名或按地址转至 {provider}，其自带的 Web 邮件仍正常工作。",
+      "relayCta": "改为配置中继 →",
+      "hostname": "Web 邮件地址",
+      "hostnameHint": "用户打开以阅读邮件的公开 URL，例如 mail.example.com。",
+      "imapHost": "IMAP 主机",
+      "imapPort": "IMAP 端口",
+      "smtpHost": "SMTP 主机",
+      "smtpPort": "SMTP 端口",
+      "deploy": "部署 Web 邮件",
+      "deploying": "正在部署…",
+      "hostnameRequired": "请输入 Web 邮件地址。",
+      "hostsRequired": "请输入 IMAP 和 SMTP 主机。"
+    }
+  },
   "settingSection": {
     "edit": "编辑",
     "save": "保存",
@@ -240,6 +375,10 @@
         "failed": "无法更新内部主机名",
         "invalid": "请至少输入一个字母或数字"
       }
+    },
+    "export": {
+      "title": "导出项目",
+      "description": "以纯 JSON 格式下载所有项目设置、环境变量和凭据。"
     }
   },
   "backup": {
@@ -428,7 +567,11 @@
       "saveFailed": "保存环境变量失败",
       "saveFailedTitle": "保存失败",
       "noChanges": "没有需要保存的更改——已保留已保存的值。",
-      "noChangesTitle": "无需保存"
+      "noChangesTitle": "无需保存",
+      "applying": "正在使用新环境变量重启服务 — 无需重新构建。",
+      "applyingTitle": "正在应用",
+      "applyFailed": "无法将环境变量应用到运行中的服务",
+      "applyFailedTitle": "应用失败"
     },
     "linkedBadge": "已链接",
     "linkedManaged": "通过 {app}",
@@ -436,7 +579,9 @@
     "linkedBody": "此值来自 {app} 连接。请在该应用中管理 — 这里的更改不会保留。",
     "unlink": "移除连接",
     "close": "关闭",
-    "applyText": "已保存。重启以应用运行时更改。镜像构建时使用的值需要重新构建并部署后才能生效。"
+    "applyText": "已保存。重启以应用运行时更改。镜像构建时使用的值需要重新构建并部署后才能生效。",
+    "applyTitle": "无需重新构建即可应用",
+    "applyButton": "应用（仅重启，不重新构建）"
   },
   "gitInfo": {
     "autoDeploy": "自动部署"
@@ -474,6 +619,12 @@
       "repository": "仓库",
       "open": "打开"
     },
+    "branch": {
+      "label": "部署分支",
+      "description": "用于此环境的后续部署。保存不会重新部署应用。",
+      "saved": "部署分支已保存",
+      "saveFailed": "无法保存部署分支"
+    },
     "webhookEndpoint": {
       "title": "Webhook 端点",
       "descriptionSet": "GitHub 将推送事件直接投递到此域名",
@@ -481,6 +632,11 @@
       "updating": "更新中...",
       "select": "选择域名...",
       "clear": "清除选择"
+    },
+    "buildQueue": {
+      "label": "取消过时的构建",
+      "description": "仅保留最新的待处理推送。启用后，新推送还会在发布步骤开始前取消旧的自动构建。手动部署和回滚会保留。",
+      "saveFailed": "无法保存构建取消偏好"
     },
     "autoDeployCard": {
       "title": "自动部署",
@@ -521,13 +677,15 @@
       "increaseAria": "增加回滚历史",
       "sizeEach": "每个镜像约 {size}，包含共享层",
       "diskFree": "剩余 {size}",
-      "autoBadge": "自动计算",
+      "autoBadge": "自动",
       "manualBadge": "手动设置",
       "kindFiles": "磁盘上的构建文件",
       "kindImages": "主机上的镜像",
       "descGitFiles": "最近版本的文件无论如何都会保留，因此回滚可以跳过构建。",
       "retentionHint": "保留最近部署的构建产物，以便快速回滚。",
       "retentionDescription": "保留的历史版本数量上限。当前运行和已固定的版本不计入此限制。旧的构建产物会被删除，但部署历史仍然保留。设为 0 时，仅保留当前运行和已固定的版本。",
+      "automaticValue": "最多 {count} 个版本",
+      "automaticDescription": "最多保留默认历史上限数量的版本。磁盘空间不足时，可恢复的构建产物可能提前被清理。正在运行和已固定的版本不计入上限。提交和配置历史仍然保留；回滚可能需要重新构建。",
       "defaultBadge": "实例默认值",
       "loadFailed": "无法加载回滚设置。"
     },
@@ -592,7 +750,7 @@
   },
   "resources": {
     "title": "机器性能",
-    "description": "此项目容器的 CPU 与内存上限。",
+    "description": "项目共享此服务器。仅在需要时设置 CPU 或内存限制。",
     "loading": "正在读取目标机器…",
     "unavailable": "机器性能不可用",
     "loadFailed": "无法加载机器性能",
@@ -602,9 +760,9 @@
     "appliesOnNextDeploy": "上限在容器重建时生效——请重新部署以应用更改。",
     "tiers": {
       "unlimited": {
-        "name": "无上限",
-        "description": "使用整台机器（默认）",
-        "spec": "机器容量"
+        "name": "全部容量",
+        "description": "使用服务器可用的 CPU 和内存（默认）",
+        "spec": "与其他项目共享"
       },
       "micro": {
         "name": "Micro",
@@ -646,6 +804,10 @@
       "updated": "机器性能已更新",
       "updateFailed": "更新机器性能失败",
       "invalidValues": "CPU 与内存必须为 0 或正数"
+    },
+    "customized": {
+      "name": "自定义",
+      "description": "选择预设或设置资源上限"
     }
   },
   "sleep": {
@@ -698,7 +860,12 @@
     "linkedTitleOne": "{count} 个项目连接到此应用",
     "linkedTitleOther": "{count} 个项目连接到此应用",
     "linkedNote": "它们会继续运行，数据不受影响 — 只会失去此连接。重新部署即可生效。",
-    "linkedNoteRecordOnly": "它们会继续运行，但关联会随记录一起删除 — 之后重新导入此应用也不会恢复。"
+    "linkedNoteRecordOnly": "它们会继续运行，但关联会随记录一起删除 — 之后重新导入此应用也不会恢复。",
+    "recordOnlyLabel": "仅从 Openship 中移除",
+    "recordOnlyDesc": "在服务器上保持应用及其数据运行 — 仅删除 Openship 中的记录。稍后您可以重新导入。",
+    "recordOnlyReversible": "可逆 — 应用保留在您的服务器上。",
+    "recordOnlyNote": "服务器上的内容均未受到影响 — 应用继续携带数据运行。仅移除了 Openship 的记录，稍后可重新导入。",
+    "confirmRecordOnly": "移除记录"
   },
   "routing": {
     "title": "路由",
@@ -728,7 +895,10 @@
       "provisioning": "等待证书",
       "expired": "已过期",
       "error": "错误",
-      "inactive": "未活跃"
+      "inactive": "未活跃",
+      "unknown": "未知",
+      "external": "外部 TLS",
+      "manual": "手动证书"
     },
     "typeCustom": "自定义域名",
     "typeFree": "免费子域名",
@@ -777,7 +947,13 @@
       "includeWwwDesc": "同时为 www.{domain} 生成记录",
       "includeWwwFallback": "yourdomain.com",
       "adding": "添加中...",
-      "submit": "添加域名"
+      "submit": "添加域名",
+      "servesPath": "服务路径",
+      "servesPathHint": "发送到此域名的请求将从构建产物中的该路径提供服务。",
+      "servesPathRedeploy": "新路径将在下次部署时生效。",
+      "externalIngress": "外部 ingress 与 TLS",
+      "externalIngressDesc": "TLS 在您的反向代理（Cloudflare Tunnel、Nginx Proxy Manager 或负载均衡器）处终止。域名无需指向此服务器，Openship 也不会颁发证书。",
+      "noWww": "该域名已存在于此项目中。"
     },
     "dns": {
       "title": "DNS 记录",
@@ -829,7 +1005,8 @@
       "title": "编辑路由",
       "internalOnly": "仅内部",
       "close": "关闭",
-      "disabledWarning": "服务已禁用——在重新启用该服务之前，路由处于非活跃状态。"
+      "disabledWarning": "服务已禁用——在重新启用该服务之前，路由处于非活跃状态。",
+      "save": "保存更改"
     },
     "menu": {
       "editRoute": "编辑路由",
@@ -840,7 +1017,8 @@
       "renewing": "续期中...",
       "renewSsl": "续期 SSL",
       "rechecking": "重新检查中...",
-      "recheckSsl": "重新检查 SSL"
+      "recheckSsl": "重新检查 SSL",
+      "uploadCert": "上传证书"
     },
     "toast": {
       "enterPort": "请输入此域名应路由到的端口（1–65535）。",
@@ -871,7 +1049,11 @@
       "enterPortShort": "请输入此域名应路由到的端口。",
       "noServicePort": "没有服务发布端口 {port}。请先将该端口添加到某个服务。",
       "enterCustom": "请输入自定义域名。",
-      "enterSubdomain": "请输入子域名。"
+      "enterSubdomain": "请输入子域名。",
+      "certUploaded": "已为 {hostname} 安装证书。",
+      "certUploadFailed": "为 {hostname} 安装证书失败。",
+      "publishing": "正在发布 — 部署以安装边缘并应用您的域名…",
+      "publishFailed": "域名已保存，但部署未启动 — 请重新部署以进行发布。"
     },
     "edge": {
       "setUp": "设置边缘",
@@ -901,12 +1083,17 @@
         "manual_certificate": "此域名使用手动上传的证书。请上传有效的替代证书后重新检查。Openship 不会自动续期此证书。",
         "managed_certificate": "TLS 由外部代理或 Openship Cloud 管理。请检查相应提供方的配置。",
         "route_missing": "已配置的路由尚未应用。请重试路由操作以应用配置。目前没有安排路由自动重试。",
-        "manual_dns": "此证书使用手动 TXT 验证。请打开 HTTPS 设置以确认新的 TXT 记录，或选择已连接的 DNS 提供商以自动续期。"
+        "manual_dns": "此证书使用手动 TXT 验证。请打开 HTTPS 设置以确认新的 TXT 记录，或选择已连接的 DNS 提供商以自动续期。",
+        "managed_owner": "此主机名及其证书由所属服务管理。请检查该服务的域名设置。"
       }
     },
     "records": {
       "failed": "无法加载此域名的 DNS 记录。",
-      "retry": "重试"
+      "retry": "重试",
+      "toggle": "DNS 记录",
+      "hint": "在您的 DNS 服务商处添加这些记录，然后点击“验证”。",
+      "loading": "正在加载记录…",
+      "none": "此域名无需添加记录。"
     },
     "outputHint": {
       "body": "在 {path} 未找到构建输出 — 请检查输出目录并重新部署。",
@@ -949,6 +1136,32 @@
         "cancelled": "验证已取消",
         "expired": "TXT 验证已过期"
       }
+    },
+    "verifyMissing": {
+      "both": "CNAME 记录和 TXT 记录均未解析 — 请添加下方记录，等待 DNS 生效后点击“验证”。",
+      "cname": "CNAME 记录尚未解析 — 请在下方添加，等待 DNS 生效后点击“验证”。",
+      "txt": "TXT 验证记录尚未解析 — 请在下方添加，等待 DNS 生效后点击“验证”。"
+    },
+    "portHint": {
+      "body": "端口 {port} 未响应 — 在应用监听该端口之前，请求可能会返回 502。",
+      "bodyService": "服务 \"{service}\"：端口 {port} 未响应 — 在其监听该端口之前，请求可能会返回 502。"
+    },
+    "certUpload": {
+      "title": "上传证书",
+      "desc": "使用您自己的证书（自带证书或 Cloudflare Origin CA）提供 TLS 服务，而非 Let's Encrypt。当上游代理位于此域名前端且源站仍需要真实证书时（如 Cloudflare Full-strict）使用。上传证书后，Certbot 将在此域名上停用 — 通过上传新证书进行续订。",
+      "certLabel": "证书 (fullchain PEM)",
+      "certPlaceholder": "-----BEGIN CERTIFICATE-----",
+      "keyLabel": "私钥 (PEM)",
+      "keyPlaceholder": "-----BEGIN PRIVATE KEY-----",
+      "submit": "安装证书",
+      "submitting": "正在安装…",
+      "close": "取消"
+    },
+    "removeRoute": {
+      "title": "删除路由",
+      "description": "应用将继续运行 — 仅删除此路由及其边缘注册。您可以随时重新添加它。",
+      "confirm": "删除路由",
+      "removing": "正在删除…"
     }
   },
   "serviceEnvironment": {
@@ -958,5 +1171,170 @@
     "buildArguments": "构建参数在 Compose 文件或源代码配置中设置，更改后需要重新构建。",
     "projectLink": "编辑共享项目环境",
     "loadFailed": "无法加载项目变量名称以检查覆盖关系。"
+  },
+  "cloudStaticHosting": {
+    "title": "静态托管",
+    "description": "选择构建文件的提供位置。",
+    "pages": "Cloud Pages（默认）",
+    "pagesDescription": "将文件发布到 Cloud 边缘，无需持续运行应用容器。",
+    "server": "托管服务器",
+    "serverDescription": "通过托管服务器上的 nginx 容器提供文件。",
+    "nextDeploy": "保存的托管更改将在下次部署时生效。"
+  },
+  "deploymentChecks": {
+    "title": "GitHub 部署检查",
+    "description": "在已部署的提交上显示部署和服务的结果。",
+    "customize": "自定义检查",
+    "deployment": "部署结果",
+    "services": "所有服务，包括新服务",
+    "selectedServices": "选择服务",
+    "includeErrors": "包含失败详情",
+    "errorsHint": "隐去敏感信息后的错误摘要将与有权读取此仓库的人共享。",
+    "emptySelection": "请至少选择一项检查，或关闭结果报告。",
+    "connectionHint": "需要具有 Checks 写入权限的 GitHub App。",
+    "connection": "GitHub 连接",
+    "deliveryFailed": "无法发送检查结果",
+    "saveFailed": "无法保存 GitHub 检查设置。"
+  },
+  "appSource": {
+    "title": "来源",
+    "description": "此应用从版本发布进行部署 — 无需推送代码仓库；更新将以新版本形式发布。",
+    "sourceType": "来源",
+    "kindRelease": "版本发布",
+    "kindImage": "容器镜像",
+    "current": "当前版本",
+    "latest": "最新版本",
+    "repository": "仓库",
+    "notChecked": "尚未检查",
+    "upToDate": "已是最新",
+    "updateAvailable": "有可用更新",
+    "checkForUpdates": "检查更新",
+    "checkFailed": "无法检查更新",
+    "update": "更新",
+    "updateTo": "更新至 {version}",
+    "updating": "正在更新…",
+    "updateFailed": "更新失败",
+    "toastTitle": "来源",
+    "cliManaged": "这是 Openship 控制平面 — 它会自动更新。在主机上运行 \"openship update\" 即可升级；此处无需任何更改。"
+  },
+  "routeRules": {
+    "title": "路由规则",
+    "description": "在边缘实施的速率限制、封禁及允许/拒绝规则 — 立即生效，无需重新部署。",
+    "loading": "正在加载规则…",
+    "empty": "暂无路由规则。请在下方添加一条。",
+    "allHosts": "所有主机名",
+    "allPaths": "所有路径",
+    "addTitle": "添加规则",
+    "pathLabel": "路径前缀（可选）",
+    "rps": "请求数 / 秒",
+    "burst": "突发 (Burst)",
+    "methods": "仅允许的请求方法",
+    "banIps": "封禁 IP / CIDR",
+    "banCountries": "封禁国家/地区 (ISO)",
+    "allowCountries": "仅允许国家/地区 (ISO)",
+    "denyCidrs": "拒绝 CIDR",
+    "allowReferers": "防盗链：允许的 Referer",
+    "banUserAgents": "封禁 User-Agent（子字符串）",
+    "blockEmptyUa": "阻止空 User-Agent",
+    "blockStatus": "阻止响应状态码",
+    "add": "添加规则",
+    "remove": "移除",
+    "enabled": "已启用",
+    "disabled": "已禁用",
+    "saved": "规则已保存",
+    "saveFailed": "保存规则失败",
+    "loadFailed": "加载规则失败"
+  },
+  "runtimeUpdates": {
+    "options": "重新部署选项",
+    "refresh": "刷新镜像并重新部署",
+    "refreshing": "正在刷新镜像…",
+    "check": "检查镜像更新",
+    "title": "镜像更新",
+    "failed": "无法启动镜像刷新。",
+    "uncertain": "请求超时。请先检查部署历史，再重试。",
+    "available": "有可用的镜像更新",
+    "current": "镜像摘要与最近观测到的仓库摘要一致。",
+    "checkUnavailable": "比较需要已记录的摘要和镜像仓库访问权限。",
+    "checkFailed": "无法检查镜像更新。",
+    "pinned": "镜像已通过摘要固定。请编辑配置的引用以更新镜像。"
+  },
+  "securityAdvisories": {
+    "checksEnabled": "检查安全公告",
+    "checksDescription": "关闭后，将暂停此工作区的运行时和主机检查、新公告提醒及安全补丁操作。保留现有信息和项目更新授权。",
+    "checksDisabled": "此工作区已禁用安全公告检查。",
+    "manageChecks": "管理安全公告检查",
+    "retrySettings": "重试",
+    "bannerSettings": "安全横幅设置",
+    "hideBanners": "隐藏安全横幅",
+    "showBanners": "显示安全横幅",
+    "bannerDescription": "在此浏览器和工作区的仪表板顶部显示应用和服务器的安全通知。检查与通知渠道单独控制。",
+    "openRuntimeConfiguration": "检查运行时配置",
+    "severity": {
+      "critical": "严重",
+      "high": "高",
+      "moderate": "中等",
+      "low": "低"
+    },
+    "sourceRedeployRequired": "刷新运行时之前，请从已保存的源代码重新构建此应用。当前镜像没有经过验证的源代码修订版本。从源代码重新部署可能会包含更新的代码；请先在“部署”中查看，然后再次检查此安全公告。",
+    "openSourceRedeploy": "打开源代码重新部署",
+    "reviewApps": "查看受影响的应用（{count}）",
+    "pendingApps": "{count} 个应用正在等待检查。结果将自动显示。",
+    "checkAgain": "重新检查",
+    "checking": "检查中…",
+    "title": "安全公告",
+    "unavailable": "安全检查不可用或已过期。已有公告仍会显示。",
+    "affected": "此工作区中你有权访问的应用和服务器的检查结果。",
+    "noMatches": "在已检查的数据中没有匹配公告。这不是完整的漏洞扫描。",
+    "partial": "部分运行时无法检查。",
+    "guidance": "阅读公告",
+    "automatic": "自动更新已验证的安全补丁",
+    "automaticDescription": "默认关闭。仅自动更新当前标签下具有签名修复的镜像服务。源码构建、固定镜像和版本变更需要审核。仍执行常规部署和健康检查。",
+    "notifications": "各通知渠道默认开启安全提醒。可在设置 → 通知中单独调整。",
+    "publicFeed": "查看公开数据源",
+    "checked": "证据检查时间",
+    "possible": "镜像标签匹配；需要核实已部署的版本。",
+    "tab": "安全",
+    "monitoring": "在监控中查看",
+    "persistent": "关闭横幅后，未解决的发现仍会保留在此处。",
+    "otherApps": "其他应用 ({count})",
+    "details": "详情与建议"
+  },
+  "hostSecurity": {
+    "title": "服务器安全",
+    "reviewPatch": "检查补丁",
+    "applyPatch": "应用已检查的补丁",
+    "patchDetails": "检查服务器补丁",
+    "interruption": "将安装列出的软件包，并可能重启服务。请检查所有更改。已运行的服务可能仍需要管理员手动重启。",
+    "rebootRequired": "需要重启。重启后必须检查正在运行的内核。",
+    "manual": "需要手动检查",
+    "runs": "运行记录",
+    "noRuns": "暂无安全补丁运行记录。",
+    "scanTask": "安全公告检查任务",
+    "scanHint": "按保存的计划运行。检查结果会过期，失败的检查将以逐步延长的间隔重试。",
+    "schedulerPaused": "定期检查已暂停。",
+    "checkPending": "检查待处理。缓存的信息可能已过期。",
+    "verified": "版本检查通过",
+    "needsReview": "需要检查",
+    "nextCheck": "下次检查",
+    "notSupported": "主机补丁适用于客户自行管理的 Ubuntu 服务器。提供商管理的基础设施使用其自身的维护流程。",
+    "package": "软件包",
+    "current": "已安装",
+    "target": "计划版本",
+    "reviewResources": "查看受影响的资源 ({count})",
+    "openRuns": "打开服务器运行记录",
+    "lastRun": "上次检查",
+    "appOpen": "在 Openship 打开时运行。",
+    "scanStates": {
+      "pending": "待处理",
+      "running": "运行中",
+      "completed": "已完成",
+      "partial": "部分已检查",
+      "interrupted": "已中断"
+    },
+    "reviewReboot": "审核重启",
+    "applyReboot": "安排重启",
+    "rebooting": "已安排重启，等待内核验证",
+    "rebootInterruption": "服务器将在一分钟后重启，中断其所有工作负载。主机重新连接后，Openship 将验证正在运行的内核。"
   }
 }

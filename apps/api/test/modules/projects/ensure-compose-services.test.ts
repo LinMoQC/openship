@@ -1,6 +1,9 @@
 import "../mail/_setup-env";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+// This suite isolates project repositories; no auth database is available.
+vi.mock("@repo/platform/engine/lib/auth", () => ({ auth: {} }));
+
 /**
  * projects/ensure must persist the compose services it is handed (#334).
  *
@@ -36,9 +39,9 @@ const serverRepo = vi.hoisted(() => ({
   getInOrganization: vi.fn(),
 }));
 
-// Fully mocked (no importOriginal) so the test never boots a real PGlite —
-// ensureProject only ever touches these three repos.
-vi.mock("@repo/db", () => ({
+// Keep the shared routing normalizer real; all repository I/O stays isolated.
+vi.mock("@repo/db", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@repo/db")>()),
   repos: {
     releases: { binding: vi.fn(async () => null), pendingJournals: vi.fn(async () => []), journals: vi.fn(async () => []) },
     project: projectRepo,
@@ -59,6 +62,7 @@ vi.mock("@repo/platform/engine/modules/domains/project-route.service", () => ({
   deriveEnvironmentPublicEndpoints: vi.fn(),
   deriveNextProjectRouteState: vi.fn(() => ({ publicEndpoints: [] })),
   persistProjectRouteState: vi.fn(),
+  prepareProjectRouteState: vi.fn(() => ({ projectDomains: [], publicEndpoints: [] })),
   reapplyProjectLiveRoutes: vi.fn(),
   resolveProjectRouteState: vi.fn(),
   syncProjectRouteState: vi.fn(),

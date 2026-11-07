@@ -16,6 +16,7 @@
  * Results are cached in-memory for a few minutes (registry rate limits).
  */
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { env } from "../config/env";
 import { safeFetch, type SafeFetchResponse } from "./safe-fetch";
 
@@ -104,7 +105,8 @@ async function fetchToken(challenge: string): Promise<string | null> {
     if (!res.ok) return null;
     const body = (await res.json()) as { token?: string; access_token?: string };
     return body.token ?? body.access_token ?? null;
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "platform/engine/lib/image-registry");
     return null;
   }
 }
@@ -130,7 +132,8 @@ async function headManifest(
       allowPrivate: !env.CLOUD_MODE,
       maxRedirects: 3,
     });
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "platform/engine/lib/image-registry");
     return null;
   }
 }
@@ -140,11 +143,11 @@ async function headManifest(
  * Returns null on ANY failure (unknown/private registry, network, auth, rate
  * limit) — the caller treats null as "no update info" and never blocks.
  */
-export async function resolveLatestImageDigest(image: string): Promise<string | null> {
+export async function resolveLatestImageDigest(image: string, options?: { refresh?: boolean }): Promise<string | null> {
   const cached = cache.get(image);
   // Note: cache read uses the wall clock; callers pass real images, and a stale
   // few-minute entry is acceptable for a background scan.
-  if (cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.digest;
+  if (!options?.refresh && cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.digest;
 
   const digest = await resolveUncached(image);
   cache.set(image, { digest, at: Date.now() });

@@ -14,9 +14,10 @@
  * elsewhere.
  */
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { env } from "@repo/platform/engine/config/env";
 import { pinnedEdgeImage, withPinnedEdgeImage } from "@repo/platform/engine/lib/edge-image";
-import { resolveAcmeProviderOptions } from "@repo/platform/engine/lib/acme-config";
+import { edgeProviderOptions } from "@repo/platform/engine/lib/edge-provider-options";
 
 export interface SelfEdgeInfraProgress {
   onLog?: (message: string, level?: "info" | "warn" | "error") => void;
@@ -163,7 +164,7 @@ async function runEnsure(
         status,
         sites: scan.sites,
         acmeEmail: env.OPENSHIP_ACME_EMAIL,
-        nginx: resolveAcmeProviderOptions(),
+        nginx: edgeProviderOptions(),
         extraRoutes: [],
         // Pin the edge the takeover installs. `setDefaultEdgeImage` at boot already
         // covers this, but state it here too: this is the ONE caller of
@@ -199,7 +200,8 @@ async function runEnsure(
       let siteCount = 0;
       try {
         siteCount = (await importSites(executor, status)).sites.length;
-      } catch {
+      } catch (diagnosticFailure) {
+        observeCaughtError(diagnosticFailure, "api/lib/startup/self-edge");
         /* best-effort site count only */
       }
       const sitesNote = siteCount > 0 ? ` serving ${siteCount} site${siteCount === 1 ? "" : "s"}` : "";

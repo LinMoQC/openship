@@ -1,4 +1,5 @@
 import { Type, type Static } from "@sinclair/typebox";
+import { GitHubDeploymentChecksSchema } from "./deployment-checks";
 import {
   CreateProjectEnvironmentBody,
   MergeEnvVarsBody,
@@ -13,7 +14,6 @@ import {
 } from "./project-inputs";
 import {
   DeploymentHistoryFilters,
-  DeploymentLogsSchema,
   DeploymentPageSchema,
   LogEntrySchema,
 } from "./deployment-resources";
@@ -21,8 +21,13 @@ import { AppError } from "@repo/core";
 import { ProjectSchema } from "./projects";
 import type { ResourceOperationSchema, ResourceOperations } from "./resource-operations";
 import { ProjectIntegrationSchemas } from "./project-integrations";
-import { ProjectRoutingSchemas } from "./project-routing";
+import {
+  ProjectRoutingSchemas,
+  ProjectRoutingClaimSchema,
+  ProjectRoutingRetrySchema,
+} from "./project-routing";
 import { ProjectLogSchemas } from "./project-logs";
+import { ProjectRuntimeLogsInputSchema, ProjectRuntimeRolesSchema, RuntimeRoleConfigurationSchema, RuntimeRoleConfigurationInputSchema } from "./project-runtime";
 import { ProjectTransferSchemas } from "./project-transfer";
 import { AppProjectSchemas } from "./apps";
 import { ProjectClusterSchemas } from "./project-cluster";
@@ -64,6 +69,7 @@ const ResourceValuesSchema = Type.Object({
 export const ProjectResourcesSchema = Type.Object({
   production: ResourceValuesSchema,
   build: ResourceValuesSchema,
+  buildMode: Type.Optional(Type.Union([Type.Literal("automatic"), Type.Literal("custom")])),
   sleepMode: Type.String(),
   port: Type.Number(),
   tier: ResourceTierEnum(),
@@ -180,6 +186,12 @@ export const ProjectGitInfoSchema = Type.Union([
       }),
     ),
     auto_deploy: Type.Boolean(),
+    github_checks: Type.Optional(GitHubDeploymentChecksSchema),
+    github_checks_delivery: Type.Optional(Type.Union([Type.Object({
+      error: nullableString,
+      updatedAt: Type.String(),
+      pending: nullableString,
+    }), Type.Null()])),
     webhook_strategy: webhookStrategy,
     webhook_active: Type.Boolean(),
     webhook_domain: nullableString,
@@ -194,6 +206,8 @@ export const ProjectDetailsSchema = Type.Object({
   project: Type.Intersect([
     ProjectSchema,
     Type.Object({
+      routingClaims: Type.Optional(Type.Array(ProjectRoutingClaimSchema)),
+      routingRetry: Type.Optional(Type.Union([ProjectRoutingRetrySchema, Type.Null()])),
       serviceCount: Type.Integer({ minimum: 0 }),
       hasMultipleServices: Type.Boolean(),
       projectType: Type.Union([
@@ -240,6 +254,7 @@ export const ProjectPendingActionSchema = Type.Object({
         "prompt",
         "partial_decision",
         "routing_unsynced",
+        "runtime_health",
         "domain_unverified",
         "ssl_error",
         "port_advisory",
@@ -267,6 +282,7 @@ const driftBase = {
   supported: Type.Literal(true),
   behind: Type.Boolean(),
   latestInProgress: Type.Boolean(),
+  inProgressDeploymentId: Type.Optional(nullableString),
 };
 export const ProjectDriftSchema = Type.Union([
   Type.Object({ supported: Type.Literal(false) }),
@@ -361,6 +377,7 @@ export const ProjectControlSchemas = {
   },
   listDeployments: {
     action: "read",
+    capability: "deployments:read",
     input: Type.Object({
       ...DeploymentHistoryFilters,
       page: Type.Optional(Type.Integer({ minimum: 1 })),
@@ -395,6 +412,62 @@ export const ProjectControlSchemas = {
       bytesReclaimed: Type.Number(),
     }),
   },
+  buildCacheMigration: {
+    action: "write",
+    input: Type.Object({
+      serviceId: Type.Optional(Type.String()),
+      remove: Type.Optional(Type.Array(Type.String({ maxLength: 500 }), { maxItems: 50 })),
+    }),
+    output: Type.Object({
+      candidates: Type.Array(Type.Object({ spec: Type.String(), target: Type.String() })),
+      canMigrate: Type.Boolean(),
+      deploymentId: nullableString,
+      removed: Type.Array(Type.String()),
+    }),
+  },
+  configurePreviews: {
+    action: "write",
+    input: Type.Object({
+      enabled: Type.Boolean(),
+      comments: Type.Boolean(),
+      baseDomain: Type.Optional(Type.String({ maxLength: 200 })),
+      protectionHostname: Type.Optional(Type.String({ minLength: 1, maxLength: 253 })),
+    }),
+    output: Type.Object({
+      settings: Type.Object({
+        enabled: Type.Boolean(),
+        comments: Type.Boolean(),
+        baseDomain: Type.Optional(Type.String()),
+        protectionHostname: Type.Optional(Type.String()),
+      }),
+    }),
+  },
+  listPreviews: {
+    action: "read",
+    output: Type.Object({
+      settings: Type.Union([
+        Type.Object({
+          enabled: Type.Boolean(),
+          comments: Type.Boolean(),
+          baseDomain: Type.Optional(Type.String()),
+          protectionHostname: Type.Optional(Type.String()),
+        }),
+        Type.Null(),
+      ]),
+      previews: Type.Array(
+        Type.Object({
+          id: Type.String(),
+          number: Type.Integer(),
+          projectId: nullableString,
+          status: Type.String(),
+          url: nullableString,
+          error: nullableString,
+          headSha: nullableString,
+        }),
+      ),
+    }),
+  },
+
   getRollbackCapacity: {
     action: "read",
     output: Type.Object({
@@ -417,6 +490,7 @@ export const ProjectControlSchemas = {
         port: Type.Number(),
         listening: Type.Boolean(),
         checked: Type.Boolean(),
+        loopbackOnly: Type.Optional(Type.Boolean()),
         serviceId: Type.Optional(Type.String()),
         serviceName: Type.Optional(Type.String()),
         skippedReason: Type.Optional(Type.String()),
@@ -464,6 +538,27 @@ export const ProjectControlSchemas = {
     }),
   },
   getResources: { action: "read", output: ProjectResourcesSchema },
+  migrateCommandEnvironment: {
+    action: "write",
+    input: Type.Object({
+      environment: Type.Union([
+        Type.Literal("production"),
+        Type.Literal("preview"),
+        Type.Literal("development"),
+      ]),
+      serviceId: Type.Optional(Type.String({ minLength: 1 })),
+      commands: Type.Object({
+        installCommand: Type.Optional(Type.String({ maxLength: 1000 })),
+        buildCommand: Type.Optional(Type.String({ maxLength: 1000 })),
+        startCommand: Type.Optional(Type.String({ maxLength: 1000 })),
+      }),
+    }),
+    output: Type.Object({
+      keys: Type.Array(Type.String()),
+      commands: Type.Record(Type.String(), Type.String()),
+    }),
+  },
+
   ...ProjectClusterSchemas,
   updateResources: { action: "write", input: UpdateResourcesBody, output: ProjectResourcesSchema },
   setSleepMode: {
@@ -489,10 +584,14 @@ export const ProjectControlSchemas = {
   },
   runtimeLogs: {
     action: "read",
-    input: DeploymentLogsSchema,
+    input: ProjectRuntimeLogsInputSchema,
     optionalInput: true,
     output: Type.Array(LogEntrySchema),
   },
+  getRuntimeRoles: { action: "read", output: ProjectRuntimeRolesSchema },
+  getRuntimeRoleConfiguration: { action: "read", output: RuntimeRoleConfigurationSchema },
+  configureRuntimeRoles: { action: "write", input: RuntimeRoleConfigurationInputSchema,
+    output: Type.Object({ deploymentId: Type.String() }) },
   getCloneToken: { action: "read", output: CloneTokenStateSchema },
   updateCloneToken: {
     action: "admin",

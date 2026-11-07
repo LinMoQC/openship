@@ -15,6 +15,24 @@ import { safeErrorMessage } from "@repo/core";
 export type RemoteState = "present" | "absent" | "unreachable";
 
 /**
+ * The transport explicitly reported an unavailable network/route. A timeout,
+ * refused connection or unreachable HOST cannot establish this: those remain
+ * target-specific observation failures. Works after SSH/Docker serialize errors.
+ */
+export function isNetworkUnavailableError(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  for (let current = error; current && !seen.has(current);) {
+    seen.add(current);
+    if (/\b(?:ENETUNREACH|ENETDOWN|ENONET)\b/.test(safeErrorMessage(current))) return true;
+    if (typeof current !== "object") return false;
+    const detail = current as { code?: unknown; cause?: unknown };
+    if (typeof detail.code === "string" && /^(?:ENETUNREACH|ENETDOWN|ENONET)$/.test(detail.code)) return true;
+    current = detail.cause;
+  }
+  return false;
+}
+
+/**
  * True when an error means "couldn't reach the remote" (network/SSH/timeout)
  * as opposed to a real operation failure. Reuses the adapter connection
  * classifier and additionally matches the executor's lowercase command-timeout
@@ -22,6 +40,7 @@ export type RemoteState = "present" | "absent" | "unreachable";
  * misses (it only matches capital-T "Timed out" / ETIMEDOUT).
  */
 export function isConnectionLoss(err: unknown): boolean {
+  if (isNetworkUnavailableError(err)) return true;
   // Fast path for Error instances (reuses the adapter classifier).
   if (isRemoteConnectionError(err)) return true;
   // Message-string fallback so this also works when the caller passes a bare

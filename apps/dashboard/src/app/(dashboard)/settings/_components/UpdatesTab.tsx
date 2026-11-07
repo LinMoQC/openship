@@ -1,5 +1,6 @@
 "use client";
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { Icon as UiIcon } from "@repo/ui/icons";
 
 /**
@@ -28,7 +29,9 @@ export function UpdatesTab() {
     void window.desktop?.config
       ?.get<boolean | undefined>("autoUpdate")
       .then((v) => setAutoUpdate(v === true))
-      .catch(() => {});
+      .catch((diagnosticFailure) => {
+        observeCaughtError(diagnosticFailure, "dashboard/app/(dashboard)/settings/_components/UpdatesTab");
+      });
   }, [desktop]);
 
   const toggleAuto = useCallback((v: boolean) => {
@@ -62,7 +65,7 @@ export function UpdatesTab() {
                 {!state
                   ? t.settings.updates.checking
                   : state.adaptationRequired
-                    ? `${t.projects.release.adaptationPending} · ${state.latestVersion ?? ""}`
+                    ? state.latestVersion ? interpolate(t.projects.release.adaptationVersion, { version: state.latestVersion }) : t.projects.release.adaptationPending
                   : !state.latestVersion
                     ? t.projects.release.status.unknown
                   : state.updateAvailable
@@ -71,8 +74,9 @@ export function UpdatesTab() {
               </p>
               <p className="text-[12px] text-muted-foreground">
                 {state?.currentVersion ? interpolate(t.settings.updates.current, { version: state.currentVersion }) : ""}
-                {state?.customRuntime ? ` · ${t.projects.release.customRuntime}` : state?.updateAvailable && !desktop ? t.settings.updates.rerunToUpdate : ""}
+                {!state?.customRuntime && state?.updateAvailable && !desktop ? t.settings.updates.rerunToUpdate : ""}
               </p>
+              {state?.customRuntime && <p className="text-[12px] text-muted-foreground">{t.projects.release.customRuntime}</p>}
             </div>
           </div>
           <div className="flex items-center gap-2">

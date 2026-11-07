@@ -1,4 +1,4 @@
-export { user, session, account, verification } from "./auth";
+export { user, session, account, verification, passkey, twoFactor } from "./auth";
 export { externalIdentity, externalNamespace, platformInstance } from "./embedding";
 export { organization, member, invitation } from "./organization";
 export { auditEvent } from "./audit-event";
@@ -16,6 +16,7 @@ export { projectGroup, project, envVar } from "./project";
 export { deployment, buildSession } from "./deployment";
 export { domain } from "./domain";
 export { acmeAccount, domainDnsChallenge } from "./domain-dns-challenge";
+export { routeProtection } from "./route-protection";
 export { routeRule } from "./route-rule";
 export { webhookSource } from "./webhook-source";
 export {
@@ -26,12 +27,20 @@ export {
 } from "./incoming-webhook";
 export { systemNotice } from "./system-notice";
 export { updateStatus } from "./update-status";
+export { advisoryFeed, projectSecurity, securityRefreshAttempt, serverSecurity, securityScanState } from "./security-advisory";
 export { serverModuleStatus } from "./server-module-status";
 export { serverContainerStatus, type ServerContainerDetail } from "./server-container-status";
 export { edgeTargetVerification } from "./edge-target-verification";
 export { serviceIncident, INCIDENT_KINDS, type IncidentKind } from "./service-incident";
 export { cloudWebhookBinding } from "./cloud-webhook-binding";
 export { cloudDockerWorkspace } from "./cloud-docker-workspace";
+export {
+  cloudWorkspace,
+  cloudServerDeletion,
+  type CloudWorkspaceOperation,
+  type CloudWorkspaceActivity,
+  type LinkedCloudServer,
+} from "./cloud-workspace";
 export { projectConnection } from "./project-connection";
 export { webhookDelivery } from "./webhook-delivery";
 export { service, serviceDeployment } from "./service";
@@ -59,7 +68,7 @@ export { cloudHandoffCode } from "./cloud-handoff-code";
 export { dataTransferSession, dataTransferChunk } from "./data-transfer";
 export { personalAccessToken } from "./personal-access-token";
 export { personalAccessTokenGrant } from "./personal-access-token-grant";
-export { oauthApplication, oauthAccessToken, oauthConsent } from "./oauth";
+export { oauthApplication, legacyOauthAccessToken, legacyOauthConsent } from "./oauth";
 export { backupDestination, backupPolicy, backupRun, backupRestore } from "./backup";
 export { dockerMigrationRun } from "./docker-migration";
 export {
@@ -89,3 +98,44 @@ export { clusterStorage } from "./cluster-storage";
 export { clusterDatabase } from "./cluster-database";
 
 export { releaseBinding, releasePlan, releaseRun, serviceCutoverJournal } from "./release";
+export {
+  cloudAnalyticsEvent,
+  cloudAnalyticsCheckout,
+  cloudAnalyticsWorkspace,
+} from "./cloud-analytics";
+export { cloudSupportTicket, cloudSupportMessage } from "./cloud-support";
+export { cloudCustomerEmail } from "./cloud-customer-email";
+export { instanceController, instanceHandoff } from "./instance-controller";
+export {
+  actionRunner,
+  actionWorkflow,
+  actionProject,
+  actionDeployment,
+  actionRun,
+  actionJob,
+  actionEvent,
+  actionDelivery,
+  actionRunnerSession,
+  actionCommand,
+} from "./actions";
+export { actionStorageObject, actionStorageChunk } from "./action-storage";
+export { actionOidcKey } from "./action-oidc";
+export { actionBudget, actionCreditPurchase } from "./action-billing";
+
+export { cloudBuildActivity, type CloudBuildActivity } from "./cloud-build-activity";
+
+export * from "./ingress-connection";
+export * from "./ingress-hostname";
+
+export * from "./pull-request-preview";
+
+export * from "./management-billing";
+
+export { assistantConnection, assistantConversation, assistantRequest, assistantAuthorization } from "./assistant";
+
+export * from "./chat-apps";
+export * from "./assistant-automations";
+
+export * from "./assistant-agents";
+
+export * from "./oauth-provider";

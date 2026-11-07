@@ -1,11 +1,9 @@
 import { Hono } from "hono";
-import { authMiddleware } from "../../middleware/auth";
 import { secureRouter } from "../../lib/secure-router";
 import { issueTicket, terminalWsHandler } from "./terminal.controller";
-import { repos } from "@repo/db";
 
 /**
- * Interactive terminal routes - self-hosted only (cloud mode 404s here).
+ * Interactive server terminals over the shared authorized connection boundary.
  *
  *   POST /api/terminal/ticket           one-shot WS auth ticket (cookie-authed)
  *   GET  /api/terminal/ws/:serverId    WebSocket upgrade
@@ -19,7 +17,6 @@ import { repos } from "@repo/db";
 const r = secureRouter(new Hono(), {
   module: "terminal",
   basePath: "/api/terminal",
-  localOnly: true,
 });
 
 // Ticket endpoint - normal HTTP auth.
@@ -39,23 +36,4 @@ r.public(
   terminalWsHandler,
 );
 
-// Boot-time sweep: any audit rows left open by a prior crash are
-// finalized as 'server_error'. Their underlying ssh2 channels are dead
-// (process died), so the rows are accurate after this. Runs once at
-// module load - no top-level await in the route file itself, so we
-// chain it onto a fire-and-forget promise.
-void repos.terminalSession
-  .closeAllActive("server_error")
-  .then((n) => {
-    if (n > 0) {
-      // eslint-disable-next-line no-console
-      console.log(`[terminal] swept ${n} orphan session row(s) from previous run`);
-    }
-  })
-  .catch(() => {
-    // Sweep failure is non-fatal; the rows just remain open until the
-    // next restart succeeds.
-  });
-
 export const terminalRoutes = r.hono;
-

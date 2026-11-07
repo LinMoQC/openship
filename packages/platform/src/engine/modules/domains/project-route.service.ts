@@ -1,3 +1,4 @@
+import { reportCaughtError as observeCaughtError, diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import { findActiveDeployment } from "@repo/platform/engine/lib/active-deployment";
 import { repos, type Domain, type Project } from "@repo/db";
 import { resolveWorkload, safeErrorMessage } from "@repo/core";
@@ -14,6 +15,7 @@ import {
   type StoredPublicEndpoint,
 } from "../../lib/public-endpoints";
 import { assertValidCustomDomain, assertValidCustomDomains } from "../../lib/custom-domain-guard";
+import { assertFreeEndpointsAllowed } from "../../lib/free-domain-guard";
 import { resolveLiveUpstreamUrl, resolveRouteStrategy } from "../../lib/upstream-url";
 import {
   describeCandidatePorts,
@@ -41,6 +43,8 @@ import {
 } from "../../lib/route-apply.service";
 import { observedLoopbackPublishFromUrl } from "../deployments/observed-host-port-claims";
 import { env } from "../../config/env";
+import { boxOwningOrgId } from "../../lib/box-org";
+import { resolveProjectLiveDeployTarget } from "../projects/project-deploy-target";
 
 type ProjectRouteProject = Pick<Project, "id" | "slug">;
 type RouteStateProject = Pick<Project, "slug">;
@@ -61,13 +65,13 @@ export interface ProjectRouteState {
 }
 
 export function deriveEnvironmentPublicEndpoints(
-  publicEndpoints: Array<Pick<StoredPublicEndpoint, "port" | "targetPath">>,
+  publicEndpoints: Array<Pick<StoredPublicEndpoint, "port" | "targetPath" | "redirectTo">>,
   slug: string,
 ): StoredPublicEndpoint[] {
   const normalizedSlug = slug.trim().toLowerCase();
   if (!normalizedSlug) return [];
 
-  const primaryEndpoint = publicEndpoints[0];
+  const primaryEndpoint = publicEndpoints.find((endpoint) => !endpoint.redirectTo);
   if (!primaryEndpoint) return [];
 
   if (primaryEndpoint.targetPath) {
@@ -108,13 +112,14 @@ function draftEndpointsWithIds(
     ]),
   );
 
+  const primaryIndex = endpoints.findIndex((endpoint) => !endpoint.redirectTo && !endpoint.customDomain?.startsWith("*."));
   return endpoints.map((endpoint, index) => {
     const hostname = publicEndpointHostname(endpoint) ?? "";
     return {
       ...endpoint,
       id: hostname ? idByHostname.get(hostname.toLowerCase()) : undefined,
       hostname,
-      isPrimary: index === 0,
+      isPrimary: index === primaryIndex,
     } satisfies ProjectRouteEndpoint;
   });
 }
@@ -141,7 +146,8 @@ function buildRouteState(
   projectDomains: Domain[],
   publicEndpoints: ProjectRouteEndpoint[],
 ): ProjectRouteState {
-  const primaryEndpoint = publicEndpoints[0];
+  const primaryEndpoint = publicEndpoints.find((endpoint) => endpoint.isPrimary && !endpoint.redirectTo)
+    ?? publicEndpoints.find((endpoint) => !endpoint.redirectTo);
 
   return {
     projectDomains,
@@ -236,27 +242,40 @@ export async function persistProjectRouteState(
   });
 }
 
-export async function syncProjectRouteState(
-  project: ProjectRouteProject,
-  input: {
-    projectDomains?: Domain[];
-    nextPublicEndpoints?: NextPublicEndpointsInput;
-    slug?: string | null;
-    customDomain?: string | null;
-    /**
-     * Deploy-only: never destroy custom-domain configuration during this sync.
-     * Left unset by the Domains editor so explicit removals still apply.
-     */
-    preserveCustomDomains?: boolean;
-  },
+type ProjectRouteWriteInput = {
+  projectDomains?: Domain[];
+  nextPublicEndpoints?: NextPublicEndpointsInput;
+  slug?: string | null;
+  customDomain?: string | null;
+  /** Deploy-only: keep custom-domain configuration omitted from the snapshot.
+   * Editors leave this unset so explicit removals still apply. */
+  preserveCustomDomains?: boolean;
+};
+
+/** Validate the intended routes before callers persist project field changes.
+ * Both editors and deploy-time default routes use this same owner and baseline. */
+export async function prepareProjectRouteState(
+  project: ProjectRouteProject & Pick<Project, "organizationId" | "workspaceId">,
+  input: ProjectRouteWriteInput,
 ): Promise<ProjectRouteState> {
   const projectDomains = input.projectDomains ?? (await listProjectRouteRows(project.id));
   const nextState = deriveNextProjectRouteState(project, {
     ...input,
     projectDomains,
   });
+  await assertFreeEndpointsAllowed(project.organizationId, nextState.publicEndpoints, {
+    workspaceId: project.workspaceId,
+    knownHostnames: projectDomains.map(domain => domain.hostname),
+  });
+  return nextState;
+}
 
-  await persistProjectRouteState(project.id, nextState.publicEndpoints, projectDomains, {
+export async function syncProjectRouteState(
+  project: ProjectRouteProject & Pick<Project, "organizationId" | "workspaceId">,
+  input: ProjectRouteWriteInput,
+): Promise<ProjectRouteState> {
+  const nextState = await prepareProjectRouteState(project, input);
+  await persistProjectRouteState(project.id, nextState.publicEndpoints, nextState.projectDomains, {
     preserveCustomDomains: input.preserveCustomDomains,
   });
   const refreshedDomains = await listProjectRouteRows(project.id);
@@ -339,7 +358,7 @@ export async function reapplyProjectLiveRoutes(
     | "id"
     | "slug"
     | "port"
-    | "cloudWorkspaceId"
+    | "workspaceId"
     | "activeDeploymentId"
     | "organizationId"
     | "webhookDomain"
@@ -360,11 +379,16 @@ export async function reapplyProjectLiveRoutes(
   opts: ReapplyProjectLiveRoutesOptions = {},
 ): Promise<void> {
   const warn = (message: string) => {
-    console.warn(message);
+    errorDiagnostics.warn("platform/engine/modules/domains/project-route.service", message);
     opts.onWarning?.(message);
   };
-  const isCloud = !!project.cloudWorkspaceId;
-  if (!isCloud && !project.activeDeploymentId) return;
+  if (!project.activeDeploymentId) return;
+  const deployment = await findActiveDeployment(project);
+  if (!deployment) {
+    warn(`[project-route] ${project.slug}: no active deployment row — skipping live route re-apply`);
+    return;
+  }
+  const isCloud = (await resolveProjectLiveDeployTarget(project, deployment)).deployTarget === "cloud";
 
   // Read the project's rows ONCE. `state` needs the project-level subset;
   // `allDomainRows` keeps the service-scoped ones too, because the canonical row
@@ -406,7 +430,7 @@ export async function reapplyProjectLiveRoutes(
     if (droppedSlugs.length > 0) {
       const result = await deregisterManagedEdgeRoutes(droppedSlugs, {
         organizationId: project.organizationId,
-      }).catch(() => null);
+      }).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/domains/project-route.service"); return null; });
       if (result && result.failures.length > 0) {
         warn(
           `[project-route] ${project.slug}: managed edge deregister failed for ${result.failures.join(", ")}`,
@@ -417,18 +441,11 @@ export async function reapplyProjectLiveRoutes(
 
   // Cloud: no upstream resolution — the workspace/page owns routing by port.
   if (isCloud) {
-    const registers: RouteRegister[] = current
-      .filter(
-        (domain) => !domain.targetPath && !topologyHostnames.has(domain.hostname.toLowerCase()),
-      )
-      .map((domain) => ({
-        hostname: domain.hostname,
-        port: domain.targetPort ?? project.port ?? undefined,
-        // Infer from the hostname suffix (same signal the removes use) so a
-        // legacy null `domainType` row still resolves the right cloud primitive.
-        isCustomDomain: !managedHostnameToSlug(domain.hostname),
-      }));
+    // Docker's following topology pass publishes each complete table once.
+    // Writing root-only routes here would temporarily erase its path rules.
+    const registers: RouteRegister[] = [];
     await reconcileProjectRoutes(project, {
+      deployment,
       registers,
       removes,
       onWarning: opts.onWarning,
@@ -439,20 +456,16 @@ export async function reapplyProjectLiveRoutes(
 
   // Self-hosted: resolve the deployment's routing + runtime ONCE (the same
   // resolver deploy/delete use), then compute each upstream from the container.
-  const deployment = await findActiveDeployment(project);
-  if (!deployment) {
-    warn(
-      `[project-route] ${project.slug}: no active deployment row — skipping live route re-apply`,
-    );
-    return;
-  }
   // Held for the `finally` below: a remote-server platform binds a
   // Docker-over-SSH loopback bridge that only `dispose` closes, and this runs on
   // every live route edit. Releasing it leaves `routing` fully usable — dispose
   // touches the docker transport, while routing drives the box through the pooled
   // SSH executor.
   const resolved = await resolveDeploymentPlatform((deployment.meta ?? {}) as DeploymentMeta, {
-    organizationId: deployment.organizationId,
+    organizationId:
+      opts.isSelfApp && (deployment.meta as DeploymentMeta | null)?.deployTarget === "local"
+        ? ((await boxOwningOrgId()) ?? undefined)
+        : deployment.organizationId,
   });
   const { routing, runtime } = resolved.platform;
   const { effectiveTarget, serverId } = resolved;
@@ -486,7 +499,7 @@ export async function reapplyProjectLiveRoutes(
       const result = await syncManagedEdgeRoutes(addedTargets, {
         organizationId: project.organizationId,
         serverId: serverId ?? undefined,
-      }).catch(() => null);
+      }).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/domains/project-route.service"); return null; });
       if (result && result.failures.length > 0) {
         warn(
           `[project-route] ${project.slug}: managed edge sync failed for ${result.failures.join(", ")}`,
@@ -494,7 +507,7 @@ export async function reapplyProjectLiveRoutes(
       }
     };
 
-    const storedRows = await repos.service.listByDeployment(deployment.id).catch(() => []);
+    const storedRows = await repos.service.listByDeployment(deployment.id).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/domains/project-route.service"); return []; });
     const replacement = opts.serviceRuntime;
     const replacedRow = replacement
       ? storedRows.find((row) => row.serviceId === replacement.serviceId)
@@ -552,11 +565,15 @@ export async function reapplyProjectLiveRoutes(
           : {}),
         removes,
       });
-      await pushProjectRules(project.id, serverId ?? null, previousHostnames).catch(() => {});
+      await pushProjectRules(project.id, serverId ?? null, previousHostnames).catch((diagnosticFailure) => {
+        observeCaughtError(diagnosticFailure, "platform/engine/modules/domains/project-route.service");
+      });
       // Shared-dict state is RAM: the analytics collection switches have to be re-pushed
       // whenever routing is applied, or an nginx restart silently reverts them to off.
       await pushProjectAnalyticsConfig(project.id, serverId ?? null, previousHostnames).catch(
-        () => {},
+        (diagnosticFailure) => {
+          observeCaughtError(diagnosticFailure, "platform/engine/modules/domains/project-route.service");
+        },
       );
       await syncAddedManagedEdge();
       return;
@@ -717,6 +734,7 @@ export async function reapplyProjectLiveRoutes(
             staticRoot: resolveServedStaticPath(staticRootBase, domain.targetPath),
           });
         } catch (err) {
+          observeCaughtError(err, "platform/engine/modules/domains/project-route.service");
           // A `../` in the operator's route path. Refuse this ONE route; the rest of
           // the re-apply (and the project's other domains) must still go through.
           warn(
@@ -740,6 +758,11 @@ export async function reapplyProjectLiveRoutes(
         }
         port = resolveServicePort(staticContainerService);
         targetServiceId = staticContainerService.id;
+      }
+      if (!port && redirectHost) {
+        // A redirect serves nothing of its own, so it needs no upstream port (#1418).
+        registers.push({ ...common, notFound: true });
+        continue;
       }
       if (!port) {
         warn(
@@ -778,6 +801,7 @@ export async function reapplyProjectLiveRoutes(
       ...(resolved.platform.executor
         ? { edgeProxy: edgeProxyFor(resolved.platform.executor, "openresty", { ours: true }) }
         : {}),
+      ...(opts.isSelfApp ? { controlPlanePort: env.OPENSHIP_DASHBOARD_PORT || 3001 } : {}),
       registers,
       removes,
     });
@@ -785,11 +809,15 @@ export async function reapplyProjectLiveRoutes(
     // Re-sync per-route edge rules (rate-limit / ban / allow-deny) for the current
     // hostnames. Best-effort — the DB is the source of truth; a failure defers to
     // the next reconcile. previousHostnames clears rules for any dropped hostname.
-    await pushProjectRules(project.id, serverId ?? null, previousHostnames).catch(() => {});
+    await pushProjectRules(project.id, serverId ?? null, previousHostnames).catch((diagnosticFailure) => {
+      observeCaughtError(diagnosticFailure, "platform/engine/modules/domains/project-route.service");
+    });
     // Shared-dict state is RAM: the analytics collection switches have to be re-pushed
     // whenever routing is applied, or an nginx restart silently reverts them to off.
     await pushProjectAnalyticsConfig(project.id, serverId ?? null, previousHostnames).catch(
-      () => {},
+      (diagnosticFailure) => {
+        observeCaughtError(diagnosticFailure, "platform/engine/modules/domains/project-route.service");
+      },
     );
 
     // Register the newly-added managed slug(s) on the cloud edge (the "add" half

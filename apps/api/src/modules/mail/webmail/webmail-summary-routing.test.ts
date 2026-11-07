@@ -22,8 +22,8 @@ const CLOUD_WEBMAIL = {
   slug: "webmail-example-com",
   appTemplateId: "webmail",
   framework: "docker-compose",
-  serverId: null,
-  cloudWorkspaceId: "ws1",
+  serverId: "cloud-server",
+  workspaceId: "ws1",
   activeDeploymentId: "dep1",
 };
 
@@ -31,7 +31,7 @@ const SELF_WEBMAIL = {
   ...CLOUD_WEBMAIL,
   id: "wm-self",
   serverId: "srv1",
-  cloudWorkspaceId: null,
+  workspaceId: null,
 };
 
 const MAIL_SERVER = {
@@ -149,6 +149,8 @@ describe("webmail summary routing", () => {
       url: "https://mail.example.com",
       routingUnknown: false,
       projectId: CLOUD_WEBMAIL.id,
+      serverId: CLOUD_WEBMAIL.serverId,
+      workspaceId: CLOUD_WEBMAIL.workspaceId,
       legacy: false,
     });
   });
@@ -176,6 +178,8 @@ describe("webmail summary routing", () => {
       url: "",
       routingUnknown: true,
       projectId: CLOUD_WEBMAIL.id,
+      serverId: CLOUD_WEBMAIL.serverId,
+      workspaceId: CLOUD_WEBMAIL.workspaceId,
       legacy: false,
     });
   });

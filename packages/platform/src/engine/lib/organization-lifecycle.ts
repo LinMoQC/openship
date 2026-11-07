@@ -1,3 +1,4 @@
+import { reportCaughtError as observeCaughtError, diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import type { OrganizationOptions } from "better-auth/plugins/organization";
 import { APIError } from "better-auth/api";
 import { defaultStatements, adminAc, memberAc, ownerAc } from "better-auth/plugins/organization/access";
@@ -172,14 +173,20 @@ export const organizationOptions = {
         trackBackgroundWork(import("../modules/billing/billing-namespace.provision")
           .then(({ provisionOrgNamespace }) => provisionOrgNamespace(organization.id))
           .catch((err) =>
-            console.warn(
-              `[auth] namespace provisioning failed for org ${organization.id}: ${err instanceof Error ? err.message : String(err)}`,
+            errorDiagnostics.warn("platform/engine/lib/organization-lifecycle",
+              `[auth] namespace provisioning failed for org ${organization.id}: ${err instanceof Error ? err.message : String(err)}`, err,
             ),
           ));
       }
     },
 
     beforeDeleteOrganization: async ({ organization, user }) => {
+      if ((await repos.ingress.list(organization.id)).length) {
+        throw new APIError("CONFLICT", { message: "Disconnect the organization's Cloudflare tunnels and finish hostname cleanup before deleting the organization.", code: "ORG_DELETE_INGRESS_ACTIVE" });
+      }
+      if ((await repos.cloudWorkspace.listByOrganization(organization.id)).length) {
+        throw new APIError("CONFLICT", { message: "Delete the organization's Cloud workspaces and end their subscriptions before deleting the organization.", code: "ORG_DELETE_CLOUD_WORKSPACES_ACTIVE" });
+      }
       if (await repos.serverCluster.hasManagedNetworkState(organization.id)) {
         throw new APIError("CONFLICT", {
           message: "Remove managed cluster networks and complete network recovery before deleting this organization.",
@@ -232,9 +239,9 @@ export const organizationOptions = {
             role: m.role,
           }));
       } catch (err) {
-        console.warn(
+        errorDiagnostics.warn("platform/engine/lib/organization-lifecycle",
           "[organizationHooks.beforeDeleteOrganization] member snapshot failed:",
-          safeErrorMessage(err),
+          safeErrorMessage(err), err,
         );
       }
     },
@@ -250,14 +257,14 @@ export const organizationOptions = {
       try {
         grantsDeleted = await repos.resourceGrant.deleteByOrganization(organization.id);
       } catch (err) {
-        console.error("[organizationHooks.afterDeleteOrganization] grant cleanup failed:", err);
+        errorDiagnostics.error("platform/engine/lib/organization-lifecycle", "[organizationHooks.afterDeleteOrganization] grant cleanup failed:", err);
       }
 
       let sessionsRepointed = 0;
       try {
         sessionsRepointed = await repos.session.clearActiveOrganizationId(organization.id);
       } catch (err) {
-        console.error(
+        errorDiagnostics.error("platform/engine/lib/organization-lifecycle",
           "[organizationHooks.afterDeleteOrganization] session re-point failed:",
           err,
         );
@@ -309,7 +316,7 @@ export const organizationOptions = {
         await repos.resourceGrant.deleteByMember(organization.id, member.userId);
       } catch (err) {
         const message = safeErrorMessage(err);
-        console.error("[organizationHooks.afterRemoveMember] grant cleanup failed:", err);
+        errorDiagnostics.error("platform/engine/lib/organization-lifecycle", "[organizationHooks.afterRemoveMember] grant cleanup failed:", err);
         await memberAudit.emit(
           { organizationId: organization.id, actorUserId: user.id },
           {
@@ -332,7 +339,7 @@ export const organizationOptions = {
         await repos.notificationSubscription.deleteAllForMember(member.userId, organization.id);
       } catch (err) {
         const message = safeErrorMessage(err);
-        console.error(
+        errorDiagnostics.error("platform/engine/lib/organization-lifecycle",
           "[organizationHooks.afterRemoveMember] subscription cleanup failed:",
           err,
         );
@@ -413,7 +420,7 @@ export const organizationOptions = {
       await repos.invitationPendingGrant
         .deleteByInvitation(invitation.id)
         .catch((err: unknown) =>
-          console.error("[afterRejectInvitation] pending-grant cleanup failed:", err),
+          errorDiagnostics.error("platform/engine/lib/organization-lifecycle", "[afterRejectInvitation] pending-grant cleanup failed:", err),
         );
 
       await memberAudit.emit(
@@ -436,7 +443,7 @@ export const organizationOptions = {
       await repos.invitationPendingGrant
         .deleteByInvitation(invitation.id)
         .catch((err: unknown) =>
-          console.error("[afterCancelInvitation] pending-grant cleanup failed:", err),
+          errorDiagnostics.error("platform/engine/lib/organization-lifecycle", "[afterCancelInvitation] pending-grant cleanup failed:", err),
         );
 
       await memberAudit.emit(
@@ -468,7 +475,9 @@ export async function deliverOrganizationInvitation(data: Parameters<NonNullable
         // Freshen the DB-derived self-app URL so the link uses the domain the
         // operator added in the Domains tab (no restart needed). Env
         // --public-url seed still wins inside resolveDashboardPublicUrl.
-        await refreshSelfAppPublicUrl().catch(() => {});
+        await refreshSelfAppPublicUrl().catch((diagnosticFailure) => {
+          observeCaughtError(diagnosticFailure, "platform/engine/lib/organization-lifecycle");
+        });
         const inviteBase = resolveDashboardPublicUrl();
         const inviteUrl = `${inviteBase}${invitationClaimPath(data.id)}`;
         const email = organizationInviteEmail({

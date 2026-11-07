@@ -51,6 +51,10 @@ vi.mock("@repo/platform/engine/lib/route-apply.service", () => ({
   reconcileProjectRoutes: reconcile,
 }));
 
+vi.mock("@repo/platform/engine/lib/platform-config", () => ({
+  platform: () => ({ target: "selfhosted" }),
+}));
+
 vi.mock("@repo/platform/engine/modules/route-rules/route-rule.service", () => ({
   pushProjectRules: vi.fn().mockResolvedValue(undefined),
 }));
@@ -109,6 +113,52 @@ beforeEach(() => {
   listServicesByProject.mockReset().mockResolvedValue([]);
   syncManagedEdge.mockReset().mockResolvedValue({ failures: [] });
   deregisterManagedEdge.mockReset().mockResolvedValue({ failures: [] });
+});
+
+describe("provider-managed Cloud routes", () => {
+  it("removes stale routes and leaves registration to the complete topology writer", async () => {
+    const project = {
+      id: "project-1",
+      slug: "app",
+      port: 3000,
+      organizationId: "org-1",
+      workspaceId: null,
+      activeDeploymentId: "deployment-1",
+      webhookDomain: null,
+    } as Parameters<typeof reapplyProjectLiveRoutes>[0];
+    findDeployment.mockReset().mockResolvedValue({
+      id: "deployment-1",
+      projectId: project.id,
+      organizationId: project.organizationId,
+      containerId: "workspace-one",
+      meta: { deployTarget: "cloud", workspaceId: "workspace-one" },
+    });
+    listByProject
+      .mockReset()
+      .mockResolvedValue([
+        domainRow({ id: "current", hostname: "app.opsh.io", targetPort: 3000, domainType: "free" }),
+      ]);
+    resolveRuntime.mockReset();
+    reconcile.mockReset().mockResolvedValue(undefined);
+
+    await reapplyProjectLiveRoutes(project, ["previous.opsh.io"]);
+
+    expect(reconcile).toHaveBeenCalledExactlyOnceWith(
+      project,
+      expect.objectContaining({
+        deployment: expect.objectContaining({
+          id: "deployment-1",
+          projectId: project.id,
+          organizationId: project.organizationId,
+          containerId: "workspace-one",
+        }),
+        registers: [],
+        removes: [{ hostname: "previous.opsh.io", isCustomDomain: false }],
+      }),
+    );
+    expect(syncManagedEdge).not.toHaveBeenCalled();
+    expect(deregisterManagedEdge).not.toHaveBeenCalled();
+  });
 });
 
 describe("shouldRefuseLoopbackRoute", () => {
@@ -198,7 +248,7 @@ describe("reapplyProjectLiveRoutes self-app loopback route (issue #129)", () => 
     id: "proj-openship",
     slug: "openship",
     port: 3001,
-    cloudWorkspaceId: null,
+    workspaceId: null,
     activeDeploymentId: "dep-1",
     organizationId: "org-1",
     webhookDomain: null,
@@ -241,6 +291,7 @@ describe("reapplyProjectLiveRoutes self-app loopback route (issue #129)", () => 
 
   it("registers the self-app's own loopback dashboard route when isSelfApp is set", async () => {
     await reapplyProjectLiveRoutes(project, [], { isSelfApp: true });
+    expect(reconcile.mock.calls[0][1].controlPlanePort).toBe(3001);
 
     expect(reconcile).toHaveBeenCalledTimes(1);
     expect(reconcile.mock.calls[0][1].registers).toEqual([
@@ -257,6 +308,7 @@ describe("reapplyProjectLiveRoutes self-app loopback route (issue #129)", () => 
 
   it("still refuses the same loopback dashboard route for an ordinary tenant project", async () => {
     await reapplyProjectLiveRoutes(project, []);
+    expect(reconcile.mock.calls[0][1].controlPlanePort).toBeUndefined();
 
     expect(reconcile).toHaveBeenCalledTimes(1);
     expect(reconcile.mock.calls[0][1].registers).toEqual([]);
@@ -276,7 +328,7 @@ describe("reapplyProjectLiveRoutes static (path-targeted) routes", () => {
     id: "proj-site",
     slug: "site",
     port: null,
-    cloudWorkspaceId: null,
+    workspaceId: null,
     activeDeploymentId: "dep-1",
     organizationId: "org-1",
     webhookDomain: null,
@@ -706,6 +758,19 @@ describe("container-served static project routes (#879)", () => {
  * where a bogus custom hostname is refused once for all of them (#342) — nginx's own
  * DOMAIN_RE would happily render `server_name localhost;`.
  */
+describe("canonical primary in route state", () => {
+  it("uses a serving endpoint for primary metadata regardless of submission order", () => {
+    const state = deriveNextProjectRouteState({ slug: "portfolio" }, {
+      nextPublicEndpoints: [
+        { domainType: "custom", customDomain: "example.com", port: 3000, redirectTo: "www.example.com", redirectStatus: 301 },
+        { domainType: "custom", customDomain: "www.example.com", port: 3000 },
+      ],
+    });
+    expect(state.primaryCustomDomain).toBe("www.example.com");
+    expect(state.publicEndpoints.map(endpoint => endpoint.isPrimary)).toEqual([false, true]);
+  });
+});
+
 describe("deriveNextProjectRouteState custom-hostname gate", () => {
   const project = { slug: "portfolio" };
 
@@ -810,7 +875,7 @@ describe("reapplyProjectLiveRoutes multi-service project-level routes (issue #61
     id: "proj-dependabot",
     slug: "dependabot",
     port: null,
-    cloudWorkspaceId: null,
+    workspaceId: null,
     activeDeploymentId: "dep-1",
     organizationId: "org-1",
     webhookDomain: null,
@@ -1004,6 +1069,32 @@ describe("reapplyProjectLiveRoutes multi-service project-level routes (issue #61
     expect(onWarning).toHaveBeenCalledWith(
       expect.stringMatching(/select a target port for app\.example\.com.*services offer/),
     );
+  });
+
+  it("routes a redirect-only domain without a target port (#1418)", async () => {
+    listByProject.mockResolvedValue([
+      projectDomain(3000),
+      {
+        ...projectDomain(null),
+        id: "dom-www",
+        hostname: "www.app.example.com",
+        isPrimary: false,
+        redirectTo: "app.example.com",
+        redirectStatus: 301,
+      },
+    ]);
+    const onWarning = vi.fn();
+    await reapplyProjectLiveRoutes(project, [], { onWarning });
+    expect(reconcile.mock.calls.at(-1)?.[1].registers).toEqual([
+      expect.objectContaining({ hostname: "app.example.com", targetUrl: "http://127.0.0.1:3000" }),
+      {
+        hostname: "www.app.example.com",
+        isCustomDomain: true,
+        redirectHost: { target: "app.example.com", statusCode: 301 },
+        notFound: true,
+      },
+    ]);
+    expect(onWarning).not.toHaveBeenCalledWith(expect.stringContaining("www.app.example.com"));
   });
 
   it("does not fall back to the project port when service deployment records are missing (#879)", async () => {

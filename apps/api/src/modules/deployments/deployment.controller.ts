@@ -2,6 +2,7 @@
  * Deployment controller - Hono request handlers.
  */
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import type { Context } from "hono";
 import { AppError } from "@repo/core";
 import { freezeContext } from "@repo/platform";
@@ -22,6 +23,7 @@ export async function list(c: Context) {
     page: Number(c.req.query("page") ?? 1), perPage: Number(c.req.query("perPage") ?? 50),
     status: c.req.query("status") as import("@repo/core").DeploymentHistoryFilter | undefined,
     search: c.req.query("search"),
+    days: c.req.query("days") ? Number(c.req.query("days")) : undefined,
   });
   applyOperationContext(c, result.context);
   return c.json({ success: true, ...result.data });
@@ -122,7 +124,7 @@ export async function restorePlan(c: Context) {
 }
 
 export async function pin(c: Context) {
-  const body = await c.req.json<{ pinned?: boolean }>().catch(() => ({}));
+  const body = await c.req.json<{ pinned?: boolean }>().catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "api/modules/deployments/deployment.controller"); return ({}); });
   const result = await getPlatformKernel().deployments.pin(operationContext(c), param(c, "id"), body);
   applyOperationContext(c, result.context);
   return c.json({ data: result.data });
@@ -244,7 +246,7 @@ export async function buildStatus(c: Context) {
  *   resolves the latest commit on the branch — the auto-redeploy semantic.
  */
 export async function buildRedeploy(c: Context) {
-  const body = await c.req.json<{ useExistingCommit?: boolean }>().catch(() => ({}));
+  const body = await c.req.json<{ useExistingCommit?: boolean; reuseBuild?: boolean }>().catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "api/modules/deployments/deployment.controller"); return ({}); });
   const result = await getPlatformKernel().deployments.redeploy(operationContext(c), param(c, "id"), body);
   applyOperationContext(c, result.context);
   return c.json({ success: true, ...result.data });
@@ -258,6 +260,7 @@ export async function buildRedeploy(c: Context) {
 export async function buildStart(c: Context) {
   const result = await getPlatformKernel().deployments.start(operationContext(c), param(c, "id"));
   applyOperationContext(c, result.context);
+  if (result.data.awaiting_actions) return c.json({ success: true, ...result.data }, 202);
   return streamBuildSession(c, result.data.deployment_id, {
     event: "started", data: JSON.stringify({ type: "started", ...result.data }),
   });

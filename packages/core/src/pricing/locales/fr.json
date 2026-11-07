@@ -19,6 +19,10 @@
     "enterprise": {
       "name": "Enterprise",
       "tagline": "Limites sur mesure, infrastructure dédiée et un SLA."
+    },
+    "hobby": {
+      "name": "Hobby",
+      "tagline": "Un petit serveur géré pour vos projets personnels et vos applications du quotidien."
     }
   },
   "features": {
@@ -27,9 +31,9 @@
     "anyWorkload": "Exécutez tout — conteneurs, Compose, workers, Postgres, Redis",
     "runningServices": "{runningServices} applications, bases de données ou workers actifs",
     "buildMinutes": "{buildMinutes} minutes de build par mois",
+    "sharedBuilds": "Les builds partagent votre serveur, sans quota de durée mensuel",
     "power": "Jusqu'à {powerCpu} vCPU et {powerRamGb} GB de RAM par application",
     "projects": "{maxProjects} projets",
-    "projectsUnlimited": "Projets illimités",
     "freeSubdomains": "{freeSubdomains} sous-domaines {freeDomainSuffix} gratuits",
     "freeSubdomainsUnlimited": "Sous-domaines {freeDomainSuffix} gratuits en illimité",
     "gitDeploys": "Déployez depuis GitHub, GitLab ou n'importe quel dépôt Git",
@@ -49,7 +53,9 @@
     "selfHostedUnlimited": "Déploiements, projets, serveurs et domaines illimités",
     "selfHostedServices": "Tous les services managés — Postgres, Redis, mail",
     "selfHostedClients": "CLI, web et desktop — un seul backend",
-    "selfHostedFreeSubdomains": "{freeSubdomains} sous-domaines {freeDomainSuffix} gratuits en vous connectant au Cloud"
+    "selfHostedFreeSubdomains": "{freeSubdomains} sous-domaines {freeDomainSuffix} gratuits en vous connectant au Cloud",
+    "monthlyCoverage": "CPU, RAM et stockage inclus pour la période payée",
+    "namespaceCapacity": "Total : {namespaceCpu} vCPU, {namespaceRamGb} Go de RAM, {namespaceDiskGb} Go de disque"
   },
   "selfHosted": {
     "name": "Auto-hébergé",
@@ -61,7 +67,12 @@
   "creditPacks": {
     "pack_5k": "{credits} crédits",
     "pack_25k": "{credits} crédits",
-    "pack_100k": "{credits} crédits"
+    "pack_100k": "{credits} crédits",
+    "pack_500": "{credits} crédits",
+    "pack_2k": "{credits} crédits",
+    "pack_400": "{credits} crédits",
+    "pack_1700": "{credits} crédits",
+    "pack_4500": "{credits} crédits"
   },
   "ui": {
     "perMonth": "/mois",

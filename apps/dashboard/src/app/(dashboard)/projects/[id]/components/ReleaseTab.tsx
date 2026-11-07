@@ -1,13 +1,18 @@
 "use client";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ReleasePlan, ReleaseRun, ReleaseState } from "@repo/contracts";
-import { RELEASE_ACTIVE_STAGES } from "@repo/contracts";
-import { Icon } from "@repo/ui/icons";
+import type { ReleaseCheck, ReleasePlan, ReleaseRun, ReleaseStage, ReleaseState } from "@repo/contracts";
+import { Icon, type IconName } from "@repo/ui/icons";
 import { useProjectSettings } from "@/context/ProjectSettingsContext";
-import { useI18n } from "@/components/i18n-provider";
+import { interpolate, useI18n } from "@/components/i18n-provider";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Tabs } from "@/components/ui/Tabs";
 import { ApiError, getApiErrorMessage, isAbortError, isNetworkError } from "@/lib/api/client";
 import { releasesApi } from "@/lib/api/releases";
+import { timeAgo } from "@/lib/time";
+import { cn } from "@/lib/utils";
+import { ReleaseVersionTable } from "@/components/releases/ReleaseVersionTable";
+import { ReleaseEnvironmentChip, ReleaseStageBadge, ReleaseStatusBadge, isActiveReleaseStage, releaseEnvironmentLabel } from "@/components/releases/release-ui";
 import { ReleaseGitHubConnect } from "./ReleaseGitHubConnect";
 const volatileSubmissionKeys = new Map<string, string>();
 function submissionKey(planId: string) {
@@ -42,8 +47,9 @@ export function ReleaseWorkspace({ projectData, apiClient = releasesApi }: { pro
   const [clock, setClock] = useState(Date.now());
   const generation = useRef(0);
   const reads = useRef(0);
-  const active = !!run && (RELEASE_ACTIVE_STAGES as readonly string[]).includes(run.stage);
-  const label = state ? `${projectData.name} · ${state.binding.environment === "preview" ? "PRT" : t.projects.sidebar.production}` : String(projectData.name ?? "");
+  const active = !!run && isActiveReleaseStage(run.stage);
+  const environment = state?.binding.environment;
+  const label = [projectData.name, releaseEnvironmentLabel(environment, t)].filter(Boolean).join(" ");
   const refresh = useCallback(async () => {
     const ticket = generation.current, read = ++reads.current; setLoading(true); setError(null);
     try {
@@ -70,7 +76,7 @@ export function ReleaseWorkspace({ projectData, apiClient = releasesApi }: { pro
         const result = await apiClient.run(run.id);
         if (disposed || ticket !== generation.current) return;
         setRun(result.data); setError(null);
-        if (!(RELEASE_ACTIVE_STAGES as readonly string[]).includes(result.data.stage)) { const fresh = await apiClient.state(id, true); if (!disposed && ticket === generation.current) setState(fresh.data); }
+        if (!isActiveReleaseStage(result.data.stage)) { const fresh = await apiClient.state(id, true); if (!disposed && ticket === generation.current) setState(fresh.data); }
       } catch (e) { if (!disposed && ticket === generation.current) setError(getApiErrorMessage(e, c.runError)); }
       if (!disposed) timer = setTimeout(poll, 2500);
     };
@@ -106,24 +112,191 @@ export function ReleaseWorkspace({ projectData, apiClient = releasesApi }: { pro
   const cooling = !!state?.retryAt && Date.parse(state.retryAt) > clock && state.checks.some(check => check.key === "inspection.github.rate_limit");
   const target = plan?.target ?? state?.target;
   const unchanged = !!target && !target.services.length;
-  const canSubmit = !!state && !state.stale && state.current.verified && !!plan && !blocked && !expired && !alreadySubmitted && !active && (!unchanged || plan.target.action === "verify") && (state?.binding.environment !== "production" || confirm === "production");
+  const production = environment === "production";
+  const canSubmit = !!state && !state.stale && state.current.verified && !!plan && !blocked && !expired && !alreadySubmitted && !active && (!unchanged || plan.target.action === "verify") && (!production || confirm === "production");
+  const rollbackReady = action !== "rollback" || /^[a-f0-9]{40}$/.test(rollbackCommit.trim());
+  const planLocked = loading || cooling || submitting || active || pending || !rollbackReady;
+  const submitLabel = plan?.target.action === "verify" ? c.verify : unchanged ? c.noChange : production ? c.production : c.submit;
+  const operations = (environment === "preview" ? ["release", "rollback", "verify"] as const : ["release", "rollback"] as const).map(mode => ({ key: mode, label: c[mode] }));
+  const notice = pending ? c.pendingSubmission : error ?? state?.error ?? null;
+
   return <section className="min-w-0 space-y-5">
-    <div className="flex flex-wrap items-start justify-between gap-3">
-      <div className="min-w-0"><h2 className="break-words text-lg font-semibold">{label || c.title}</h2><p className="mt-1 text-sm text-muted-foreground">{state ? c.status[state.kind] : c.title}</p></div>
-      <Button variant="outline" size="sm" disabled={loading || cooling} onClick={() => void refresh()} aria-label={`${c.refresh} · ${label}`}><Icon name="refresh" />{c.refresh}</Button>
-    </div>
-    {(error || state?.error || pending) && <div role="status" className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-border/70 bg-muted/30 px-4 py-3 text-sm"><span className="min-w-0 break-words text-muted-foreground">{pending ? c.pendingSubmission : error ?? state?.error}{cooling && state?.retryAt && <span className="mt-1 block text-xs">{c.retryAt}: <time dateTime={state.retryAt}>{new Date(state.retryAt).toLocaleString()}</time></span>}</span><Button variant="ghost" size="sm" disabled={cooling || loading} onClick={() => void refresh()}>{c.retry}</Button></div>}
-    {(githubRequired || state?.checks.some(check => check.key === "inspection.github.connection")) && <ReleaseGitHubConnect />}
-    {state && <>
-      <fieldset className="flex flex-wrap items-center gap-2"><legend className="mb-2 text-xs text-muted-foreground">{c.operation}</legend>{(["release", "rollback", ...(state.binding.environment === "preview" ? ["verify"] : [])] as const).map(mode => <Button key={mode} variant={action === mode ? "secondary" : "outline"} size="sm" aria-pressed={action === mode} disabled={active || submitting || pending} onClick={() => { setAction(mode as typeof action); setPlan(null); setConfirm(""); }}>{c[mode as keyof typeof c] as string}</Button>)}</fieldset>
-      {action === "rollback" && <label className="block text-sm">{c.rollbackCommit}<input value={rollbackCommit} onChange={e => { setRollbackCommit(e.target.value); setPlan(null); }} placeholder="0123456789abcdef…" maxLength={40} spellCheck={false} autoComplete="off" className="mt-2 w-full rounded-lg border border-border bg-background px-3 py-2 font-mono text-xs" /></label>}
-      <p className="text-xs text-muted-foreground">{c.checkTime}: <time dateTime={state.checkedAt}>{new Date(state.checkedAt).toLocaleString()}</time>{state.stale && ` · ${c.stale}`}</p>
-      <div className="grid gap-3 sm:grid-cols-2">{[[c.currentVersion, state.current.images, state.current.ossGitSha], [c.targetVersion, target?.images ?? {}, target?.ossGitSha]] .map(([title, images, oss]) => <div key={String(title)} className="min-w-0 rounded-2xl border border-border/60 bg-card p-4"><h3 className="mb-3 text-sm font-medium">{String(title)}</h3><div className="space-y-2">{Object.entries(images as ReleaseState['current']['images']).map(([name, image]) => <div key={name} className="min-w-0"><p className="flex flex-wrap justify-between gap-2 text-xs"><span>{name}</span><code title={image.gitSha ?? undefined}>{image.gitSha?.slice(0, 12) ?? "—"}</code></p><p title={image.digest} className="truncate font-mono text-[11px] text-muted-foreground">{image.digest}</p></div>)}{oss && <p className="flex justify-between text-xs"><span>OSS</span><code title={String(oss)}>{String(oss).slice(0, 12)}</code></p>}</div></div>)}</div>
-      <div className="rounded-2xl border border-border/60 bg-card p-4"><div className="mb-3 flex flex-wrap items-center justify-between gap-3"><h3 className="text-sm font-medium">{c.checks}</h3><Button size="sm" variant="outline" onClick={() => void makePlan()} disabled={loading || cooling || submitting || active || pending || (action === "rollback" && !/^[a-f0-9]{40}$/.test(rollbackCommit.trim()))} aria-label={`${c.plan} · ${label}`}>{plan ? c.createPlan : c.plan}</Button></div>
-        <ul className="divide-y divide-border/40">{checks.map(check => <li key={check.key} className="flex items-start gap-3 py-3"><span aria-label={c[check.status]} className={`mt-0.5 shrink-0 text-xs ${check.status === 'pass' ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'}`}>{c[check.status]}</span><div className="min-w-0"><p className="text-sm">{check.label}<span className="ml-2 text-[11px] text-muted-foreground">{check.blocking ? c.blocking : c.advisory}</span></p><p className="mt-1 break-words text-xs text-muted-foreground">{check.detail}</p></div></li>)}</ul>
+    <div className="rounded-2xl bg-card p-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            <h2 className="min-w-0 truncate text-base font-semibold text-foreground" title={projectData.name}>{projectData.name || c.title}</h2>
+            <ReleaseEnvironmentChip environment={environment} />
+            {state && <ReleaseStatusBadge kind={state.kind} />}
+          </div>
+          {state && <p className="mt-1 text-xs text-muted-foreground">
+            <time dateTime={state.checkedAt} title={new Date(state.checkedAt).toLocaleString()}>{interpolate(c.checkedAgo, { time: timeAgo(state.checkedAt, t) })}</time>
+            {state.stale && <span className="ms-2 text-warning">{c.stale}</span>}
+          </p>}
+        </div>
+        <Button variant="outline" size="sm" disabled={loading || cooling} onClick={() => void refresh()} aria-label={`${c.refresh} ${label}`}>
+          <Icon name={loading ? "spinner" : "refresh"} className={cn(loading && "animate-spin")} />{c.refresh}
+        </Button>
       </div>
-    </>}
-    {plan && <div className="space-y-3 rounded-2xl border border-border/60 bg-card p-4"><p className="break-all font-mono text-xs text-muted-foreground">{plan.id} · {plan.summaryHash.slice(0, 12)}</p><p className="text-sm">{c.source}: <code>{plan.target.workflowSha.slice(0, 12)}</code> · {plan.target.action === "rollback" ? c.rollback : plan.target.action === "verify" ? c.verify : c.release}</p><p className="text-sm">{c.scope}: {plan.target.services.join(', ') || c.noChange}</p><p className="text-xs text-muted-foreground">{c.expires}: <time dateTime={plan.expiresAt}>{new Date(plan.expiresAt).toLocaleString()}</time></p>{state?.binding.environment === "production" && <label className="block text-sm">{c.confirmation}<input aria-label={c.confirmLabel} value={confirm} onChange={e => setConfirm(e.target.value)} autoComplete="off" spellCheck={false} className="mt-2 block w-full max-w-xs rounded-lg border border-border bg-background px-3 py-2 font-mono" /></label>}<Button size="sm" disabled={!canSubmit || submitting} onClick={() => void submit()} aria-label={`${state?.binding.environment === 'production' ? c.production : c.submit} · ${label}`}>{plan.target.action === "verify" ? c.verify : unchanged ? c.noChange : state?.binding.environment === 'production' ? c.production : c.submit}</Button></div>}
-    {run && <div className="space-y-3 rounded-2xl border border-border/60 bg-card p-4" aria-live="polite"><div className="flex flex-wrap justify-between gap-2"><h3 className="text-sm font-medium">{c.run}</h3><span className="text-sm">{c.stages[run.stage]}</span></div><p className="break-all font-mono text-xs text-muted-foreground">{run.id}</p>{run.workflowUrl && <a className="text-sm text-primary underline-offset-4 hover:underline" href={run.workflowUrl} target="_blank" rel="noopener noreferrer">{c.workflow} · {run.workflowRunId}</a>}{run.deploymentId && <p className="break-all font-mono text-xs">{run.deploymentId}</p>}{run.error && <p role="status" className="break-words text-sm text-muted-foreground">{run.error}</p>}{run.receipt && <details><summary className="cursor-pointer text-sm">{c.receipt}</summary><pre className="mt-3 max-h-64 overflow-auto rounded-lg bg-muted/30 p-3 text-xs">{JSON.stringify(run.receipt, null, 2)}</pre></details>}</div>}
+      {notice && <Notice className="mt-4" action={<Button variant="ghost" size="sm" disabled={cooling || loading} onClick={() => void refresh()}>{c.retry}</Button>}>
+        {notice}
+        {cooling && state?.retryAt && <span className="mt-0.5 block text-xs">{c.retryAt} <time dateTime={state.retryAt}>{new Date(state.retryAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time></span>}
+      </Notice>}
+      {(githubRequired || state?.checks.some(check => check.key === "inspection.github.connection")) && <div className="mt-4"><ReleaseGitHubConnect /></div>}
+      {state ? <ReleaseVersionTable className="mt-5" current={state.current} target={target ?? null} />
+        : loading && <div className="mt-5 space-y-2" aria-hidden="true">{[0, 1].map(i => <div key={i} className="h-5 animate-pulse rounded bg-muted" />)}</div>}
+    </div>
+
+    {state && <div className="rounded-2xl bg-card p-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h3 className="text-sm font-semibold text-foreground">{c.planTitle}</h3>
+        <Tabs variant="pills" size="sm" ariaLabel={c.operation} tabs={operations} value={action}
+          onChange={mode => { if (active || submitting || pending) return; setAction(mode); setPlan(null); setConfirm(""); }} />
+      </div>
+      {action === "rollback" && <label className="mt-4 block">
+        <span className="text-sm text-foreground">{c.rollbackCommit}</span>
+        <Input value={rollbackCommit} onChange={e => { setRollbackCommit(e.target.value); setPlan(null); }} placeholder="0123456789abcdef…" maxLength={40} spellCheck={false} autoComplete="off" variant="filled" className="mt-2 font-mono text-xs" />
+      </label>}
+
+      <ReleaseChecks className="mt-4" checks={checks} />
+
+      {plan && <dl className="mt-4 grid grid-cols-[auto_minmax(0,1fr)] gap-x-6 gap-y-2.5 border-t border-border/40 pt-4 text-sm">
+        <dt className="text-muted-foreground">{c.source}</dt>
+        <dd className="min-w-0"><code className="font-mono text-xs text-foreground" title={plan.target.workflowSha}>{plan.target.workflowSha.slice(0, 12)}</code></dd>
+        <dt className="text-muted-foreground">{c.scope}</dt>
+        <dd className="flex min-w-0 flex-wrap gap-1.5">{plan.target.services.length
+          ? plan.target.services.map(service => <span key={service} className="rounded-md bg-muted px-1.5 py-0.5 text-xs text-foreground">{service}</span>)
+          : <span className="text-muted-foreground">{c.noChange}</span>}</dd>
+        <dt className="text-muted-foreground">{c.expires}</dt>
+        <dd className={cn("min-w-0", expired && "text-warning")}>
+          <time dateTime={plan.expiresAt} title={new Date(plan.expiresAt).toLocaleString()}>{new Date(plan.expiresAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</time>
+          {expired && <span className="ms-2">{c.expired}</span>}
+        </dd>
+        <dt className="text-muted-foreground">{c.planId}</dt>
+        <dd className="min-w-0 truncate font-mono text-xs text-muted-foreground" title={plan.summaryHash}>{plan.id}</dd>
+      </dl>}
+
+      <div className="mt-4 flex flex-wrap items-end justify-between gap-3 border-t border-border/40 pt-4">
+        {plan && production && !alreadySubmitted ? <label className="min-w-0 flex-1 basis-60">
+          <span className="text-xs text-muted-foreground">{c.confirmation}</span>
+          <Input aria-label={c.confirmLabel} value={confirm} onChange={e => setConfirm(e.target.value)} placeholder="production" autoComplete="off" spellCheck={false} variant="filled" className="mt-1.5 h-10 max-w-xs font-mono" />
+        </label> : <span />}
+        <div className="flex flex-wrap items-center gap-2">
+          {plan && <Button variant="ghost" size="sm" onClick={() => void makePlan()} disabled={planLocked}>{c.createPlan}</Button>}
+          {plan
+            ? <Button disabled={!canSubmit || submitting} onClick={() => void submit()} aria-label={`${submitLabel} ${label}`}>
+                {submitting && <Icon name="spinner" className="animate-spin" />}{submitLabel}
+              </Button>
+            : <Button onClick={() => void makePlan()} disabled={planLocked} aria-label={`${c.generatePlan} ${label}`}>
+                {loading && <Icon name="spinner" className="animate-spin" />}{c.generatePlan}
+              </Button>}
+        </div>
+      </div>
+    </div>}
+
+    {run && <ReleaseRunCard run={run} />}
   </section>;
+}
+
+function Notice({ children, action, className }: { children: React.ReactNode; action?: React.ReactNode; className?: string }) {
+  return <div role="status" className={cn("flex items-start gap-3 rounded-xl bg-muted/60 px-4 py-3 text-sm", className)}>
+    <Icon name="alert-circle" className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+    <div className="min-w-0 flex-1 break-words text-muted-foreground">{children}</div>
+    {action}
+  </div>;
+}
+
+function checkIcon(check: ReleaseCheck): { name: IconName; tone: string } {
+  if (check.status === "pass") return { name: "check-circle", tone: "text-success" };
+  if (check.status === "fail") return check.blocking ? { name: "x-circle", tone: "text-danger" } : { name: "alert-circle", tone: "text-warning" };
+  return { name: "help-circle", tone: check.blocking ? "text-warning" : "text-muted-foreground" };
+}
+
+/** Problems stay open; passing checks fold into one line so the list reads as a verdict. */
+function ReleaseChecks({ checks, className }: { checks: ReleaseCheck[]; className?: string }) {
+  const { t } = useI18n(), c = t.projects.release;
+  const [showPassed, setShowPassed] = useState(false);
+  const attention = checks.filter(check => check.status !== "pass");
+  const passed = checks.filter(check => check.status === "pass");
+  const blocking = attention.some(check => check.blocking);
+  if (!checks.length) return null;
+  return <div className={className}>
+    <div className="flex flex-wrap items-center gap-2">
+      <h4 className="text-sm text-foreground">{c.checks}</h4>
+      <span className={cn("text-xs", attention.length ? (blocking ? "text-danger" : "text-warning") : "text-success")}>
+        {attention.length ? interpolate(c.checksAttention, { count: String(attention.length) }) : c.checksAllPassed}
+      </span>
+    </div>
+    {attention.length > 0 && <ul className="mt-2 divide-y divide-border/40">{attention.map(check => <CheckRow key={check.key} check={check} />)}</ul>}
+    {passed.length > 0 && <>
+      <button type="button" onClick={() => setShowPassed(value => !value)} aria-expanded={showPassed}
+        className="mt-2 inline-flex items-center gap-1 rounded-lg py-1 text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+        <Icon name={showPassed ? "chevron-up" : "chevron-down"} className="size-3.5" />
+        {interpolate(showPassed ? c.hidePassed : c.showPassed, { count: String(passed.length) })}
+      </button>
+      {showPassed && <ul className="divide-y divide-border/40">{passed.map(check => <CheckRow key={check.key} check={check} />)}</ul>}
+    </>}
+  </div>;
+}
+
+function CheckRow({ check }: { check: ReleaseCheck }) {
+  const c = useI18n().t.projects.release;
+  const icon = checkIcon(check);
+  return <li className="flex items-start gap-3 py-2.5">
+    <Icon name={icon.name} aria-label={c[check.status]} className={cn("mt-0.5 size-4 shrink-0", icon.tone)} />
+    <div className="min-w-0 flex-1">
+      <p className="flex flex-wrap items-center gap-2 text-sm text-foreground">
+        {check.label}
+        {!check.blocking && <span className="rounded-md bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">{c.advisory}</span>}
+      </p>
+      {check.detail && <p className="mt-0.5 break-words text-xs text-muted-foreground">{check.detail}</p>}
+    </div>
+  </li>;
+}
+
+const PROGRESS: ReleaseStage[] = ["queued", "syncing", "pulling", "deploying", "health", "verifying", "accepted"];
+
+function ReleaseRunCard({ run }: { run: ReleaseRun }) {
+  const { t } = useI18n(), c = t.projects.release;
+  const reached = run.stage === "accepted" ? PROGRESS.length : PROGRESS.indexOf(run.stage);
+  const tracking = run.stage === "accepted" || isActiveReleaseStage(run.stage) && run.stage !== "recovering";
+  return <div className="rounded-2xl bg-card p-5" aria-live="polite">
+    <div className="flex flex-wrap items-center justify-between gap-3">
+      <h3 className="text-sm font-semibold text-foreground">{c.progress}</h3>
+      <ReleaseStageBadge stage={run.stage} />
+    </div>
+    {tracking && <ol className="mt-4 flex flex-wrap items-center gap-x-1.5 gap-y-2 text-xs">
+      {PROGRESS.map((stage, index) => {
+        const done = index < reached, current = index === reached;
+        return <li key={stage} className="flex items-center gap-1.5">
+          {index > 0 && <span aria-hidden="true" className={cn("h-px w-3", done || current ? "bg-foreground/30" : "bg-border")} />}
+          <span className={cn("inline-flex items-center gap-1", done ? "text-foreground" : current ? "font-medium text-info" : "text-muted-foreground")}>
+            {done ? <Icon name="check" className="size-3.5 text-success" /> : current ? <Icon name="spinner" className="size-3.5 animate-spin" /> : <span className="size-1.5 rounded-full bg-muted-foreground/40" />}
+            {c.stages[stage]}
+          </span>
+        </li>;
+      })}
+    </ol>}
+    {run.error && <Notice className="mt-4">{run.error}</Notice>}
+    <dl className="mt-4 grid grid-cols-[auto_minmax(0,1fr)] gap-x-6 gap-y-2.5 border-t border-border/40 pt-4 text-sm">
+      {run.workflowRunId && <>
+        <dt className="text-muted-foreground">{c.workflow}</dt>
+        <dd className="min-w-0">{run.workflowUrl
+          ? <a className="inline-flex items-center gap-1 text-foreground underline-offset-4 hover:underline" href={run.workflowUrl} target="_blank" rel="noopener noreferrer">#{run.workflowRunId}<Icon name="external-link" className="size-3.5 text-muted-foreground" /></a>
+          : <span>#{run.workflowRunId}</span>}</dd>
+      </>}
+      {run.deploymentId && <>
+        <dt className="text-muted-foreground">{c.deployment}</dt>
+        <dd className="min-w-0 truncate font-mono text-xs text-foreground">{run.deploymentId}</dd>
+      </>}
+      <dt className="text-muted-foreground">{c.runId}</dt>
+      <dd className="min-w-0 truncate font-mono text-xs text-muted-foreground">{run.id}</dd>
+    </dl>
+    {run.receipt && <details className="group mt-4">
+      <summary className="inline-flex cursor-pointer list-none items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground">
+        <Icon name="chevron-right" className="size-3.5 transition-transform group-open:rotate-90" />{c.receipt}
+      </summary>
+      <pre className="mt-2 max-h-64 overflow-auto rounded-xl bg-muted/60 p-3 text-xs">{JSON.stringify(run.receipt, null, 2)}</pre>
+    </details>}
+  </div>;
 }

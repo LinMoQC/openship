@@ -15,6 +15,8 @@ import {
   ServiceEnvironmentInputSchema,
   ServiceEnvironmentSchema,
   MergeServiceEnvVarsBody,
+  ReviewServiceEnvVarsBody,
+  ServiceEnvironmentReviewSchema,
 } from "./service-environment";
 export * from "./service-environment";
 import { LogEntrySchema, type DeploymentEvent } from "./deployment-resources";
@@ -60,10 +62,12 @@ export const ServiceSchema = Type.Object({
   publicEndpoints: Type.Union([
     Type.Array(
       Type.Object({
-        port: Type.Number(),
+        port: Type.Optional(Type.Number()),
         domainType: Type.Union([Type.Literal("free"), Type.Literal("custom")]),
         domain: Type.Optional(Type.String()),
         customDomain: Type.Optional(Type.String()),
+        redirectTo: Type.Optional(Type.String()),
+        redirectStatus: Type.Optional(Type.Number()),
       }),
     ),
     Type.Null(),
@@ -97,6 +101,9 @@ export const LiveServiceContainerSchema = Type.Object({
   serviceName: Type.String(),
   containerId: nullableString,
   status: Type.String(),
+  health: Type.Optional(Type.Union([
+    Type.Literal("healthy"), Type.Literal("starting"), Type.Literal("unhealthy"), Type.Null(),
+  ])),
   ip: nullableString,
   hostPort: nullableNumber,
   imageRef: nullableString,
@@ -185,7 +192,15 @@ export const ServiceResourceSchemas = {
   mergeEnvVars: {
     action: "write",
     input: MergeServiceEnvVarsBody,
-    output: Type.Object({ success: Type.Literal(true) }),
+    output: Type.Object({
+      success: Type.Literal(true),
+      affectedServices: Type.Optional(Type.Array(Type.Object({ id: Type.String(), name: Type.String() }))),
+    }),
+  },
+  reviewEnvVars: {
+    action: "write",
+    input: ReviewServiceEnvVarsBody,
+    output: ServiceEnvironmentReviewSchema,
   },
   revealEnv: {
     action: "write",

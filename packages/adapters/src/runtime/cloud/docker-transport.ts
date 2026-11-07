@@ -1,3 +1,7 @@
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
+import { AppError } from "@repo/core";
+import { OblienError } from "oblien";
+import { STATUS_CODES } from "node:http";
 import { createServer, type Server, type Socket } from "node:net";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -7,7 +11,7 @@ import { Duplex, PassThrough } from "node:stream";
 import type { DockerTransport } from "../docker-transport";
 
 /** Binary, bounded, half-close-aware stream over the provider's authenticated proxy. */
-export async function dockerWebSocketStream(socket: WebSocket): Promise<Duplex> {
+export async function dockerWebSocketStream(socket: WebSocket, onComplete?: () => void): Promise<Duplex> {
   socket.binaryType = "arraybuffer";
   let ended = false;
   let pendingWrite: ReturnType<typeof setTimeout> | undefined;
@@ -42,7 +46,8 @@ export async function dockerWebSocketStream(socket: WebSocket): Promise<Duplex> 
           }
           resumeWrite = undefined;
           callback();
-        } catch {
+        } catch (diagnosticFailure) {
+          observeCaughtError(diagnosticFailure, "adapters/runtime/cloud/docker-transport");
           callback(new Error("Cloud Docker write failed"));
         }
       };
@@ -63,7 +68,8 @@ export async function dockerWebSocketStream(socket: WebSocket): Promise<Duplex> 
         resumeWrite = undefined;
         try {
           socket.send("eof");
-        } catch {
+        } catch (diagnosticFailure) {
+          observeCaughtError(diagnosticFailure, "adapters/runtime/cloud/docker-transport");
           callback(new Error("Cloud Docker write failed"));
           return;
         }
@@ -80,9 +86,11 @@ export async function dockerWebSocketStream(socket: WebSocket): Promise<Duplex> 
     },
   });
   // Connection failures are reported without the WebSocket URL (which carries auth).
-  stream.on("error", () => {});
+  stream.on("error", (eventDiagnosticError) => { observeCaughtError(eventDiagnosticError, "adapters/runtime/cloud/docker-transport"); });
   socket.addEventListener("message", ({ data }) => {
-    if (data === "eof") {
+    if (data === "complete") {
+      onComplete?.();
+    } else if (data === "eof") {
       ended = true;
       stream.push(null);
     } else if (typeof data === "string" && data.startsWith("ack:")) {
@@ -107,7 +115,7 @@ export async function dockerWebSocketStream(socket: WebSocket): Promise<Duplex> 
   socket.addEventListener("close", () => {
     if (!ended && !stream.destroyed) stream.destroy(new Error("Cloud Docker connection interrupted"));
   });
-  socket.addEventListener("error", () => stream.destroy(new Error("Cloud Docker connection failed")));
+  socket.addEventListener("error", (eventDiagnosticError) => { observeCaughtError(eventDiagnosticError, "adapters/runtime/cloud/docker-transport"); return stream.destroy(new Error("Cloud Docker connection failed")); });
   await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => {
       stream.destroy();
@@ -137,19 +145,43 @@ export function createCloudDockerTransport(open: () => Promise<Duplex>): DockerT
   let directory: string | undefined;
   let closed = false;
   const sockets = new Set<Duplex>();
+  const openStream = async () => {
+    if (closed) throw new Error("Cloud Docker transport is closed");
+    const stream = await open();
+    if (closed) { stream.destroy(); throw new Error("Cloud Docker transport is closed"); }
+    sockets.add(stream);
+    stream.once("close", () => sockets.delete(stream));
+    return stream;
+  };
   return {
     kind: "cloud",
     description: "Docker inside an Oblien workspace",
     unreachableHint: "Check that the project's Oblien Docker workspace is running and reachable.",
+    // Bun closes a node:net upload's read side on end(). Upgraded streams use
+    // this same authenticated bridge directly, preserving stdin EOF and the
+    // daemon's final output without another local socket hop.
+    openStream,
     async establish() {
       if (closed) throw new Error("Cloud Docker transport is closed");
-      directory = await mkdtemp(join(tmpdir(), "openship-cloud-docker-"));
+      const prefix = "openship-cloud-docker-";
+      // Unix socket addresses have a byte limit (103 on macOS). A caller's
+      // nested TMPDIR can exceed it even though ordinary files work there.
+      // Keep the fallback private with mkdtemp, rather than using public TCP.
+      const temporaryRoot = process.platform !== "win32" &&
+        Buffer.byteLength(join(tmpdir(), `${prefix}XXXXXX`, "docker.sock")) > 103
+        ? "/tmp"
+        : tmpdir();
+      directory = await mkdtemp(join(temporaryRoot, prefix));
       const socketPath = process.platform === "win32"
         ? `\\\\.\\pipe\\openship-cloud-docker-${randomUUID()}`
         : join(directory, "docker.sock");
       server = createServer({ allowHalfOpen: true }, (client: Socket) => {
+        // Bun does not inherit the listener's allowHalfOpen option on accepted
+        // sockets. Stdin EOF must still let queued writes and Docker's final
+        // response drain before the WebSocket is closed.
+        client.allowHalfOpen = true;
         sockets.add(client);
-        client.on("error", () => {});
+        client.on("error", (eventDiagnosticError) => { observeCaughtError(eventDiagnosticError, "adapters/runtime/cloud/docker-transport"); });
         client.once("close", () => sockets.delete(client));
         // Attach a bounded consumer immediately. Bun 1.3 loses bytes sent to a
         // Unix socket paused before an asynchronous upstream finishes opening.
@@ -157,31 +189,42 @@ export function createCloudDockerTransport(open: () => Promise<Duplex>): DockerT
         // while the provider authenticates the connection.
         const pending = new PassThrough({ highWaterMark: 64 * 1024 });
         sockets.add(pending);
-        pending.on("error", () => client.destroy());
+        pending.on("error", (eventDiagnosticError) => { observeCaughtError(eventDiagnosticError, "adapters/runtime/cloud/docker-transport"); return client.destroy(); });
         pending.once("close", () => sockets.delete(pending));
         client.once("close", () => pending.destroy());
         client.pipe(pending);
-        void open().then((upstream) => {
+        void openStream().then((upstream) => {
           if (closed || client.destroyed) { upstream.destroy(); return; }
-          sockets.add(upstream);
-          upstream.on("error", () => client.destroy());
-          upstream.once("close", () => { sockets.delete(upstream); client.destroy(); });
+          upstream.on("error", (eventDiagnosticError) => { observeCaughtError(eventDiagnosticError, "adapters/runtime/cloud/docker-transport"); return client.destroy(); });
+          upstream.once("close", () => client.destroy());
           client.once("close", () => upstream.destroy());
           pending.pipe(upstream).pipe(client);
         }, (error: unknown) => {
+          observeCaughtError(error, "adapters/runtime/cloud/docker-transport");
           // No upstream byte has been forwarded yet, so report the actual
           // connection failure through Docker's normal JSON error contract.
           // A bare reset hides provisioning and bridge errors from operators.
           if (closed || client.destroyed || client.writableEnded) return client.destroy();
           const message = (error instanceof Error ? error.message : "Cloud Docker connection failed")
             .replace(/([?&](?:token|access_token)=)[^&\s]+/gi, "$1[redacted]");
-          const body = JSON.stringify({ message });
-          client.end(`HTTP/1.1 502 Bad Gateway\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`);
+          const knownError = error instanceof OblienError || error instanceof AppError ? error : undefined;
+          const candidateStatus = knownError instanceof AppError ? knownError.statusCode : knownError?.status;
+          // Provider connection failures happen before Docker receives a request.
+          // A provider 404 must not imply that a Docker resource is absent.
+          const status = candidateStatus && Number.isInteger(candidateStatus) && [429, 502, 503, 504].includes(candidateStatus)
+            ? candidateStatus : 502;
+          const code = knownError?.code && /^[a-z0-9_-]{1,128}$/i.test(knownError.code) ? knownError.code : undefined;
+          const details = (knownError as { details?: { retryAfterSeconds?: unknown } } | undefined)?.details;
+          const retry = details?.retryAfterSeconds;
+          const retryAfterSeconds = typeof retry === "number" && Number.isInteger(retry) && retry >= 0 && retry <= 86400 ? retry : undefined;
+          const body = JSON.stringify({ message, code, retryAfterSeconds });
+          const retryHeader = retryAfterSeconds === undefined ? "" : `Retry-After: ${retryAfterSeconds}\r\n`;
+          client.end(`HTTP/1.1 ${status} ${STATUS_CODES[status] ?? "Error"}\r\n${retryHeader}Content-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`);
         });
       });
       // Per-connection failures are handled above; a late listener error must
       // not crash the API process while another deployment is running.
-      server.on("error", () => { for (const socket of sockets) socket.destroy(); });
+      server.on("error", (eventDiagnosticError) => { observeCaughtError(eventDiagnosticError, "adapters/runtime/cloud/docker-transport");  for (const socket of sockets) socket.destroy(); });
       await new Promise<void>((resolve, reject) => {
         server!.once("error", reject);
         server!.listen(socketPath, () => { server!.removeListener("error", reject); resolve(); });

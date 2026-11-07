@@ -2,11 +2,13 @@
 
 import { Icon as UiIcon } from "@repo/ui/icons";
 
-import { useEffect, useState, type ReactNode } from 'react';
-import { createPortal } from 'react-dom';
+import { useEffect, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 
 interface ModalProps {
   isOpen: boolean;
+  /** Preserve an in-progress form while its dialog is closed. */
+  keepMounted?: boolean;
   onClose: () => void;
   children: ReactNode;
   width?: string;
@@ -19,24 +21,28 @@ interface ModalProps {
   closable?: boolean; // If false, prevents backdrop clicks from closing
   footer?: ReactNode;
   zIndex?: number; // Support custom z-index for modal layering
-  overflow?: 'hidden' | 'auto';
+  overflow?: "hidden" | "auto";
+  /** Large editors can soften their shell while retaining opaque content surfaces. */
+  surface?: "default" | "frosted";
 }
 
 export function Modal({
   isOpen,
+  keepMounted = false,
   onClose,
   children,
-  width = 'auto',
-  maxWidth = '80vw',
-  minWidth = 'auto',
-  minHeight = 'auto',
-  maxHeight = '90vh',
-  height = 'auto',
+  width = "auto",
+  maxWidth = "80vw",
+  minWidth = "auto",
+  minHeight = "auto",
+  maxHeight = "90vh",
+  height = "auto",
   showCloseButton = true,
   closable = true,
   footer = null,
   zIndex = 10000,
-  overflow = 'auto'
+  overflow = "auto",
+  surface = "default",
 }: ModalProps) {
   const [isVisible, setIsVisible] = useState(false);
   // Portal target only exists after mount (SSR has no document).
@@ -57,7 +63,7 @@ export function Modal({
     }
   }, [isOpen]);
 
-  if (!isOpen || !mounted) return null;
+  if ((!isOpen && !keepMounted) || !mounted) return null;
 
   const handleBackdropClick = (e: React.MouseEvent) => {
     if (closable && e.target === e.currentTarget) {
@@ -73,7 +79,10 @@ export function Modal({
 
   return createPortal(
     <div
-      className="fixed inset-0 flex items-center justify-center p-4"
+      className={isOpen ? "fixed inset-0 flex items-center justify-center p-4" : "hidden"}
+      hidden={!isOpen}
+      inert={!isOpen}
+      data-modal-layer={zIndex}
       style={{ zIndex }}
       onClick={handleBackdropClick}
     >
@@ -88,15 +97,13 @@ export function Modal({
         onClick={handleBackdropDivClick}
       />
 
-      {/* Modal surface: the SOLID card token at 96% + its own blur + shadow, so
-          it reads as elevated glass but never shows the page through it (it was
-          50%, which in LIGHT let the page ghost through — the "transparent modal"
-          bug). NO border at all — the fill + blur + shadow do the lifting; a
-          resting border/ring made it read as a boxed panel, not glass. */}
+      {/* Keep ordinary dialogs nearly opaque. Large workspace shells can use
+          stronger blur and a softer fill; their controls keep the card surfaces. */}
       <div
-        className="relative w-full rounded-2xl shadow-2xl backdrop-blur-2xl flex flex-col transition-all duration-300 !overflow-x-hidden"
+        className={`relative w-full rounded-2xl shadow-2xl flex flex-col transition-[opacity,transform] duration-300 !overflow-x-hidden ${surface === "frosted" ? "backdrop-blur-3xl" : "backdrop-blur-2xl"}`}
+        data-modal-surface={surface}
         style={{
-          background: 'color-mix(in oklab, var(--th-card-bg-solid) 96%, transparent)',
+          background: `color-mix(in oklab, var(--th-card-bg-solid) ${surface === "frosted" ? "65%" : "96%"}, transparent)`,
           width,
           overflow,
           maxWidth,
@@ -105,7 +112,7 @@ export function Modal({
           minWidth,
           minHeight,
           opacity: isVisible ? 1 : 0,
-          transform: isVisible ? 'scale(1) translateY(0)' : 'scale(0.95) translateY(10px)'
+          transform: isVisible ? "scale(1) translateY(0)" : "scale(0.95) translateY(10px)",
         }}
       >
         {/* Close Button */}
@@ -119,13 +126,10 @@ export function Modal({
         )}
 
         {/* Content */}
-        <div className={`w-full h-full flex flex-col`}>
-          {children}
-        </div>
+        <div className="flex min-h-0 w-full flex-1 flex-col">{children}</div>
         {footer}
       </div>
     </div>,
     document.body,
   );
 }
-

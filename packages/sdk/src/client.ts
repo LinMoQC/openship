@@ -1,4 +1,6 @@
-import { isCreateDeploymentResult, parseCreateDeploymentInput, parseInput, isRecord, PrepareDeployBody, BuildAccessBody, ResourceIdSchema, type PreparedProject, type DeploymentOperations } from "@repo/contracts";
+import { createRemoteActionOperations } from "./action-client";
+import type { ActionOperations } from "@repo/contracts";
+import { isCreateDeploymentResult, isAcceptedDeploymentResult, parseCreateDeploymentInput, parseInput, isRecord, PrepareDeployBody, BuildAccessBody, ResourceIdSchema, type PreparedProject, type DeploymentOperations } from "@repo/contracts";
 import { ApiError } from "./errors";
 import { HttpClient, type HttpClientOptions } from "./http";
 import { snapshotSourceInput, type DeploySourceInput, type SourceDeploymentResult } from "./source-input";
@@ -43,9 +45,18 @@ import { createRemoteNoticeOperations } from "./notices-client";
 import type { NoticeOperations } from "@repo/contracts";
 import { createRemoteBillingOperations } from "./billing-client";
 import type { BillingOperations } from "@repo/contracts";
+import type { AffiliateOperations } from "@repo/contracts";
+import { createRemoteAffiliateOperations } from "./affiliates-client";
 import type { BackupOperations } from "@repo/contracts";
 import type { BackupDestinationOperations } from "@repo/contracts";
 import { deploySourceWorkflow } from "./source-workflow";
+import { createRemoteTerminalOperations, type TerminalOperations } from "./terminal-client";
+import { createRemoteMailOperations } from "./mail-client";
+import type { MailOperations } from "@repo/contracts";
+import { createRemoteMigrationOperations } from "./migration-client";
+import type { MigrationOperations } from "@repo/contracts";
+import { createRemoteInstanceOperations } from "./instance-client";
+import type { InstanceOperations } from "@repo/contracts";
 import type { ProjectOperations, SourceOperations, ServiceOperations, DomainOperations, DnsOperations, CredentialOperations, ServerOperations, SystemOperations, AppOperations } from "@repo/contracts";
 
 export { ApiError } from "./errors";
@@ -57,12 +68,19 @@ export { parseSSE, type SSEEvent } from "./events";
 export { iteratePages, type Page, type PageRequest, type PageIteratorOptions } from "./pagination";
 export { createDeploymentHandle, waitForDeployment, consumeDeploymentEvents, type DeploymentHandle, type DeploymentOutcome, type WaitForDeploymentOptions, type DecodedDeploymentEvent, type DeploymentStreamResult } from "./deployment-handle";
 export type { DeploySourceInput, SourceDeploymentResult } from "./source-input";
+export type { TerminalOperations, TerminalOptions, TerminalSession, TerminalSocket } from "./terminal-client";
 export type * from "@repo/contracts";
 
 export interface OpenshipClientOptions extends Omit<HttpClientOptions, "internalToken"> {}
 
 /** Remote facade. The client entry has no native platform or database dependency. */
 export class OpenshipClient {
+  /** Interactive terminals use authenticated HTTP tickets and WebSockets. */
+  readonly terminal: TerminalOperations;
+  /** Self-hosted mail administration through the authenticated remote controller. */
+  readonly mail: MailOperations;
+  readonly migrations: MigrationOperations;
+  readonly instance: InstanceOperations;
   readonly deployments: DeploymentOperations;
   readonly projects: ProjectOperations;
   readonly sources: SourceOperations;
@@ -76,6 +94,7 @@ export class OpenshipClient {
   readonly backupDestinations: BackupDestinationOperations;
   readonly backups: BackupOperations;
   readonly billing: BillingOperations;
+  readonly affiliates: AffiliateOperations;
   readonly notices: NoticeOperations;
   readonly github: GitHubOperations;
   readonly permissions: PermissionOperations;
@@ -89,13 +108,18 @@ export class OpenshipClient {
   readonly issues: IssueOperations;
   readonly analytics: AnalyticsOperations;
   readonly jobs: JobOperations;
+  readonly actions: ActionOperations;
   readonly http: HttpClient;
   private readonly options: Readonly<OpenshipClientOptions>;
 
   constructor(options: OpenshipClientOptions) {
     this.options = Object.freeze({ ...options });
     const http = this.http = new HttpClient(options);
-    this.projects = createRemoteProjectOperations(http);
+    this.terminal = createRemoteTerminalOperations(http);
+    this.mail = createRemoteMailOperations(http);
+    this.migrations = createRemoteMigrationOperations(http);
+    this.instance = createRemoteInstanceOperations(http);
+    this.projects = createRemoteProjectOperations(http, options.fetch);
     this.sources = createRemoteSourceOperations(http);
     this.services = createRemoteServiceOperations(http);
     this.domains = createRemoteDomainOperations(http);
@@ -107,6 +131,7 @@ export class OpenshipClient {
     this.backupDestinations = createRemoteBackupDestinationOperations(http);
     this.backups = createRemoteBackupOperations(http);
     this.billing = createRemoteBillingOperations(http);
+    this.affiliates = createRemoteAffiliateOperations(http);
     this.notices = createRemoteNoticeOperations(http);
     this.github = createRemoteGitHubOperations(http);
     this.permissions = createRemotePermissionOperations(http);
@@ -120,6 +145,7 @@ export class OpenshipClient {
     this.issues = createRemoteIssueOperations(http);
     this.analytics = createRemoteAnalyticsOperations(http);
     this.jobs = createRemoteJobOperations(http);
+    this.actions = createRemoteActionOperations(http);
     this.deployments = Object.freeze({
       ...createRemoteDeploymentResources(http),
       async prepare(value) {
@@ -129,7 +155,7 @@ export class OpenshipClient {
       },
       async buildAccess(value) {
         const response = await http.request("/deployments/build/access", { method: "POST", body: JSON.stringify(parseInput(BuildAccessBody, value)) });
-        if (!isCreateDeploymentResult(response)) throw new ApiError("Invalid build response", 502, response);
+        if (!isAcceptedDeploymentResult(response)) throw new ApiError("Invalid build response", 502, response);
         return response;
       },
       async start(value) {
@@ -140,7 +166,7 @@ export class OpenshipClient {
           if (event.event !== "started") continue;
           let response: unknown;
           try { response = JSON.parse(event.data); } catch { throw new ApiError("Invalid build response", 502, null); }
-          if (!isCreateDeploymentResult(response)) throw new ApiError("Invalid build response", 502, response);
+          if (!isAcceptedDeploymentResult(response)) throw new ApiError("Invalid build response", 502, response);
           return response;
         }
         throw new ApiError("Build start did not return a deployment", 502, null);

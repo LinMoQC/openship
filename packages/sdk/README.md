@@ -2,11 +2,11 @@
 
 The SDK exposes one authorized platform implementation through native and remote clients. Native calls invoke the shared engine inside an owned Node worker in the host process. HTTP controllers call those same operations. Neither SDK import nor native creation starts an HTTP listener.
 
-This private workspace implements the SDK. `packages/openship` assembles the public `openship` package and CLI. The SDK exports are implemented and tested in the local distribution; publishing the next npm release is separate. The [full plan](../../docs/ship-sdk-plan.md) tracks the remaining platform migration.
+This private workspace implements the SDK. `packages/openship` assembles the public `openship` package and CLI. Ship SDK is published in `openship` 0.8.0 and later; install it with `npm install openship`. The [full plan](../../docs/ship-sdk-plan.md) tracks the remaining platform migration.
 
-The website's [API → Node.js SDK guide](../../apps/web/content/docs/api/sdk/index.mdx) covers installation/release availability, native and remote setup, tenant scopes, deployment workflows, and a [shared SDK/REST reference](../../apps/web/content/docs/api/index.mdx) for the current public groups. The published `openship@0.7.2` is still CLI-only; use a locally built package until the SDK release is published.
+The website's [Ship SDK guide](../../apps/web/content/docs/api/sdk/index.mdx) covers installation, native and remote setup, tenant scopes, deployment and scaling workflows, and a [shared SDK/REST reference](../../apps/web/content/docs/api/index.mdx) for the current public groups. Upgrade older CLI-only dependencies with `npm install openship@latest`.
 
-The public package includes a runnable [native lifecycle example](../openship/examples/native-lifecycle.mjs). From a Node project with the SDK tarball installed, run `node node_modules/openship/examples/native-lifecycle.mjs`. It exercises real deployments, redeployment, tenant isolation, session revocation, persistence, and project teardown in an owned temporary installation. The [package verification](../openship/verify-package.ts) runs and typechecks this exact example outside the workspace on Node 22 and 24. It uses the bare runtime without public routing; live Cloud, Docker, and SSH behavior are separate checks.
+The public package includes a runnable [native lifecycle example](../openship/examples/native-lifecycle.mjs). From a Node project with `openship` installed, run `node node_modules/openship/examples/native-lifecycle.mjs`. It exercises real deployments, redeployment, tenant isolation, session revocation, persistence, and project teardown in an owned temporary installation. The [package verification](../openship/verify-package.ts) runs and typechecks this exact example outside the workspace on Node 22 and 24. It uses the bare runtime without public routing; live Cloud, Docker, and SSH behavior are separate checks.
 
 ## Owned native integration
 
@@ -98,15 +98,15 @@ An explicit organization requires SDK protocol 1 and `fixedOrganizationScope` su
 
 `baseUrl` accepts `/api` and reverse-proxy prefixes. `token` may be a function for rotation; `fetch` may be injected. `ApiError` retains `status`, `code`, and response `body`. Mutations are submitted once without automatic retries or redirects. Cancelling a wait stops that wait; use `deployments.cancel(id)` to cancel execution.
 
-Connect directly to the canonical cloud instance and its cloud organization ID. Owner-account links on self-hosted instances do not yet provide a verified tenant mapping, so fixed scopes refuse that forwarding with `CLOUD_SCOPE_UNAVAILABLE`. Existing unscoped HTTP forwarding is preserved.
+Connect directly to the canonical Cloud instance and its Cloud organization ID to manage Cloud-stored records. Local owner-account links do not authorize that access for fixed requests or organization-bound/scoped credentials; they return `CLOUD_SCOPE_UNAVAILABLE` even if `organizationId` is omitted. Desktop and self-hosted projects can instead execute on a connected managed server using its local `serverId` and `buildStrategy: "server"`, with project and server permissions checked locally. That flow keeps project records on the local instance and uses the verified server binding.
 
 ## Supported shared surface
 
 | Group | Shared functionality |
 | --- | --- |
-| `projects`, `sources`, `deployments` | Lifecycle, environments/settings, source preparation, builds, runtime controls/logs, decisions/cancellation/rollback, events and deletion. |
+| `projects`, `sources`, `deployments` | Lifecycle, environments/settings, source preparation, builds, runtime controls/logs, application replicas, PostgreSQL/Redis databases, shared volumes, backup/recovery, decisions/cancellation/rollback, events and deletion. |
 | `services`, `domains`, `dns` | Service/configuration/storage/connections and domain/routing/DNS/TLS operations. |
-| `servers`, `system`, `credentials` | Server management/install/container streams, profiles, stored credentials and server Git; setup/self-app/edge/terminal coverage is still incomplete. |
+| `servers`, `system`, `credentials` | Server management/install/container streams, private networks, compute clusters, managed runtime/shared-storage setup, profiles, stored credentials and server Git. |
 | `apps` | Catalog discovery, installs, configuration and connections. |
 | `backupDestinations`, `backups`, `jobs` | Policies/runs/restores and streams, destination management, job lifecycle and execution. |
 | `analytics`, `issues`, `notifications` | Authorized metrics/issues, delivery channels/subscriptions/verification/history. |
@@ -116,6 +116,10 @@ Connect directly to the canonical cloud instance and its cloud organization ID. 
 | `github` | Connection/source management, repository metadata/content/automation and narrowed clone tokens. |
 | `notices` | Public installation announcements; publishing requires the separate operator capability. |
 | `billing` | Plans, subscription and renewal state, checkout, cancellation/resumption, top-ups, a namespace-specific portal, usage and allowance detail through Oblien. |
+| Remote `mail` | Mail setup, domains, mailboxes, aliases, DNS, certificates, relays, backup policy, component control and webmail. |
+| Remote `migrations` | Source discovery, exact container selection, import/move/copy, durable status, prompts, cutover and partial recovery. |
+| Remote `terminal` | Server and service PTYs with one-use HTTP tickets, WebSocket data, resize and confirmed exit. |
+| Remote `instance` | Bootstrap status/setup, auth upgrade, legacy control-plane migration requests and instance/project archives. Instance-admin or loopback restrictions still apply. |
 | Workflows | `deploy({ source, ... })`, `deployment(id).wait(...)`. |
 
 The exported operation interfaces in `@repo/contracts` are the method-level source of truth. Capability checks depend on mode, configured providers, identity, and host policy.
@@ -126,7 +130,7 @@ All project methods are on `scope.projects` or `client.projects`. Environment li
 
 `createShip({ platform, identity })` synchronously attaches to a caller-owned `PlatformKernel`; it does not start or close that composition. Workspace API code supplies the existing kernel from `@repo/platform/engine/lib/platform`. Public embedders normally use the owned asynchronous factory shown above.
 
-Native CLI mode is implemented and the legacy HTTP/SSE/folder-deploy helpers are removed. Edge, mail, and parts of system management still need named SDK adoption. Full mail, data transfer, cloud tenant mapping, organization/account lifecycle, and remaining system/channel operations are still being migrated. Durable multi-worker dispatch/replay, billing replay/accounting review and constrained background jobs remain open.
+The CLI uses named SDK operations for resource management, mail, migration, edge administration and instance data transfer. The remote-only groups above wrap existing authenticated HTTP handlers; they do not create a second engine or become native operations. Browser account login, 2FA enrollment, private support conversations, payment approval, internal setup and signed provider callbacks keep their existing authentication protocols. Durable multi-worker dispatch/replay, billing replay/accounting review and constrained background jobs remain open. See the [CLI and SDK coverage audit](../../docs/cli-sdk-platform-coverage-2026-10-07.md) for the tested matrix and deliberate exclusions.
 
 Billing catalogs work locally. Account and payment operations require hosted billing configuration or the canonical remote cloud client. Fixed local scopes refuse unverified owner-account cloud forwarding. Oblien webhook signature verification remains outside the ordinary tenant SDK; the retired Stripe webhook returns 410. Portal/cancel/resume require billing admin permission and remain available when new purchases are disabled.
 
@@ -156,6 +160,6 @@ bun run --cwd packages/openship build
 bun run --cwd packages/openship test:package
 ```
 
-The owned-native tests use real Node workers, PGlite, and the retained deployment pipeline. The packed-artifact check installs outside the workspace and tests ESM/CommonJS, NodeNext declarations, passive imports, native generated deployment and persistence, remote submission, and CLI loading. Set `OPENSHIP_TEST_NODE` to another Node executable to run the same checks there. Live Docker/cloud/SSH scenarios remain distinct provider gates.
+The owned-native tests use real Node workers, PGlite, and the retained deployment pipeline. The packed-artifact check installs outside the workspace and tests ESM/CommonJS, NodeNext declarations, passive imports, native generated deployment and persistence, remote submission, packaged mail/migration/instance calls, actual WebSocket terminal I/O in ESM and CommonJS, and CLI context selection. Set `OPENSHIP_TEST_NODE` to another Node executable to run the same checks there. Live Docker/cloud/SSH scenarios remain distinct provider gates.
 
 The [migration audit](../../docs/ship-sdk-migration-audit.md) records the original-to-engine file mapping, reviewed behavior changes, compatibility checks, and remaining limits.

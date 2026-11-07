@@ -1,4 +1,6 @@
 import { requireGitopsRelease } from "../releases/release-gate";
+import { listRouteProtection, changeRouteProtection } from "../../lib/route-protection";
+import { diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import { findActiveDeployment } from "@repo/platform/engine/lib/active-deployment";
 import { AppError, NotFoundError, isWildcardHostname, normalizeCustomHostname, safeErrorMessage } from "@repo/core";
 import { OperationError, type ProjectRoutingSchemas } from "@repo/contracts";
@@ -13,9 +15,10 @@ import { sanitizeSpec, normalizePathPrefix } from "../route-rules/rule-inputs";
 import { domainDependencies } from "../domains/domain.operations";
 import type { AddDomainResult } from "../domains/domain.service";
 import { HEALTH_WATCH_JOB, healthWatchActive } from "../monitoring/health-watch-policy";
+import { isCustomerProject } from "../billing/management.service";
 
 async function localProject(ctx: ExecutionContext, id: string) {
-  if (env.CLOUD_MODE) throw new NotFoundError("Operation");
+  if (env.CLOUD_MODE && !await isCustomerProject(ctx.organizationId, id)) throw new NotFoundError("Operation");
   const project = await repos.project.findById(id);
   assertResourceInOrg(project, "Project", ctx.organizationId, id);
   return project;
@@ -29,7 +32,7 @@ async function ownedDomain(projectId: string, domainId?: string | null) {
 async function repush(projectId: string) {
   if (process.env.OPENSHIP_NATIVE === "true" && process.env.OPENSHIP_NATIVE_ROUTING === "none") return;
   await pushProjectRulesResolved(projectId).catch(error =>
-    console.warn(`[route-rules] push failed: ${safeErrorMessage(error)}`));
+    errorDiagnostics.warn("platform/engine/modules/projects/project-routing.operations", `[route-rules] push failed: ${safeErrorMessage(error)}`, error));
 }
 function record(ctx: ExecutionContext, projectId: string, operation: string, ruleId: string) {
   audit.recordAsync(operationAuditContext(ctx), {
@@ -39,6 +42,12 @@ function record(ctx: ExecutionContext, projectId: string, operation: string, rul
 }
 
 export const projectRoutingOperations: ResourceServices<typeof ProjectRoutingSchemas> = {
+  listRouteProtection,
+  async changeRouteProtection(ctx, id, input) {
+    const result = await changeRouteProtection(ctx, id, input);
+    record(ctx, id, `routeProtection.${input.action}`, input.hostname);
+    return result;
+  },
   async listRouteRules(ctx, id) {
     await localProject(ctx, id);
     return repos.routeRule.listByProject(id);

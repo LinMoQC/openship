@@ -15,6 +15,8 @@ const mocks = vi.hoisted(() => ({
   fetch: vi.fn(),
   listDomains: vi.fn(),
   verifySsl: vi.fn(),
+  checkPorts: vi.fn(),
+  edgeStatus: vi.fn(),
 }));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: vi.fn(), push: vi.fn() }) }));
 vi.mock("@/context/ProjectSettingsContext", () => ({ useProjectSettings: () => mocks.settings }));
@@ -35,11 +37,15 @@ vi.mock("@/lib/api", async (original) => {
   return {
     ...actual,
     getApiBaseUrl: () => "http://localhost:4000/api/",
-    projectsApi: { ...actual.projectsApi, getEdgeStatus: async () => ({ ready: true }) },
+    projectsApi: {
+      ...actual.projectsApi,
+      getEdgeStatus: mocks.edgeStatus,
+      listRouteProtection: async () => ({ data: [] }),
+    },
     domainsApi: { ...actual.domainsApi, list: mocks.listDomains, verifySsl: mocks.verifySsl },
     deployApi: {
       ...actual.deployApi,
-      checkPorts: async () => ({ data: [] }),
+      checkPorts: mocks.checkPorts,
       checkOutput: async () => ({ data: [] }),
     },
   };
@@ -51,11 +57,16 @@ let host: HTMLDivElement;
 let root: Root;
 let stream: ReadableStreamDefaultController<Uint8Array>;
 const retryCopy = baseDictionary.projects.routingRetry;
+const retryStartUrl =
+  /^http:\/\/localhost:4000\/api\/projects\/project-a\/routing\/retry\/stream\?idempotencyKey=[\da-f-]+$/;
 const names = ["api", "app", "web"];
 const ports = [4010, 3021, 3022];
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.checkPorts.mockResolvedValue({ data: [] });
+  mocks.edgeStatus.mockResolvedValue({ ready: true });
+  sessionStorage.clear();
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   vi.stubGlobal("fetch", mocks.fetch);
   mocks.fetch.mockImplementation(
@@ -142,10 +153,143 @@ async function emit(type: string, data: Record<string, unknown>, close = false) 
 async function startRetry(strict = false) {
   await render(strict);
   await act(async () => retryButtons().at(-1)!.click());
-  await emit("session", {});
+  await emit("session", { sessionId: "routing-a" });
 }
 
 describe("routing retry on the Domains page", () => {
+  it("does not infer HTTPS success from a ready edge after its stream disconnects", async () => {
+    mocks.edgeStatus.mockResolvedValue({ ready: false });
+    await render();
+    const setup = [...host.querySelectorAll("button")].find(
+      (button) =>
+        button.textContent?.trim() ===
+        baseDictionary.projectSettings.domains.edge.setUp,
+    )!;
+    await act(async () => setup.click());
+    await emit("log", {
+      message: "Edge ready, checking HTTPS…",
+      level: "info",
+    });
+    mocks.edgeStatus.mockResolvedValue({ ready: true });
+    await act(async () => stream.close());
+    const log = host.querySelector('section[aria-label="Routing log"]')!;
+    expect(log.textContent).toContain(UNKNOWN_OUTCOME_MESSAGE);
+    expect(log.textContent).not.toContain(retryCopy.success);
+    expect(mocks.invalidate).toHaveBeenCalledWith("project-a");
+    expect(mocks.edgeStatus).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["completed", "failed"])(
+    "keeps edge setup inline, preserves takeover consent, and refreshes state after %s",
+    async (status) => {
+      mocks.edgeStatus.mockResolvedValue({ ready: false });
+      mocks.fetch.mockImplementation(async (url: string) => {
+        if (url.endsWith("/respond")) return Response.json({ success: true });
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              stream = controller;
+            },
+          }),
+          {
+            headers: { "content-type": "text/event-stream" },
+          },
+        );
+      });
+      await render();
+      const setup = [...host.querySelectorAll("button")].find(
+        (button) =>
+          button.textContent?.trim() ===
+          baseDictionary.projectSettings.domains.edge.setUp,
+      )!;
+      expect(setup).toBeDefined();
+      await act(async () => setup.click());
+      expect(mocks.fetch).toHaveBeenCalledWith(
+        "http://localhost:4000/api/projects/project-a/routing/ensure-edge/stream",
+        expect.objectContaining({ method: "POST" }),
+      );
+      const log = host.querySelector('section[aria-label="Routing log"]')!;
+      expect(log).not.toBeNull();
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+      await emit("session", { sessionId: "edge-a" });
+      await emit("prompt", {
+        promptId: "takeover",
+        title: "Use the OpenShip edge?",
+        message: "Another proxy owns these ports.",
+        actions: [
+          { id: "cancel", label: "Leave it" },
+          { id: "takeover", label: "Use OpenShip" },
+        ],
+      });
+      expect(mocks.fetch).toHaveBeenCalledTimes(1);
+      const confirm = [...log.querySelectorAll("button")].find(
+        (button) => button.textContent?.trim() === "Use OpenShip",
+      )!;
+      expect(confirm).toBeDefined();
+      await act(async () => confirm.click());
+      expect(mocks.fetch).toHaveBeenLastCalledWith(
+        "http://localhost:4000/api/projects/project-a/routing/ensure-edge/respond",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({ sessionId: "edge-a", action: "takeover" }),
+        }),
+      );
+      await emit("log", {
+        message: "Checking domain verification and HTTPS…",
+        level: "info",
+      });
+      await emit("complete", { status }, true);
+      expect(log.textContent).toContain(
+        "Checking domain verification and HTTPS…",
+      );
+      expect(mocks.invalidate).toHaveBeenCalledWith("project-a");
+      expect(mocks.edgeStatus).toHaveBeenCalledTimes(2);
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+    },
+  );
+
+  it("shows the binding issue on its domain without suggesting a routing repair", async () => {
+    mocks.settings.domainsData.domains = names.map((name) =>
+      savedDomain({
+        id: `dom-${name}`,
+        hostname: `${name}.example.com`,
+        serviceId: `svc-${name}`,
+        verified: true,
+        status: "active",
+        sslStatus: "active",
+        diagnostics: null,
+      }),
+    );
+    mocks.checkPorts.mockResolvedValue({
+      data: [
+        {
+          port: 4010,
+          serviceId: "svc-api",
+          serviceName: "api",
+          listening: true,
+          checked: true,
+          loopbackOnly: true,
+        },
+        {
+          port: 3021,
+          serviceId: "svc-app",
+          serviceName: "app",
+          listening: true,
+          checked: false,
+          loopbackOnly: true,
+        },
+      ],
+    });
+    await render();
+    expect(host.textContent).toContain(
+      'Service "api" only listens inside the container on port 4010.',
+    );
+    expect(host.textContent).not.toContain('Service "app" only listens');
+    expect(host.textContent).toContain("0.0.0.0");
+    expect(retryButtons()).toHaveLength(0);
+    expect(mocks.fetch).not.toHaveBeenCalled();
+  });
+
   it.each([false, true])(
     "keeps routing retry in the domain menu when routing is healthy (service view: %s)",
     async (serviceView) => {
@@ -172,7 +316,7 @@ describe("routing retry on the Domains page", () => {
       await act(async () => retryButtons()[0]!.click());
       await emit("session", {});
       expect(mocks.fetch).toHaveBeenCalledExactlyOnceWith(
-        "http://localhost:4000/api/projects/project-a/routing/retry/stream",
+        expect.stringMatching(retryStartUrl),
         expect.objectContaining({ method: "POST" }),
       );
       expect(host.querySelector('section[aria-label="Routing log"]')?.textContent).toContain(
@@ -215,7 +359,7 @@ describe("routing retry on the Domains page", () => {
     },
   );
 
-  it("clears a completed repair's stale banner immediately and preserves other project edits", async () => {
+  it("refreshes the warning and domain cards together instead of clearing only the banner", async () => {
     mocks.settings.projectData.routingUnsynced = true;
     mocks.settings.projectData.routingWarning = "Previous cleanup failure";
     mocks.settings.setProjectData.mockImplementation(
@@ -226,12 +370,104 @@ describe("routing retry on the Domains page", () => {
     await startRetry();
     mocks.settings.projectData.name = "Edited during repair";
     await emit("complete", { status: "completed" }, true);
+    expect(mocks.settings.projectData.name).toBe("Edited during repair");
+    expect(mocks.settings.projectData.routingUnsynced).toBe(true);
+    expect(mocks.settings.setProjectData).not.toHaveBeenCalled();
+    expect(mocks.invalidate).toHaveBeenCalledWith("project-a");
+    // The canonical project read carries both the saved warning and domain state.
+    mocks.settings.projectData.routingUnsynced = false;
+    mocks.settings.projectData.routingWarning = null;
+    mocks.settings.domainsData.domains = names.map((name) =>
+      savedDomain({
+        id: `dom-${name}`,
+        hostname: `${name}.example.com`,
+        serviceId: `svc-${name}`,
+        verified: true,
+        sslStatus: "active",
+        status: "active",
+        diagnostics: null,
+      }),
+    );
+    await render();
     expect(host.textContent).not.toContain(retryCopy.title);
     expect(host.textContent).not.toContain("Previous cleanup failure");
-    expect(mocks.settings.projectData.name).toBe("Edited during repair");
-    expect(mocks.settings.projectData.routingUnsynced).toBe(false);
-    expect(mocks.invalidate).toHaveBeenCalledWith("project-a");
+    expect(host.textContent).not.toContain(baseDictionary.projectSettings.domains.status.failed);
+    expect(host.textContent).toContain(baseDictionary.projectSettings.domains.status.verified);
     expect(retryButtons().every((button) => !button.disabled)).toBe(true);
+  });
+
+  it.each(["running", "completed"])(
+    "reconnects after refresh without another repair POST (server is %s)",
+    async (status) => {
+      await startRetry();
+      await emit("log", { message: "Checking the existing certificate", level: "info" });
+      await act(async () => root.unmount());
+      mocks.fetch.mockClear();
+      mocks.settings.projectData.routingRetry = {
+        sessionId: "routing-a",
+        status,
+        startedAt: Date.now(),
+      };
+      root = createRoot(host);
+      await render();
+      expect(mocks.fetch).toHaveBeenCalledExactlyOnceWith(
+        "http://localhost:4000/api/projects/project-a/routing/retry/stream?sessionId=routing-a",
+        expect.objectContaining({ method: "GET" }),
+      );
+      await emit("session", { sessionId: "routing-a" });
+      await emit("log", { message: "Checking the existing certificate", level: "info" });
+      await emit("log", { message: "Certificate reused", level: "info" });
+      await emit("complete", { status: "completed" }, true);
+      expect(host.textContent).toContain("Checking the existing certificate");
+      expect(host.textContent).toContain("Certificate reused");
+      expect(host.textContent).toContain(retryCopy.success);
+      expect(mocks.fetch).toHaveBeenCalledTimes(1);
+
+      await act(async () =>
+        host.querySelector<HTMLButtonElement>('button[aria-label="Close operation log"]')!.click(),
+      );
+      await act(async () => root.unmount());
+      root = createRoot(host);
+      mocks.fetch.mockClear();
+      await render();
+      expect(host.querySelector('section[aria-label="Routing log"]')).toBeNull();
+      expect(mocks.fetch).not.toHaveBeenCalled();
+    },
+  );
+
+  it("reconnects a dropped stream to its server session instead of starting another repair", async () => {
+    await startRetry();
+    await emit("log", { message: "Checking HTTPS", level: "info" });
+    await act(async () => stream.error(new Error("Connection reset")));
+    const reconnect = [...host.querySelectorAll("button")].find(
+      (button) => button.textContent === "Reconnect",
+    )!;
+    await act(async () => reconnect.click());
+    expect(mocks.fetch).toHaveBeenLastCalledWith(
+      "http://localhost:4000/api/projects/project-a/routing/retry/stream?sessionId=routing-a",
+      expect.objectContaining({ method: "GET" }),
+    );
+    await emit("session", { sessionId: "routing-a" });
+    await emit("log", { message: "Checking HTTPS", level: "info" });
+    await emit("complete", { status: "completed" }, true);
+    expect(host.textContent?.match(/Checking HTTPS/g)).toHaveLength(1);
+    expect(host.textContent).toContain(retryCopy.success);
+  });
+
+  it("reuses the start request key when the connection drops before receiving a session ID", async () => {
+    await render();
+    await act(async () => retryButtons()[0].click());
+    const firstUrl = mocks.fetch.mock.calls[0][0];
+    await act(async () => stream.error(new Error("Lost first response")));
+    const reconnect = [...host.querySelectorAll("button")].find(
+      (button) => button.textContent === "Reconnect",
+    )!;
+    await act(async () => reconnect.click());
+    expect(mocks.fetch).toHaveBeenLastCalledWith(
+      firstUrl,
+      expect.objectContaining({ method: "POST" }),
+    );
+    expect(firstUrl).toMatch(retryStartUrl);
   });
 
   it.each([false, true])(
@@ -245,7 +481,7 @@ describe("routing retry on the Domains page", () => {
       expect(retryButtons()).toHaveLength(routingUnsynced ? 4 : 3);
       await act(async () => retryButtons()[1]!.click());
       expect(mocks.fetch).toHaveBeenCalledWith(
-        "http://localhost:4000/api/projects/project-a/routing/retry/stream",
+        expect.stringMatching(retryStartUrl),
         expect.objectContaining({ method: "POST" }),
       );
       await emit("log", { message: "api.example.com: route restored", level: "info" });
@@ -276,6 +512,8 @@ describe("routing retry on the Domains page", () => {
     async (strict) => {
       await startRetry(strict);
       const requests = mocks.fetch.mock.calls.length;
+      const firstUrl = mocks.fetch.mock.calls[0][0];
+      expect(mocks.fetch.mock.calls.every(([url]) => url === firstUrl)).toBe(true);
       await emit("log", { message: "Still checking the current routes", level: "info" });
       await act(async () => {
         for (const button of retryButtons()) button.click();
@@ -289,6 +527,7 @@ describe("routing retry on the Domains page", () => {
       await emit("complete", { status: "completed" }, true);
       await act(async () => retryButtons()[0]!.click());
       expect(mocks.fetch.mock.calls.length).toBeGreaterThan(requests);
+      expect(mocks.fetch.mock.calls.at(-1)![0]).not.toBe(firstUrl);
       expect(host.textContent).not.toContain("Still checking the current routes");
       expect(document.querySelector('[role="dialog"]')).toBeNull();
     },
@@ -340,7 +579,7 @@ describe("routing retry on the Domains page", () => {
     expect(retryButtons()).toHaveLength(1);
     await act(async () => retryButtons().at(-1)!.click());
     expect(mocks.fetch).toHaveBeenCalledWith(
-      "http://localhost:4000/api/projects/project-a/routing/retry/stream",
+      expect.stringMatching(retryStartUrl),
       expect.objectContaining({ method: "POST" }),
     );
   });
@@ -378,6 +617,49 @@ async function openDomainDetails() {
 }
 
 describe("domain status details", () => {
+  it("shows one repair action when the missing-route explanation is expanded", async () => {
+    await render(false, { serviceId: "svc-api" });
+    await openDomainDetails();
+    const actions = [...host.querySelectorAll("button")].filter((button) =>
+      [retryCopy.retry, detailsCopy.retryNow].includes(button.textContent?.trim() ?? ""),
+    );
+    expect(actions).toHaveLength(1);
+    await act(async () => actions[0].click());
+    expect(mocks.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses an authorized subsystem's certificate state without inventing a missing project domain", async () => {
+    mocks.settings.projectData.routingClaims = [
+      {
+        hostname: "api.example.com",
+        ownerType: "mail",
+        verified: true,
+        sslStatus: "active",
+        sslExpiresAt: "2099-01-01T00:00:00.000Z",
+      },
+    ];
+    await render(false, { serviceId: "svc-api" });
+    expect(host.textContent).toContain(baseDictionary.projectSettings.domains.status.verified);
+    expect(host.textContent).toContain(baseDictionary.projectSettings.domains.ssl.active);
+    expect(host.textContent).not.toContain(baseDictionary.projectSettings.domains.status.failed);
+    expect(retryButtons()).toHaveLength(0);
+    await act(async () => host.querySelector<HTMLButtonElement>("button[aria-expanded]")!.click());
+    expect(host.textContent).not.toContain(baseDictionary.projectSettings.domains.menu.renewSsl);
+    expect(host.textContent).not.toContain(baseDictionary.projectSettings.domains.menu.uploadCert);
+  });
+
+  it("does not invent verification or certificate success for an authorized hostname with no certificate record", async () => {
+    mocks.settings.projectData.routingClaims = [
+      { hostname: "api.example.com", ownerType: null, verified: null, sslStatus: null },
+    ];
+    await render(false, { serviceId: "svc-api" });
+    expect(host.textContent).toContain(baseDictionary.projectSettings.domains.ssl.unknown);
+    expect(host.textContent).not.toContain(baseDictionary.projectSettings.domains.status.verified);
+    const details = await openDomainDetails();
+    expect(details.textContent).toContain(detailsCopy.reasons.managed_owner);
+    expect(retryButtons()).toHaveLength(0);
+  });
+
   it("explains a genuinely pending check and its scheduled time", async () => {
     mocks.settings.domainsData.domains = [savedDomain()];
     await render();
@@ -385,7 +667,8 @@ describe("domain status details", () => {
     expect(details.textContent).toContain(detailsCopy.reasons.verification);
     expect(details.querySelector("time")?.dateTime).toBe("2026-09-23T01:13:00.000Z");
     expect(details.textContent).toContain(detailsCopy.nextCheck);
-    expect(details.querySelector("button")?.textContent).toContain(detailsCopy.retryNow);
+    expect(details.querySelector("button")).toBeNull();
+    expect(host.textContent).toContain(baseDictionary.projectSettings.domains.menu.verify);
   });
 
   it("shows the failed attempt and retries that domain inline, without starting a project routing repair", async () => {
@@ -405,12 +688,15 @@ describe("domain status details", () => {
       "2026-09-23T01:00:00.000Z",
       "2026-09-23T01:13:00.000Z",
     ]);
-    await act(async () => details.querySelector<HTMLButtonElement>("button")!.click());
+    const verify = [...host.querySelectorAll("button")].find(
+      (button) => button.textContent === baseDictionary.projectSettings.domains.menu.verify,
+    )!;
+    await act(async () => verify.click());
     expect(mocks.fetch).toHaveBeenCalledWith(
       "http://localhost:4000/api/domains/dom-api/verify/stream",
       expect.objectContaining({ method: "POST" }),
     );
-    expect(details.querySelector<HTMLButtonElement>("button")!.disabled).toBe(true);
+    expect(verify.disabled).toBe(true);
     await emit("log", { message: "SSH authentication failed", level: "error" });
     await emit("complete", { status: "failed" }, true);
     expect(mocks.invalidate).toHaveBeenCalledWith("project-a");
@@ -418,7 +704,7 @@ describe("domain status details", () => {
       "SSH authentication failed",
     );
     expect(document.querySelector('[role="dialog"]')).toBeNull();
-    expect(details.querySelector<HTMLButtonElement>("button")!.disabled).toBe(false);
+    expect(verify.disabled).toBe(false);
   });
 
   it("does not offer a retry for routes waiting for their first deployment", async () => {
@@ -455,7 +741,8 @@ describe("domain status details", () => {
     const details = await openDomainDetails();
     expect(details.textContent).toContain(detailsCopy.automaticDisabled);
     expect(details.querySelector("time")).toBeNull();
-    expect(details.querySelector("button")?.textContent).toContain(detailsCopy.retryNow);
+    expect(details.querySelector("button")).toBeNull();
+    expect(host.textContent).toContain(baseDictionary.projectSettings.domains.menu.verify);
   });
 
   it("offers a certificate recheck instead of ACME issuance for uploaded certificates", async () => {

@@ -65,6 +65,12 @@ or its owning project.
 
 ## Add a service
 
+In **Services → Add → From repository** (also available from Topology), choose a build context and Dockerfile from the project's connected GitHub repository. The browser uses the project's branch. You can enter paths manually if repository browsing is unavailable. Both paths in the dashboard start at the repository root; the Dockerfile must be inside the selected context. A project without a connected repository offers a link to its Source settings.
+
+Saving creates the service configuration. Use its normal **Deploy** action to build and start it on the project's destination, including self-hosted and Cloud servers. This uses the same service API and build pipeline as existing Compose services. Catalog images, custom images, and connections to existing services remain separate source choices.
+
+The dashboard translates the chosen paths into the existing API conventions: `build` is relative to the project's Compose directory, and `dockerfile` is relative to that build context. For a project rooted at `deploy/compose`, selecting `apps/api` and `apps/api/Dockerfile.prod` sends `build: "../../apps/api"` and `dockerfile: "Dockerfile.prod"`.
+
 A service row is a union: `kind: "compose"` uses the container fields (image, build, ports…), while
 `kind: "monorepo"` uses the sub-app build fields (rootDirectory, framework…). Both field sets are accepted
 and optional; the `kind` decides which subset is the source of truth. Unknown keys are rejected.
@@ -114,7 +120,7 @@ curl -X POST "$OPENSHIP_URL/api/projects/proj_123/services" \
     environment: { type: 'Record<string, string>', description: 'Compose environment defaults baked into the service. On update this map is merged, not replaced, and accepts nulls — see Update a service.' },
     volumes: { type: 'string[]', description: 'Volume mappings (max 50 entries, each ≤500 chars).' },
     command: { type: 'string', description: 'Override the container command (max 1000).' },
-    advanced: { type: 'object', description: 'Extended compose settings. Currently a healthcheck block: { test, interval, timeout, retries, startPeriod, disable }. Unknown keys are rejected.' },
+    advanced: { type: 'object', description: 'Extended Compose settings, including healthcheck, readiness and extraHosts (hostname to IPv4/IPv6 address or Docker host-gateway). Unknown keys are rejected; null removes an individual setting.' },
     exposed: { type: 'boolean', description: 'Whether this service is publicly routed.' },
     exposedPort: { type: 'string', description: 'Container port to expose publicly (max 50).' },
     domain: { type: 'string', description: 'Free subdomain label for this service (max 255).' },
@@ -277,15 +283,46 @@ await ship.services.mergeEnvVars("proj_123", "svc_456", {
 ```
 
 `GET .../env` lists only service override rows (secret values masked).
+
+To update a shared project source from the service editor, call
+`POST .../env/review` (`services.reviewEnvVars`) with the same partial edit first.
+It returns `changes` with each editable `key`, its `projectKey`, affected service
+names and keys, and an opaque `revision`. Values are never returned. Present those
+changes for confirmation, then send the original edit to `PATCH .../env` with:
+
+```ts
+const edit = {
+  environment: "production" as const,
+  upserts: [{ key: "LOG_LEVEL", value: "info", sourceId: null }],
+  deletes: [],
+};
+const review = await ship.services.reviewEnvVars("proj_123", "svc_456", edit);
+// Display review.changes and let the user choose shared keys before saving.
+const selectedKeys = review.changes.map(change => change.key);
+await ship.services.mergeEnvVars("proj_123", "svc_456", {
+  ...edit,
+  ...(selectedKeys.length ? { shared: { keys: selectedKeys, revision: review.revision } } : {}),
+});
+```
+
+Omit `shared` to save service-only overrides. Selected keys update their existing
+project source once; unselected edits remain local to the service. Project write
+access is required. A stale review returns `ENVIRONMENT_CHANGED`, with no partial
+writes. The response lists `affectedServices`; use the existing apply/redeploy
+operations to update their running containers. Repository files remain unchanged.
+The change is project-scoped: project apps that inherit these values also receive
+them on their next deploy.
+
 `PUT .../env` **replaces** those overrides for one environment — send every
-override you want to keep. Neither endpoint represents the inherited Compose or
-shared project layers.
+override you want to keep. This replacement endpoint only writes the service
+override layer.
 
 ```
 GET /api/projects/:id/services/:serviceId/env
 PUT /api/projects/:id/services/:serviceId/env
 GET /api/projects/:id/services/:serviceId/environment
 PATCH /api/projects/:id/services/:serviceId/env
+POST /api/projects/:id/services/:serviceId/env/review
 ```
 
 <Tabs items={['SDK', 'REST API']} groupId="api-transport" persist>
@@ -418,7 +455,8 @@ organization. List the project's services with `GET /api/projects/:id/services` 
 | Accept a legacy source review while preserving saved environment values. | `services.acceptDrift(parentId, id)` | `POST /api/projects/:id/services/:serviceId/drift/accept`<br />`project:service:write` |
 | Keep the current configuration when resolving drift. | `services.keepDrift(parentId, id)` | `POST /api/projects/:id/services/:serviceId/drift/keep`<br />`project:service:write` |
 | Read the effective saved service environment and optionally compare it with Docker. | `services.getEnvironment(parentId, id, input?)` | `GET /api/projects/:id/services/:serviceId/environment`<br />`project:service:read` |
-| Save named service overrides without replacing unrelated values. | `services.mergeEnvVars(parentId, id, input)` | `PATCH /api/projects/:id/services/:serviceId/env`<br />`project:service:write` |
+| Save named environment edits, optionally updating reviewed shared project values. | `services.mergeEnvVars(parentId, id, input)` | `PATCH /api/projects/:id/services/:serviceId/env`<br />`project:service:write` |
+| Review affected services before updating a shared environment value. | `services.reviewEnvVars(parentId, id, input)` | `POST /api/projects/:id/services/:serviceId/env/review`<br />`project:service:write` |
 | Read service environment overrides with masked secrets. | `services.listEnvVars(parentId, id, input?)` | `GET /api/projects/:id/services/:serviceId/env`<br />`project:service:read` |
 | Apply service environment variable changes. | `services.setEnvVars(parentId, id, input)` | `PUT /api/projects/:id/services/:serviceId/env`<br />`project:service:write` |
 | Reveal authorized service environment values. | `services.revealEnv(parentId, id, input)` | `POST /api/projects/:id/services/:serviceId/env-reveal`<br />`project:service:write` |

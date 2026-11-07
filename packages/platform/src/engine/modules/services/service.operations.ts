@@ -10,7 +10,9 @@ import { parseRevealKeys, pickRevealed } from "../../lib/env-reveal";
 import { sshManager } from "../../lib/ssh-manager";
 import * as service from "./service.service";
 import { syncComposeDocument } from "./compose-sync.service";
+import { assertHostMountWriteAccess } from "../deployments/host-mount-policy";
 import { applyServiceEnvironment } from "./service-environment";
+import { reviewSharedServiceEnvironment } from "./service-environment-sharing";
 import {
   getServiceEnvironment,
   mergeServiceEnvVars,
@@ -79,6 +81,7 @@ export const serviceDependencies: ServiceDependencies = {
       run(async () => visible(ctx, await service.listServices(ctx, id), (row) => row.id)),
     async create(ctx, id, input) {
       await requireGitopsRelease(id);
+      await assertHostMountWriteAccess(ctx, input);
       const result = await run(() => service.createService(ctx, id, input));
       record(ctx, result.id, "write", { operation: "create", projectId: id, name: result.name });
       return result;
@@ -90,6 +93,7 @@ export const serviceDependencies: ServiceDependencies = {
     },
     async sync(ctx, id, input) {
       await requireGitopsRelease(id);
+      await assertHostMountWriteAccess(ctx, input);
       if (input.services.length === 0)
         throw new OperationError(
           "Refusing to sync an empty compose service list",
@@ -122,6 +126,7 @@ export const serviceDependencies: ServiceDependencies = {
     get: (ctx, projectId, id) => run(() => service.getService(ctx, projectId, id)),
     async update(ctx, projectId, id, input) {
       await requireGitopsRelease(projectId);
+      await assertHostMountWriteAccess(ctx, input);
       const result = await run(() => service.updateService(ctx, projectId, id, input));
       record(ctx, id, "write", { operation: "update", projectId, fields: Object.keys(input) });
       return result;
@@ -148,6 +153,8 @@ export const serviceDependencies: ServiceDependencies = {
       run(() => service.listServiceEnvVars(ctx, projectId, id, input?.environment)),
     getEnvironment: (ctx, projectId, id, input) =>
       run(() => getServiceEnvironment(ctx, projectId, id, input)),
+    reviewEnvVars: (ctx, projectId, id, input) =>
+      run(async () => (await reviewSharedServiceEnvironment(ctx, projectId, id, input)).review),
     async mergeEnvVars(ctx, projectId, id, input) {
       await requireEditableReleaseConfiguration(projectId);
       const result = await run(() => mergeServiceEnvVars(ctx, projectId, id, input));
@@ -157,6 +164,8 @@ export const serviceDependencies: ServiceDependencies = {
         environment: input.environment,
         keys: input.upserts.map((row) => row.key),
         deletedKeys: input.deletes.map((row) => row.key),
+        sharedKeys: input.shared?.keys,
+        affectedServices: "affectedServices" in result ? result.affectedServices : undefined,
       });
       return result;
     },

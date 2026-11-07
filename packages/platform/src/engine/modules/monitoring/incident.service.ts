@@ -24,6 +24,7 @@
  * audit log and the operator's Slack tell the same story.
  */
 
+import { diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import {
   repos,
   incidentSeverity,
@@ -33,6 +34,7 @@ import {
 import { safeErrorMessage } from "@repo/core";
 import { notification } from "@repo/platform/engine/lib/notification-dispatcher";
 import { resolveDashboardPublicUrl } from "@repo/platform/engine/lib/public-url";
+import { isNetworkUnavailableError } from "../../lib/remote-state";
 import type { WorkloadIncidentKind } from "@repo/platform/engine/modules/monitoring/steady-state";
 
 /** Incident kind → the audit eventType the notification category is keyed off. */
@@ -70,6 +72,9 @@ export interface WorkloadTarget {
   serviceName: string;
   serverId: string | null;
   containerId: string | null;
+  /** Release and stored identity hint used to resolve the live container. */
+  deploymentId?: string | null;
+  trackedContainerId?: string | null;
 }
 
 /** What one tick observed about a broken workload. */
@@ -155,7 +160,7 @@ async function announce(opts: {
       // The alert matters more than its audit cross-link, so this never blocks the
       // notification — it just loses the "view in audit log" deep link. Logged because
       // silently degrading to a linkless alert looked identical to a working one.
-      console.error(`[monitoring] audit event for ${opts.eventType} failed: ${safeErrorMessage(err)}`);
+      errorDiagnostics.error("platform/engine/modules/monitoring/incident.service", `[monitoring] audit event for ${opts.eventType} failed: ${safeErrorMessage(err)}`, err);
       return undefined;
     });
 
@@ -180,8 +185,8 @@ async function announce(opts: {
   await repos.serviceIncident
     .markNotified(opts.incident.id)
     .catch((err) =>
-      console.error(
-        `[monitoring] incident ${opts.incident.id} notified-marker failed (may re-notify): ${safeErrorMessage(err)}`,
+      errorDiagnostics.error("platform/engine/modules/monitoring/incident.service",
+        `[monitoring] incident ${opts.incident.id} notified-marker failed (may re-notify): ${safeErrorMessage(err)}`, err,
       ),
     );
 }
@@ -204,6 +209,8 @@ export async function recordWorkloadFailure(
     restartCount: observation.restartCount,
     oomKilled: observation.oomKilled,
     containerId: target.containerId,
+    deploymentId: target.deploymentId ?? null,
+    trackedContainerId: target.trackedContainerId ?? null,
   };
 
   if (!existing) {
@@ -335,12 +342,17 @@ export async function recordServerUnreachable(opts: {
   affectedProjects: number;
   existing: ServiceIncident | undefined;
 }): Promise<IncidentTransition> {
+  const networkUnavailable = isNetworkUnavailableError(opts.reason);
   if (opts.existing) {
     await repos.serviceIncident.touch(opts.existing.id, { reason: opts.reason });
-    return "unchanged";
+    // A connection gap is recorded without paging for every target. If a later
+    // check can use the network but still cannot reach this host, notify once.
+    if (networkUnavailable || opts.existing.notifiedAt || !isNetworkUnavailableError(opts.existing.reason)) {
+      return "unchanged";
+    }
   }
 
-  const incident = await repos.serviceIncident.open({
+  const incident = opts.existing ?? await repos.serviceIncident.open({
     organizationId: opts.organizationId,
     projectId: null,
     serviceId: null,
@@ -352,6 +364,9 @@ export async function recordServerUnreachable(opts: {
     confirmations: 1,
   });
   if (!incident) return "unchanged";
+  // Keep the existing durable observation record for recovery and aggregation,
+  // without claiming that each server failed when Openship lost its network.
+  if (networkUnavailable) return "opened";
 
   const projects =
     opts.affectedProjects === 1 ? "1 project" : `${opts.affectedProjects} projects`;
@@ -369,13 +384,14 @@ export async function recordServerUnreachable(opts: {
       errorMessage: opts.reason,
     },
   });
-  return "opened";
+  return opts.existing ? "unchanged" : "opened";
 }
 
 /** The box answered again — close its incident and say so. */
 export async function resolveServerIncident(incident: ServiceIncident): Promise<boolean> {
   const at = new Date();
   if (!(await repos.serviceIncident.resolve(incident.id, at))) return false;
+  if (!incident.notifiedAt && isNetworkUnavailableError(incident.reason)) return true;
 
   const downtime = formatDowntime(at.getTime() - incident.openedAt.getTime());
   await announce({

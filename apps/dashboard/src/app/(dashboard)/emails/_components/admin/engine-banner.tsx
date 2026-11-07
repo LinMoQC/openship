@@ -19,9 +19,8 @@ import { Icon as UiIcon } from "@repo/ui/icons";
  *   - no engine at all → the re-run-setup wizard entry, the only thing that can
  *     legitimately recreate one, and NOT something to fire off a banner click.
  *
- * Renders nothing when the engine is serving, and nothing when `engine` is absent
- * — absent means the probe couldn't conclude, and a failed read must never be
- * shown as a broken server.
+ * An unavailable observation offers a status retry. It never infers a stopped
+ * or missing engine from a failed read. A serving engine needs no banner.
  */
 
 import Link from "next/link";
@@ -30,14 +29,17 @@ import type { MailEngineState } from "@/lib/api";
 import { useI18n } from "@/components/i18n-provider";
 import { useInfraFix } from "@/hooks/useInfraFix";
 import { useReattachActiveFix } from "@/hooks/useReattachActiveFix";
+import { ConnectionNotice } from "@/components/shared/ConnectionNotice";
 
 export function MailEngineBanner({
   serverId,
   engine,
+  observationError,
   onRepaired,
 }: {
   serverId: string;
   engine: MailEngineState | undefined;
+  observationError?: string;
   /** Re-read status once the repair session ends, so the banner clears itself. */
   onRepaired: () => void;
 }) {
@@ -55,6 +57,12 @@ export function MailEngineBanner({
     ],
   });
 
+  if (observationError) return <ConnectionNotice
+    title={t.issues.connectivity.mailTitle}
+    message={t.issues.connectivity.mailHint}
+    detail={observationError}
+    onRetry={onRepaired}
+  />;
   if (!engine || engine.running) return null;
 
   const gone = engine.flavor === "none";

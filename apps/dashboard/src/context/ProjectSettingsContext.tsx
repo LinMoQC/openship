@@ -1,4 +1,7 @@
 "use client";
+
+import { reportCaughtError as observeCaughtError, diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
+import { useCloudResourceKey } from "./CloudResourceContext";
 import type { IconName } from "@repo/ui/icons";
 import React, {
   createContext,
@@ -11,10 +14,12 @@ import React, {
   useMemo,
 } from "react";
 import type { ReleaseSource, WorkloadType } from "@repo/core";
+import type { ProjectRoutingClaim, ProjectRoutingRetry } from "@repo/contracts";
 import { useRouter } from "next/navigation";
 import { useI18n } from "@/components/i18n-provider";
 import { usePlatform } from "@/context/PlatformContext";
 import { projectsApi, servicesApi, type Service } from "@/lib/api";
+import type { ProjectUpdateStatus } from "@/lib/api/projects";
 import {
   invalidateProjectCachesFor,
   PROJECT_INFO_NOT_FOUND,
@@ -28,6 +33,8 @@ import {
   removeProjectEnvironment,
 } from "./project-environments";
 import { beginServicesFetch, failServicesFetch } from "./services-fetch-state";
+
+type AvailableProjectUpdate = Extract<ProjectUpdateStatus, { supported: true }>;
 
 interface ProjectDomain {
   domain: string;
@@ -67,6 +74,7 @@ interface ProjectOptions {
 interface BasicProjectData {
   managementMode?: "gitops" | "source";
   releaseEnvironment?: "preview" | "production" | null;
+  environmentType?: "production" | "preview" | "development";
   id: string;
   slug: string;
   name: string;
@@ -74,6 +82,8 @@ interface BasicProjectData {
   framework: string;
   options?: ProjectOptions;
   domains?: ProjectDomain[];
+  routingClaims?: ProjectRoutingClaim[];
+  routingRetry?: ProjectRoutingRetry | null;
   access?: ProjectAccess;
   buildImage?: string;
   hasMultipleServices?: boolean;
@@ -98,9 +108,10 @@ interface BasicProjectData {
    */
   activeMigration?: ActiveMigration | null;
   deployTarget?: "cloud" | "server" | "local" | "cluster";
+  cloudStaticHosting?: "pages" | "server";
   clusterId?: string | null;
   clusterConfig?: import("@repo/core").ClusterWorkloadConfig | null;
-  cloudWorkspaceId?: string | null;
+  workspaceId?: string | null;
   deletedAt?: string | null;
   packageManager?: string;
   /** Source metadata for prebuilt release/image projects. */
@@ -134,6 +145,8 @@ interface EnvironmentData {
 }
 
 interface GitData {
+  githubChecks?: import("@repo/core").GitHubDeploymentChecks;
+  githubChecksDelivery?: { error: string | null; pending: string | null; updatedAt: string } | null;
   repository: any;
   branch: string;
   recentCommits: any[];
@@ -244,6 +257,11 @@ interface ProjectSettingsContextType {
   // Callers must hit projectsApi.* themselves and only invoke these on
   // success. Synchronous to make that contract explicit.
   updateProjectData: (updates: Partial<BasicProjectData>) => void;
+  /** A confirmed source update that is not already deploying. */
+  availableUpdate: AvailableProjectUpdate | null;
+  updateStatus: ProjectUpdateStatus | null;
+  updateStatusLoading: boolean;
+  refreshUpdateStatus: () => Promise<void>;
 
   // Domains
   domainsData: DomainsData;
@@ -323,7 +341,14 @@ interface ProviderProps {
   initialProjectData?: BasicProjectData;
 }
 
-export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
+export const ProjectSettingsProvider: React.FC<ProviderProps> = (props) => {
+  const resourceKey = useCloudResourceKey();
+  const seedOwner = useRef(resourceKey);
+  return <ProjectSettingsState key={resourceKey} {...props}
+    initialProjectData={seedOwner.current === resourceKey ? props.initialProjectData : undefined} />;
+};
+
+const ProjectSettingsState: React.FC<ProviderProps> = ({
   children,
   id,
   slug,
@@ -460,6 +485,74 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
     if (projectInfo?.environments) setEnvironments(projectInfo.environments);
   }, [projectInfo]);
 
+  // One check for the whole project page: desktop/mobile navigation and the
+  // Deployments banner share its result. A source or deployment change must
+  // discard the old result, including while the new check is still in flight.
+  const updateKey = projectData.id === id && projectData.appTemplateId !== "openship"
+    ? JSON.stringify([
+        id,
+        projectData.activeDeploymentId,
+        projectData.latestDeploymentId,
+        projectData.latestDeploymentStatus,
+        projectData.gitOwner,
+        projectData.gitRepo,
+        projectData.gitBranch,
+        projectData.rootDirectory,
+        projectData.monorepoSharedPaths,
+        projectData.releaseSource,
+      ])
+    : null;
+  const [updateResult, setUpdateResult] = useState<{
+    key: string;
+    data: ProjectUpdateStatus | null;
+    loading: boolean;
+  } | null>(null);
+  const updateRequestRef = useRef<{ key: string; promise: Promise<void> } | null>(null);
+  const currentUpdateKeyRef = useRef(updateKey);
+  currentUpdateKeyRef.current = updateKey;
+  const updateMountedRef = useRef(true);
+
+  useEffect(() => {
+    updateMountedRef.current = true;
+    return () => { updateMountedRef.current = false; };
+  }, []);
+
+  const refreshUpdateStatus = useCallback((): Promise<void> => {
+    if (!updateKey) return Promise.resolve();
+    // The page and newly mounted Deployments/Source tabs can ask at the same time.
+    // Share the in-flight request; later tab visits still get a fresh check.
+    if (updateRequestRef.current?.key === updateKey) return updateRequestRef.current.promise;
+    const promise = projectsApi.getCommitStatus(id)
+      .then(({ data }) => data)
+      .catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "dashboard/context/ProjectSettingsContext"); return null; }) // Best-effort hint: a failed check is not evidence of an update.
+      .then((data) => {
+        if (!updateMountedRef.current || currentUpdateKeyRef.current !== updateKey ||
+          updateRequestRef.current?.promise !== promise) return;
+        setUpdateResult({
+          key: updateKey,
+          data,
+          loading: false,
+        });
+      })
+      .finally(() => {
+        if (updateRequestRef.current?.promise === promise) updateRequestRef.current = null;
+      });
+    updateRequestRef.current = { key: updateKey, promise };
+    setUpdateResult((previous) => ({
+      key: updateKey,
+      data: previous?.key === updateKey ? previous.data : null,
+      loading: true,
+    }));
+    return promise;
+  }, [id, updateKey]);
+
+  useEffect(() => { void refreshUpdateStatus(); }, [refreshUpdateStatus]);
+
+  const updateStatus = updateResult?.key === updateKey ? updateResult.data : null;
+  const updateStatusLoading = !!updateKey && (updateResult?.key !== updateKey || updateResult.loading);
+  const availableUpdate = updateStatus?.supported && updateStatus.behind && !updateStatus.latestInProgress
+    ? updateStatus : null;
+
   const buildData = useMemo<BuildData>(
     () => ({
       ...BUILD_OPTION_DEFAULTS,
@@ -523,7 +616,7 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
       }
     }
 
-    const target = projectData.cloudWorkspaceId
+    const target = projectData.workspaceId
       ? "cloud"
       : (projectData as any).serverId
         ? "server"
@@ -596,7 +689,7 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
         }));
       }
     } catch (error) {
-      console.error("Failed to fetch environment variables:", error);
+      errorDiagnostics.error("dashboard/context/ProjectSettingsContext", "Failed to fetch environment variables:", error);
       setEnvironmentData((prev) => ({
         ...prev,
         isLoading: false,
@@ -607,22 +700,19 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
   }, [id]);
 
   // Fetch git
-  const isLoadingGitRef = useRef(false);
-  // True once git info has loaded for the CURRENT project. Re-opening the Source
-  // tab remounts GitSettings and re-calls refreshGit; without this that flashed
-  // the skeleton on every visit even though the context already had the data.
-  // Now a re-open refreshes in the BACKGROUND (data stays visible). Reset on id
-  // change so a different project still shows the skeleton once.
-  const gitLoadedRef = useRef(false);
-  useEffect(() => {
-    gitLoadedRef.current = false;
-  }, [id]);
+  const gitRequestRef = useRef<{ id: string } | null>(null);
+  const gitCurrentIdRef = useRef(id);
+  gitCurrentIdRef.current = id;
+  // Refresh an already-loaded source in place, but show a skeleton for a new environment.
+  const gitLoadedIdRef = useRef<string | null>(null);
   const refreshGit = useCallback(async () => {
+    if (gitCurrentIdRef.current !== id || gitRequestRef.current?.id === id) return;
+    const request = { id };
+    gitRequestRef.current = request;
+    const isCurrent = () => gitRequestRef.current === request && gitCurrentIdRef.current === id;
     try {
-      if (isLoadingGitRef.current) return;
-      isLoadingGitRef.current = true;
       // Only the first load shows the skeleton; later refreshes update in place.
-      setGitData((prev) => ({ ...prev, isLoading: !gitLoadedRef.current, error: null }));
+      setGitData((prev) => ({ ...prev, isLoading: gitLoadedIdRef.current !== id, error: null }));
 
       if (!id) {
         setGitData((prev) => ({ ...prev, isLoading: false }));
@@ -630,6 +720,7 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
       }
 
       const response = await projectsApi.getGit(id);
+      if (!isCurrent()) return;
 
       if (response.success) {
         // Map commits from API response
@@ -657,6 +748,8 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
           isLoading: false,
           error: null,
           autoDeployEnabled: response.auto_deploy,
+          githubChecks: response.github_checks,
+          githubChecksDelivery: response.github_checks_delivery,
           webhookActive: response.webhook_active,
           webhookStrategy: response.webhook_strategy,
           webhookDomain: response.webhook_domain,
@@ -695,7 +788,8 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
         }));
       }
     } catch (error) {
-      console.error("Failed to fetch git data:", error);
+      if (!isCurrent()) return;
+      errorDiagnostics.error("dashboard/context/ProjectSettingsContext", "Failed to fetch git data:", error);
       setGitData((prev) => ({
         ...prev,
         isLoading: false,
@@ -704,10 +798,10 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
         recentCommits: [],
       }));
     } finally {
-      isLoadingGitRef.current = false;
-      // Fetch attempt completed for this project → subsequent refreshGit calls
-      // (tab re-open, post-action refresh) update in the background, no skeleton.
-      gitLoadedRef.current = true;
+      if (isCurrent()) {
+        gitRequestRef.current = null;
+        gitLoadedIdRef.current = id;
+      }
     }
   }, [id]);
 
@@ -798,7 +892,7 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
         }
         return services;
       } catch (error) {
-        console.error("Failed to fetch project services:", error);
+        errorDiagnostics.error("dashboard/context/ProjectSettingsContext", "Failed to fetch project services:", error);
         fail();
         return [];
       } finally {
@@ -843,7 +937,7 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
         commit: setEnvironments,
         invalidate: invalidateProjectCachesFor,
         onRefreshError: (error) =>
-          console.warn("Failed to reconcile project environments after create", error),
+          errorDiagnostics.warn("dashboard/context/ProjectSettingsContext", "Failed to reconcile project environments after create", error),
       });
 
       return created;
@@ -853,8 +947,9 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
 
   const removeEnvironment = useCallback(
     (environmentId: string) => {
-      const remaining = removeProjectEnvironment(environments, environmentId);
-      setEnvironments(remaining);
+      // A deletion can finish after this provider switches to another project.
+      // Filter the current list; never replace it with the request's old list.
+      setEnvironments((current) => removeProjectEnvironment(current, environmentId));
       invalidateProjectCachesFor(projectEnvironmentIds(environmentId, environments));
     },
     [environments],
@@ -963,7 +1058,7 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
 
   const tabs = useMemo<ProjectTab[]>(() => {
     const tl = t.projects.sidebar.tabs;
-    const healthAvailable = selfHosted && projectData.deployTarget !== "cloud";
+    const healthAvailable = projectData.deployTarget !== "cloud" && (selfHosted || !!projectData.serverId);
     return [
       { id: "overview", label: tl.overview, icon: "chart-pie" },
       { id: "topology", label: tl.topology, icon: "topology" },
@@ -977,15 +1072,17 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
       // via the traffic-source resolver (OpenResty mgmt API | Oblien analytics).
       {
         id: "monitoring",
-        label: tl.monitoring,
+        label: tl.monitoringAndLogs,
         icon: "activity",
         // Incidents belong beside metrics. The health watch covers local/SSH
         // workloads; cloud monitoring continues to use its existing adapters.
-        sections: healthAvailable ? [
+        sections: [
           { id: "monitoring", label: tl.monitoring },
-          { id: "health", label: tl.health },
-        ] : undefined,
+          { id: "logs", label: tl.logs },
+          ...(healthAvailable ? [{ id: "health", label: tl.health }] : []),
+        ],
       },
+      { id: "actions", label: t.actions.title, icon: "play-circle" },
       {
         id: "source",
         label: tl.sourceAndTriggers,
@@ -995,7 +1092,6 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
           { id: "webhooks", label: tl.webhooks },
         ],
       },
-      { id: "logs", label: tl.logs, icon: "file-text" },
       { id: "backup", label: tl.backup, icon: "database-backup" },
       { id: "advanced", label: tl.settings, icon: "wrench" },
     ];
@@ -1029,6 +1125,10 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
       projectData,
       setProjectData,
       updateProjectData,
+      availableUpdate,
+      updateStatus,
+      updateStatusLoading,
+      refreshUpdateStatus,
 
       domainsData,
       updateDomains,
@@ -1079,6 +1179,10 @@ export const ProjectSettingsProvider: React.FC<ProviderProps> = ({
     }),
     [
       projectData,
+      availableUpdate,
+      updateStatus,
+      updateStatusLoading,
+      refreshUpdateStatus,
       domainsData,
       updateDomains,
       environmentData,

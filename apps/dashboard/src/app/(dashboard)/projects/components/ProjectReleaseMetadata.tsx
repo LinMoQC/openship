@@ -1,41 +1,46 @@
 "use client";
+import type { ReleaseStateKind } from "@repo/contracts";
+import { Icon } from "@repo/ui/icons";
 import type { Project } from "@/constants/mock";
-import type { Dictionary } from "@/i18n";
 import { useI18n } from "@/components/i18n-provider";
+import { cn } from "@/lib/utils";
+import { applicationImages, revisionTitle, sameImage, shortRevision } from "@/components/releases/release-ui";
 
-function releaseEnvironment(project: Project, t: Dictionary) {
-  return project.releaseEnvironment === "production" ? t.projects.sidebar.production : project.releaseEnvironment === "preview" ? "PRT" : t.projects.release.unknown;
-}
-export function projectReleaseLabel(project: Project, t: Dictionary) {
-  return project.managementMode === "gitops" ? `${project.name} · ${releaseEnvironment(project, t)}` : project.name;
-}
-export function ProjectReleaseName({ project }: { project: Project }) {
-  const { t } = useI18n();
-  return <p className="flex min-w-0 items-center gap-1 text-sm font-medium text-foreground" title={projectReleaseLabel(project, t)}>
-    <span className="truncate">{project.name}</span>
-    {project.managementMode === "gitops" && <span className="shrink-0">· {releaseEnvironment(project, t)}</span>}
-  </p>;
-}
+const KIND_TEXT: Record<ReleaseStateKind, string> = {
+  current: "text-success",
+  available: "text-info",
+  configuration: "text-info",
+  drift: "text-warning",
+  unknown: "text-muted-foreground",
+  blocked: "text-danger",
+};
 
-export function ProjectReleaseMetadata({ project }: { project: Project }) {
+/**
+ * One line of release state for GitOps project rows and tiles: the verdict, the
+ * running revision and, when it differs, the target. Full commits and digests stay
+ * on hover; the release page carries the per-service detail.
+ */
+export function ProjectReleaseLine({ project, className }: { project: Project; className?: string }) {
   const { t } = useI18n(), c = t.projects.release;
   if (project.managementMode !== "gitops") return null;
   const state = project.releaseOverview;
-  return <div className="mt-2 min-w-0 space-y-1 text-xs text-muted-foreground">
-    <p role="status">{c.status[state?.kind ?? "unknown"]}{state?.stale && ` · ${c.stale}`}</p>
-    {(["current", "target"] as const).map(side => {
-      const observation = state?.[side];
-      const allImages = Object.entries(observation?.images ?? {});
-      const applicationImages = allImages.filter(([, image]) => image.gitSha);
-      const images = applicationImages.length ? applicationImages : allImages;
-      return <div key={side} className="flex min-w-0 flex-wrap gap-x-2 gap-y-1">
-        <span>{side === "current" ? c.currentVersion : c.targetVersion}</span>
-        {!images.length && <span>{c.unknown}</span>}
-        {images.slice(0, 2).map(([service, image]) => <code key={service} className="break-all" title={`${service} · ${image.gitSha ?? ""} · ${image.digest}`}>{image.gitSha?.slice(0, 12) ?? image.digest.slice(0, 19)} · {image.digest.slice(7, 19)}</code>)}
-        {images.length > 2 && <span>+{images.length - 2}</span>}
-        {observation?.ossGitSha && <code title={observation.ossGitSha}>OSS · {observation.ossGitSha.slice(0, 12)}</code>}
-      </div>;
-    })}
-    <p>{c.checkTime}: {state?.checkedAt ? <time dateTime={state.checkedAt}>{new Date(state.checkedAt).toLocaleString()}</time> : c.unknown}</p>
-  </div>;
+  const kind = state?.kind ?? "unknown";
+  const [service, running] = applicationImages(state?.current.images)[0] ?? [];
+  const next = service && state?.target ? state.target.images[service] : undefined;
+  const changed = !!running && !!next && !sameImage(running, next);
+  const changedCount = state?.target
+    ? Object.entries(state.target.images).filter(([name, image]) => !sameImage(state.current.images[name], image)).length
+    : 0;
+  return (
+    <p className={cn("flex min-w-0 items-center gap-1.5 whitespace-nowrap text-xs text-muted-foreground", className)}>
+      <span role="status" className={cn("shrink-0", KIND_TEXT[kind])}>{c.status[kind]}</span>
+      {state?.stale && <span className="shrink-0 text-warning" title={c.stale}><Icon name="clock" className="size-3" aria-label={c.stale} /></span>}
+      {running && <code className="min-w-0 truncate font-mono" title={revisionTitle(running)}>{shortRevision(running, next)}</code>}
+      {changed && next && <>
+        <Icon name="arrow-right" className="size-3 shrink-0 rtl:rotate-180" aria-hidden="true" />
+        <code className="min-w-0 truncate font-mono font-medium text-foreground" title={revisionTitle(next)}>{shortRevision(next, running)}</code>
+      </>}
+      {changedCount - (changed ? 1 : 0) > 0 && <span className="shrink-0">+{changedCount - (changed ? 1 : 0)}</span>}
+    </p>
+  );
 }

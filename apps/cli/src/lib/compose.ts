@@ -11,6 +11,8 @@
  * Lifecycle (up/stop/update/status) routes here when ~/.openship/install-method
  * is "compose"; otherwise the bare service backend handles it.
  */
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
+import { reportCliMessage } from "./output";
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
@@ -93,7 +95,11 @@ export function canonicalComposeHostPath(
       parent = dirname(parent);
       try {
         return join(resolvePath(parent), relative(parent, target));
-      } catch {
+      } catch (diagnosticFailure) {
+      // Missing mount roots are expected before the first installation.
+    if ((diagnosticFailure as NodeJS.ErrnoException)?.code !== "ENOENT")
+      observeCaughtError(diagnosticFailure, "cli/lib/compose");
+
         // Keep walking to the closest existing ancestor.
       }
     }
@@ -145,7 +151,8 @@ function dockerConfigMountYaml(indent: string): string {
   const path = resolve(process.env.DOCKER_CONFIG || join(homedir(), ".docker"), "config.json");
   try {
     if (!statSync(path).isFile()) return "";
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "cli/lib/compose");
     return ""; // no config on this host — mount nothing
   }
   return [
@@ -164,7 +171,7 @@ function dockerConfigMountYaml(indent: string): string {
  * would freeze it at import, which both hides a config created since startup and makes
  * the generator untestable (a test setting DOCKER_CONFIG would never be observed).
  */
-function renderComposeYaml(): string {
+export function renderComposeYaml(): string {
   const mount = dockerConfigMountYaml("      ");
   return COMPOSE_YAML.split(`${DOCKER_CONFIG_MOUNT_MARKER}\n`).join(mount ? `${mount}\n` : "");
 }
@@ -200,7 +207,8 @@ export function readInstallMethod(): InstallMethod | null {
   try {
     const v = readFileSync(INSTALL_METHOD_FILE, "utf8").trim();
     return v === "compose" || v === "bare" ? v : null;
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "cli/lib/compose");
     return null;
   }
 }
@@ -421,7 +429,7 @@ export async function ensureDocker(opts: EnsureDockerOpts = {}): Promise<boolean
         clearInterval(tick);
         resolve(code);
       };
-      child.on("error", () => done(1));
+      child.on("error", (diagnosticFailure) => { observeCaughtError(diagnosticFailure, "cli/lib/compose"); return done(1); });
       child.on("close", (code) => done(code ?? 1));
     });
 
@@ -482,6 +490,8 @@ export interface ComposeUpOpts {
    * why `composeUp` cannot work it out for itself once the prefetch has written `.env`.
    */
   envChanged?: boolean;
+  /** Force-recreate the env-consuming services even if .env was already written or unchanged. */
+  forceRecreate?: boolean;
   /**
    * Proceed even though this run would regenerate secrets an existing data volume was
    * created with (see secretRotationRisk). The DB keeps its old password until
@@ -595,7 +605,7 @@ ${edgeVolumeYaml("      ")}
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
     healthcheck:
-      test: ["CMD-SHELL", "bun -e \\"fetch('http://127.0.0.1:\${API_PORT:-4000}/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\\""]
+      test: ["CMD-SHELL", "node -e \\"fetch('http://127.0.0.1:\${API_PORT:-4000}/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\\""]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -611,9 +621,16 @@ ${edgeVolumeYaml("      ")}
     environment:
       NODE_ENV: production
       PORT: "\${DASHBOARD_PORT:-3001}"
+      HOSTNAME: "0.0.0.0"
       INTERNAL_API_URL: http://api:\${API_PORT:-4000}
     depends_on:
       api: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:'+process.env.PORT+'/',{redirect:'manual'}).then(r=>process.exit(r.status<500?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 20s
 
   edge:
     image: \${OPENSHIP_IMAGE_REGISTRY:-ghcr.io/oblien}/openship-edge:\${OPENSHIP_VERSION:-latest}
@@ -628,6 +645,9 @@ ${edgeVolumeYaml("      ")}
     restart: unless-stopped
     logging: *default-logging
     network_mode: host
+    depends_on:
+      api: { condition: service_healthy }
+      dashboard: { condition: service_healthy }
     volumes:
 ${edgeVolumeYaml("      ")}
 
@@ -1093,7 +1113,8 @@ export function chooseHostChannelUser(input: {
 function hasPasswordlessSudo(): boolean {
   try {
     return spawnSync("sudo", ["-n", "-k", "true"], { stdio: "ignore" }).status === 0;
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "cli/lib/compose");
     return false;
   }
 }
@@ -1141,7 +1162,8 @@ function plannedHostChannel(
   try {
     const info = userInfo();
     invoker = { uid: info.uid, username: info.username, home: info.homedir };
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "cli/lib/compose");
     invoker = { uid: -1, username: process.env.USER || process.env.LOGNAME || "root", home: homedir() };
   }
   const pin = cfg.hostSshUser?.trim();
@@ -1166,7 +1188,8 @@ function passwdHome(user: string): string | null {
     const r = spawnSync("getent", ["passwd", user], { encoding: "utf8" });
     if (r.status !== 0) return null;
     return (r.stdout ?? "").split("\n")[0]?.split(":")[5]?.trim() || null;
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "cli/lib/compose");
     return null;
   }
 }
@@ -1232,7 +1255,8 @@ function revokeKeyAt(authKeysPath: string): boolean {
     writeFileSync(authKeysPath, stripHostAuthorizedKeys(existing), { mode: 0o600 });
     chmodSync(authKeysPath, 0o600);
     return true;
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "cli/lib/compose");
     return false;
   }
 }
@@ -1305,7 +1329,8 @@ function retireHostSshChannel(prev: Record<string, string>): void {
 
   try {
     rmSync(keyDir, { recursive: true, force: true });
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "cli/lib/compose");
     /* the key is unusable the moment the channel is off; a leftover file is not a grant */
   }
 
@@ -1512,7 +1537,7 @@ function provisionHostSshChannel(
         // doesn't work: host ops on root-owned paths (mail state under /root/.openship, the
         // edge, the recovery manifest) WILL fail. Keep the channel — non-root host ops
         // still work — but say so loudly.
-        console.warn(
+        reportCliMessage("warn",
           "  ⚠ Host control needs root, and this channel has no route to it: it logs in as\n" +
             `    \`${candidate.user}\`, and \`sudo -n\` was refused over that session. Mail and edge\n` +
             "    host operations will fail. Grant that account passwordless sudo, or re-run\n" +
@@ -1557,6 +1582,7 @@ function provisionHostSshChannel(
       },
     };
   } catch (err) {
+    observeCaughtError(err, "cli/lib/compose");
     return { channel: null, issue: { code: "error", detail: (err as Error)?.message } };
   }
 }
@@ -1587,7 +1613,8 @@ function permitRootLoginSetting(port: number): string | null {
     );
     if (r.status !== 0) return null;
     return /^permitrootlogin\s+(\S+)/m.exec(r.stdout ?? "")?.[1] ?? null;
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "cli/lib/compose");
     return null;
   }
 }
@@ -2538,7 +2565,8 @@ function rootlessSocketCandidates(): string[] {
   let uid: number | undefined;
   try {
     uid = userInfo().uid;
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "cli/lib/compose");
     /* no passwd entry — the two env-derived candidates are all we have */
   }
   return [
@@ -2607,7 +2635,7 @@ function dockerSocketEnv(prev: Record<string, string>): string[] {
  * not become unrunnable over it.
  */
 function warnMissingDockerSocket(path: string): void {
-  console.warn(
+  reportCliMessage("warn",
     `\n  ! The Docker socket this install mounts into the api isn't there:\n` +
       `      ${path}\n` +
       `    Docker will create that path as an empty DIRECTORY, so the stack will come up\n` +
@@ -3102,7 +3130,7 @@ function materialize(opts: ComposeUpOpts): {
   // ComposePrefetchResult) and `alreadyFetched` is exactly "the prefetch already did one",
   // so keying on it says this once rather than printing a dozen lines twice over.
   if (provision.issue && !opts.alreadyFetched) {
-    console.warn(
+    reportCliMessage("warn",
       renderHostChannelIssue(provision.issue, {
         target: `${cfg.hostSshHost}:${cfg.hostSshPort}`,
         kept,
@@ -3115,7 +3143,8 @@ function materialize(opts: ComposeUpOpts): {
   let before = "";
   try {
     before = readFileSync(ENV_FILE, "utf8");
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "cli/lib/compose");
     /* first install — no previous env, so everything is "changed" */
   }
   const { text: rendered, carried } = renderEnvAndCarried(opts, host, cfg, prev, pgData.path);
@@ -3336,7 +3365,7 @@ export function pinnedImagesReady(opts: ComposeUpOpts): boolean {
     out.push(`    • Your current install runs \`${prevVersion}\`, a tag known good on this box.`);
   }
   out.push("");
-  console.error(out.join("\n"));
+  reportCliMessage("error", out.join("\n"));
   return false;
 }
 
@@ -3378,12 +3407,12 @@ export function composePrefetch(opts: ComposeUpOpts): ComposePrefetchResult {
   // forgets. See composeSecretRotationRisk.
   const rotation = composeSecretRotationRisk(opts);
   if (rotation) {
-    console.error(renderSecretRotationRefusal(rotation));
+    reportCliMessage("error", renderSecretRotationRefusal(rotation));
     return { ok: false, envChanged: false };
   }
   const pgData = composePgDataRisk(opts);
   if (pgData) {
-    console.error(renderPgDataRefusal(pgData));
+    reportCliMessage("error", renderPgDataRefusal(pgData));
     return { ok: false, envChanged: false };
   }
   const { buildDir, envChanged } = materialize(opts);
@@ -3457,7 +3486,7 @@ export async function composeUp(
   const rotation = composeSecretRotationRisk(opts);
   if (rotation) {
     const pre = resolveEnvConfig(readEnvFile(), opts);
-    console.error(renderSecretRotationRefusal(rotation));
+    reportCliMessage("error", renderSecretRotationRefusal(rotation));
     // `refused` separates "this can't work" from "this didn't work": callers must not
     // offer a retry, because nothing about re-running changes the answer.
     return { ok: false, refused: true, apiPort: pre.apiPort, dashPort: pre.dashPort };
@@ -3467,7 +3496,7 @@ export async function composeUp(
   const pgData = composePgDataRisk(opts);
   if (pgData) {
     const pre = resolveEnvConfig(readEnvFile(), opts);
-    console.error(renderPgDataRefusal(pgData));
+    reportCliMessage("error", renderPgDataRefusal(pgData));
     return { ok: false, refused: true, apiPort: pre.apiPort, dashPort: pre.dashPort };
   }
   const { buildDir, cfg, envChanged: rendered } = materialize(opts);
@@ -3483,6 +3512,7 @@ export async function composeUp(
   // own `rendered` compared `.env` against the prefetch's write and so always said
   // "unchanged". See ComposePrefetchResult.envChanged.
   const envChanged = opts.envChanged ?? rendered;
+  const shouldRecreate = opts.forceRecreate || envChanged;
   // The edge container mounts EDGE_SITES_HOST_DIR. A conf left there by an older or
   // failed attempt (a carried catch-all claiming `default_server`) crash-loops it with
   // `[emerg] a duplicate default server` — every time, forever, because the file is on
@@ -3491,8 +3521,15 @@ export async function composeUp(
   // `openship up` after it. Sanitize what we're about to mount, every start.
   const up = (extra: { withBuildOverride?: boolean } = {}) =>
     compose(
-      envChanged
-        ? ["up", "-d", "--force-recreate", ...ENV_CONSUMING_SERVICES]
+      shouldRecreate
+        ? [
+            "up",
+            "-d",
+            "--force-recreate",
+            // An explicit update is not applied until the replacements are ready.
+            ...(opts.forceRecreate ? ["--wait", "--wait-timeout", "180"] : []),
+            ...ENV_CONSUMING_SERVICES,
+          ]
         : ["up", "-d"],
       extra,
     );
@@ -3521,7 +3558,7 @@ export async function composeUp(
   const unmakeableMounts = ensureEdgeMountDirs();
   if (unmakeableMounts.length && isRootlessDocker()) {
     const dirs = unmakeableMounts.join(" ");
-    console.error(
+    reportCliMessage("error",
       `\n  Rootless Docker can't create the edge's host directories under root-owned paths:\n` +
         `    ${unmakeableMounts.join("\n    ")}\n\n` +
         `  Create them once (owned by your user), then re-run \`openship up --compose\`:\n` +
@@ -3547,7 +3584,9 @@ export async function composeUp(
 
   await sanitizeEdgeVhosts(new LocalExecutor(), EDGE_SITES_HOST_DIR, (l) =>
     console.log(`  ${l.message}`),
-  ).catch(() => {});
+  ).catch((diagnosticFailure) => {
+    observeCaughtError(diagnosticFailure, "cli/lib/compose");
+  });
 
   if (buildDir) {
     // Only the upstream images can be pulled; ours don't exist in a registry for
@@ -3654,7 +3693,7 @@ export async function composeUpdate(
   version?: string,
 ): Promise<{ applied: boolean; refused: boolean }> {
   if (!existsSync(COMPOSE_FILE)) return { applied: false, refused: false };
-  const r = await composeUp(version ? { version } : {});
+  const r = await composeUp({ forceRecreate: true, ...(version ? { version } : {}) });
   return { applied: r.ok, refused: !!r.refused };
 }
 

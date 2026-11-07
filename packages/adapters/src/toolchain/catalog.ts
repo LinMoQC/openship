@@ -16,7 +16,14 @@
  * cannot serve both, and the old one installed nothing on whichever it guessed against.
  */
 
-import { answered, refused, shellQuote, IPTABLES_PROBES, type Answer } from "@repo/core";
+import {
+  answered,
+  refused,
+  shellQuote,
+  IPTABLES_PROBES,
+  PACKAGE_MANAGER_DEFAULTS,
+  type Answer,
+} from "@repo/core";
 
 import type { EnvironmentProfile } from "../system/environment";
 import { envOps, hostRefusal, opScript, type EnvOps, type Op } from "../system/environment-ops";
@@ -298,7 +305,7 @@ const NODE_LTS_MAJOR = 22;
 
 /** Pinned so a toolchain install is reproducible across hosts. */
 const GO_VERSION = "1.22.5";
-const BUN_VERSION = "1.2.0";
+const BUN_VERSION = PACKAGE_MANAGER_DEFAULTS.bun;
 const DOTNET_CHANNEL = "8.0";
 
 /**
@@ -387,6 +394,10 @@ const RECIPES: Record<InstallableTool, ToolRecipe> = {
           // Alpine's `nodejs` trails NodeSource by a minor but is real, and npm is a
           // separate package there. This arm used to be a flat refusal, which is why an
           // Alpine host could not install a Node toolchain at all.
+          return asRoot(ops.pkgInstall(["nodejs", "npm"]));
+        case "pacman":
+          // NodeSource publishes apt and rpm repositories only. extra's `nodejs` is
+          // current, and `npm` is an optional dependency of that package, so both are named.
           return asRoot(ops.pkgInstall(["nodejs", "npm"]));
         case "brew":
           return asRoot(ops.pkgInstall(["node"]));
@@ -493,6 +504,8 @@ const RECIPES: Record<InstallableTool, ToolRecipe> = {
           dnf: answered(["python3", "python3-pip"]),
           yum: answered(["python3", "python3-pip"]),
           apk: answered(["python3", "py3-pip"]),
+          // `python` provides /usr/bin/python3. venv is in the stdlib here, not a split package.
+          pacman: answered(["python", "python-pip"]),
           brew: answered(["python3"]),
         }),
       ),
@@ -508,6 +521,7 @@ const RECIPES: Record<InstallableTool, ToolRecipe> = {
             dnf: answered(["iscsi-initiator-utils"]),
             yum: answered(["iscsi-initiator-utils"]),
             apk: answered(["open-iscsi"]),
+            pacman: answered(["open-iscsi"]),
             brew: refused("Replicated storage requires Linux."),
           },
           { installRecommends: false },
@@ -524,6 +538,7 @@ const RECIPES: Record<InstallableTool, ToolRecipe> = {
             dnf: answered(["nfs-utils"]),
             yum: answered(["nfs-utils"]),
             apk: answered(["nfs-utils"]),
+            pacman: answered(["nfs-utils"]),
             brew: refused("Shared cluster storage requires Linux."),
           },
           { installRecommends: false },
@@ -540,6 +555,7 @@ const RECIPES: Record<InstallableTool, ToolRecipe> = {
             dnf: answered(["iproute"]),
             yum: answered(["iproute"]),
             apk: answered(["iproute2"]),
+            pacman: answered(["iproute2"]),
             brew: refused("iproute2 requires Linux. Choose a Linux server for managed networking."),
           },
           { installRecommends: false },
@@ -556,6 +572,7 @@ const RECIPES: Record<InstallableTool, ToolRecipe> = {
             dnf: answered(["wireguard-tools"]),
             yum: answered(["wireguard-tools"]),
             apk: answered(["wireguard-tools"]),
+            pacman: answered(["wireguard-tools"]),
             brew: refused("Managed WireGuard networking requires Linux. Choose a Linux server."),
           },
           { installRecommends: false },
@@ -573,6 +590,7 @@ const RECIPES: Record<InstallableTool, ToolRecipe> = {
             dnf: answered(["iptables"]),
             yum: answered(["iptables"]),
             apk: answered(["iptables"]),
+            pacman: answered(["iptables"]),
             brew: refused("Private connection policies require Linux."),
           },
           { installRecommends: false },
@@ -589,6 +607,7 @@ const RECIPES: Record<InstallableTool, ToolRecipe> = {
           dnf: answered(["python3-pip"]),
           yum: answered(["python3-pip"]),
           apk: answered(["py3-pip"]),
+          pacman: answered(["python-pip"]),
           // Homebrew has no `pip` formula; pip arrives with its python.
           brew: refused(
             "Homebrew installs pip as part of Python — install the python3 tool instead.",
@@ -611,6 +630,8 @@ const RECIPES: Record<InstallableTool, ToolRecipe> = {
           yum: answered(["ruby", "ruby-devel"]),
           // `build-base` because musl has no prebuilt native gems to fall back on.
           apk: answered(["ruby", "ruby-dev", "build-base"]),
+          // Headers ship in `ruby`. `base-devel` is the group that supplies a compiler.
+          pacman: answered(["ruby", "base-devel"]),
           brew: answered(["ruby"]),
         }),
       ),
@@ -640,6 +661,8 @@ const RECIPES: Record<InstallableTool, ToolRecipe> = {
           // Alpine versions the package and symlinks /usr/bin/php → php83, so `verify`
           // holds without the recipe naming a version.
           apk: answered(["php83"]),
+          // One package: the CLI and the curl/mbstring/xml extensions live in `php`.
+          pacman: answered(["php"]),
           brew: answered(["php"]),
         }),
       ),
@@ -648,7 +671,11 @@ const RECIPES: Record<InstallableTool, ToolRecipe> = {
   composer: {
     verify: "composer --version",
     steps: (ops): ToolSteps => {
-      if (ops.profile.packageManager === "brew") return asRoot(ops.pkgInstall(["composer"]));
+      // Both ship a distro `composer` package. The upstream phar installer is the path
+      // for the managers that don't.
+      if (ops.profile.packageManager === "brew" || ops.profile.packageManager === "pacman") {
+        return asRoot(ops.pkgInstall(["composer"]));
+      }
       // Alpine splits PHP into one package per extension, and composer.phar needs `phar`
       // and `openssl` — neither of which comes with the `php83` the PHP recipe installs.
       // The upstream installer's own check then fails on a missing extension. Openship
@@ -687,6 +714,7 @@ const RECIPES: Record<InstallableTool, ToolRecipe> = {
               "Use a newer OS release, or build in a container.",
           ),
           apk: answered(["openjdk21-jdk"]),
+          pacman: answered(["jdk21-openjdk"]),
           brew: answered(["openjdk@21"]),
         }),
       ),
@@ -706,6 +734,7 @@ const RECIPES: Record<InstallableTool, ToolRecipe> = {
           dnf: refused(NO_GRADLE_RPM),
           yum: refused(NO_GRADLE_RPM),
           apk: answered(["gradle"]),
+          pacman: answered(["gradle"]),
           brew: answered(["gradle"]),
         }),
       ),
@@ -752,6 +781,7 @@ const RECIPES: Record<InstallableTool, ToolRecipe> = {
               : refused(NO_ELIXIR_RPM),
           yum: refused(NO_ELIXIR_RPM),
           apk: answered(["elixir", "erlang"]),
+          pacman: answered(["erlang", "elixir"]),
           brew: answered(["elixir"]),
         }),
       ),

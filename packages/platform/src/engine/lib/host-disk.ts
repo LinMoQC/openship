@@ -12,18 +12,20 @@
  * the path it measures is resolved ON the host by `docker info` (falling back to
  * the conventional data root, then `/`), so there is no injection surface even
  * though `serverId` comes from a caller. Server selection stays org-scoped by
- * `resolveServerExecutor`, the same IDOR guard every other server read uses.
+ * the shared server execution boundary.
  *
- * Advisory by contract: the only consumer is the auto-sized rollback window,
- * which falls back to the instance default when this returns null. Never throws.
+ * UI measurements are advisory and cached. Retention supplies its already-owned
+ * executor for fresh reads of the exact cleanup destination, bypassing the cache.
+ * Measurements never overwrite the configured retention window. Never throws.
  */
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { env } from "../config/env";
 import { cacheStore } from "./cache-store/index";
 import { resolveServerExecutor } from "./deployment-runtime";
+import { withServerExecution } from "./server-execution";
 
-/** Free space where images live changes slowly relative to a deploy, and the
- *  only reader is retention sizing — a few minutes of staleness is free. */
+/** This advisory rollback detail can reuse a recent host measurement. */
 const TTL_SECONDS = 5 * 60;
 const NAMESPACE = "host-disk";
 
@@ -54,39 +56,46 @@ function cacheKey(serverId: string | undefined, organizationId: string): string 
 
 function parseDf(output: string): HostDisk {
   const [totalKb, freeKb] = output.trim().split(/\s+/).map((n) => Number(n));
-  const toBytes = (kb: number) => (Number.isFinite(kb) && kb > 0 ? kb * 1024 : null);
-  return { totalBytes: toBytes(totalKb), freeBytes: toBytes(freeKb) };
+  if (!Number.isFinite(totalKb) || totalKb <= 0 || !Number.isFinite(freeKb) || freeKb < 0 || freeKb > totalKb)
+    return { ...UNKNOWN_DISK };
+  return { totalBytes: totalKb * 1024, freeBytes: freeKb * 1024 };
 }
 
 /**
  * Free/total disk on the machine a project deploys to, cached.
  *
- * Cloud never probes: an Oblien workspace's disk comes from the tier table, and
- * the multi-tenant control plane must not shell into a tenant's box.
+ * Managed hosts use their owned provider executor. Missing Cloud selection
+ * must never fall back to the control plane's local filesystem.
  */
 export async function getHostDisk(
   serverId: string | undefined,
   organizationId: string,
-  opts?: { refresh?: boolean },
+  opts?: { refresh?: boolean; executor?: import("@repo/adapters").CommandExecutor },
 ): Promise<HostDisk> {
-  if (env.CLOUD_MODE) return { ...UNKNOWN_DISK };
+  if (env.CLOUD_MODE && !serverId && !opts?.executor) return { ...UNKNOWN_DISK };
 
   const key = cacheKey(serverId, organizationId);
-  const store = await cacheStore<HostDisk>(NAMESPACE, { maxSize: 500 });
+  const store = opts?.executor ? null : await cacheStore<HostDisk>(NAMESPACE, { maxSize: 500 });
 
-  if (!opts?.refresh) {
+  if (!opts?.refresh && store) {
     const hit = await store.get(key);
     if (hit) return hit;
   }
 
   try {
-    const { executor } = await resolveServerExecutor(serverId, organizationId);
-    const disk = parseDf(await executor.exec(DISK_COMMAND));
+    const read = async (executor: import("@repo/adapters").CommandExecutor) =>
+      parseDf(await executor.exec(DISK_COMMAND, { timeout: 10_000 }));
+    const disk = opts?.executor ? await read(opts.executor) : env.CLOUD_MODE
+      ? await withServerExecution(organizationId, serverId!, read)
+      : await read((await resolveServerExecutor(serverId, organizationId)).executor);
     // Only cache a real answer, so a briefly-unreachable box doesn't pin
     // "unknown" for the whole TTL.
-    if (disk.freeBytes !== null) await store.set(key, disk, TTL_SECONDS).catch(() => {});
+    if (disk.freeBytes !== null && store) await store.set(key, disk, TTL_SECONDS).catch((diagnosticFailure) => {
+      observeCaughtError(diagnosticFailure, "platform/engine/lib/host-disk");
+    });
     return disk;
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "platform/engine/lib/host-disk");
     return { ...UNKNOWN_DISK };
   }
 }

@@ -16,6 +16,7 @@ import {
   computeCluster,
   serverCluster,
   project,
+  projectConnection,
 } from "../schema";
 
 export type ClusterRuntimeRecord = typeof table.$inferSelect;
@@ -94,9 +95,24 @@ export function createClusterRuntimeRepo(db: Database) {
         if (!current || current.deletionInProgress) throw new NotFoundError("Project", projectId);
         if (current.updatedAt.toISOString() !== expectedUpdatedAt)
           throw conflict("Project settings changed. Reload before applying this target.");
-        if (current.cloudWorkspaceId)
+        if (current.workspaceId)
           throw conflict("Cloud projects cannot be assigned to self-hosted clusters.");
         if (current.clusterId !== clusterId) {
+          const [sharedDatabase] = await tx
+            .select({ id: projectConnection.id })
+            .from(projectConnection)
+            .innerJoin(clusterDatabase, eq(projectConnection.sourceDatabaseId, clusterDatabase.id))
+            .where(
+              and(
+                eq(projectConnection.targetProjectId, projectId),
+                clusterId ? ne(clusterDatabase.clusterId, clusterId) : undefined,
+              ),
+            )
+            .limit(1);
+          if (sharedDatabase)
+            throw conflict(
+              "Disconnect shared native databases before moving this application to another destination.",
+            );
           const [database] = await tx
             .select({ id: clusterDatabase.id })
             .from(clusterDatabase)
@@ -143,6 +159,8 @@ export function createClusterRuntimeRepo(db: Database) {
           .where(and(eq(computeCluster.organizationId, org), eq(computeCluster.id, clusterId)))
           .for("update");
         if (!cluster) throw new NotFoundError("Cluster", clusterId);
+        if (!cluster.networkId || !plan.networkId || !plan.networkRevision)
+          throw conflict("An externally managed cluster cannot use the K3s installer.");
         if (cluster.revision !== revision || cluster.networkId !== plan.networkId)
           throw conflict("The cluster changed. Reload it before starting setup.");
         const [network] = await tx
@@ -182,6 +200,7 @@ export function createClusterRuntimeRepo(db: Database) {
         if (!cluster) throw new NotFoundError("Cluster", clusterId);
         const [current] = await tx.select().from(table).where(owned(org, clusterId)).for("update");
         if (!current) throw new NotFoundError("Cluster runtime");
+        if (current.provider !== "k3s") throw conflict("This runtime is externally managed. Disconnect its cluster after removing its projects; OpenShip does not uninstall it.");
         if (action === "remove" && current.status === "removed")
           return { row: current, started: false };
         if (clusterRuntimeRunning(current.status))

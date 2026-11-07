@@ -1,5 +1,8 @@
 import type { PlatformReleaseOperations } from "./releases";
+import { ActionCollectionSchemas, ActionResourceSchemas } from "@repo/contracts";
+import type { PlatformActionOperations } from "./actions";
 /** Passive host facade. The engine is loaded only by an explicitly constructed worker. */
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { Worker } from "node:worker_threads";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -46,6 +49,8 @@ import type { PlatformGitHubOperations } from "./github";
 import { NoticeCollectionSchemas } from "@repo/contracts";
 import type { PlatformNoticeOperations } from "./notices";
 import { BillingPublicSchemas, BillingOperationSchemas } from "@repo/contracts";
+import { AffiliateOperationSchemas } from "@repo/contracts";
+import type { PlatformAffiliateOperations } from "./affiliates";
 import type { PlatformBillingOperations } from "./billing";
 import type { PlatformBackupOperations } from "./backups";
 import { BackupProjectSchemas, BackupPolicySchemas, BackupRunSchemas, BackupRestoreSchemas } from "@repo/contracts";
@@ -92,7 +97,8 @@ function runtimeEntry(): string {
 export async function createNativePlatform(value: NativePlatformOptions): Promise<NativePlatform> {
   let options: NativePlatformOptions;
   try { options = structuredClone(value); }
-  catch { throw new ValidationError("Native configuration must contain serializable values"); }
+  catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "platform/native-host"); throw new ValidationError("Native configuration must contain serializable values"); }
   if (!options || typeof options !== "object") throw new ValidationError("Native configuration is required");
   if (options.diagnostics !== undefined && !["inherit", "stderr", "silent"].includes(options.diagnostics))
     throw new ValidationError("Invalid diagnostics output");
@@ -192,7 +198,8 @@ export async function createNativePlatform(value: NativePlatformOptions): Promis
       const id = ++nextId;
       pending.set(id, { resolve: value => resolve(value as T), reject });
       try { worker.postMessage({ id, operation, args }, operation === "sources.upload" ? [args[3] as TransferListItem] : undefined); }
-      catch (error) { pending.delete(id); reject(error); }
+      catch (error) {
+        observeCaughtError(error, "platform/native-host"); pending.delete(id); reject(error); }
     });
   }
   try { await ready; } catch (error) { await worker.terminate(); throw error; }
@@ -209,7 +216,9 @@ export async function createNativePlatform(value: NativePlatformOptions): Promis
   const serverResources = Object.fromEntries([...Object.keys({ ...ServerCollectionSchemas, ...ServerResourceSchemas }), "getInstallSession", "respondToInstall"].map(name => [name, (...args: unknown[]) => call(`servers.${name}`, ...args)])) as Omit<PlatformServerOperations, "openInstallStream" | "openInstallEvents" | "openMonitor" | "openContainerApplyStream" | "openContainerApplyEvents" | "openManagedNetworkPreparationEvents" | "openManagedNetworkOperationEvents" | "openClusterEvents" | "openClusterRuntimeEvents" | "openClusterStorageEvents">;
   const credentials = Object.fromEntries(Object.keys({ ...CredentialCollectionSchemas, ...CredentialResourceSchemas }).map(name => [name, (...args: unknown[]) => call(`credentials.${name}`, ...args)])) as PlatformCredentialOperations;
   async function* streamValues<T>(streamId: string, signal?: AbortSignal): AsyncGenerator<T> {
-    const abort = () => { void call("stream.close", streamId).catch(() => {}); };
+    const abort = () => { void call("stream.close", streamId).catch((diagnosticFailure) => {
+      observeCaughtError(diagnosticFailure, "platform/native-host");
+    }); };
     signal?.addEventListener("abort", abort, { once: true });
     try {
       if (signal?.aborted) { abort(); signal.throwIfAborted(); }
@@ -221,7 +230,9 @@ export async function createNativePlatform(value: NativePlatformOptions): Promis
       }
     } finally {
       signal?.removeEventListener("abort", abort);
-      await call("stream.close", streamId).catch(() => {});
+      await call("stream.close", streamId).catch((diagnosticFailure) => {
+        observeCaughtError(diagnosticFailure, "platform/native-host");
+      });
     }
   }
   async function* streamEvents(kind: string, ctx: ExecutionContext, args: unknown[], signal?: AbortSignal): AsyncGenerator<DeploymentEvent> {
@@ -233,7 +244,9 @@ export async function createNativePlatform(value: NativePlatformOptions): Promis
     signal?.throwIfAborted();
     const result = await call<{ streamId: string; context: ExecutionContext }>("stream.open", kind, ctx, ...args);
     if (signal?.aborted) {
-      await call("stream.close", result.streamId).catch(() => {});
+      await call("stream.close", result.streamId).catch((diagnosticFailure) => {
+        observeCaughtError(diagnosticFailure, "platform/native-host");
+      });
       signal.throwIfAborted();
     }
     return { context: result.context, data: streamValues<T>(result.streamId, signal) };
@@ -244,7 +257,7 @@ export async function createNativePlatform(value: NativePlatformOptions): Promis
     streamClusterDatabaseEvents: (ctx, id, options = {}) => streamEvents("projects.streamClusterDatabaseEvents", ctx, [id], options.signal),
     streamClusterVolumeEvents: (ctx, id, options = {}) => streamEvents("projects.streamClusterVolumeEvents", ctx, [id], options.signal),
     retryRoutingStream: (ctx, id, options = {}) =>
-      streamEvents("projects.retryRoutingStream", ctx, [id], options.signal),
+      streamEvents("projects.retryRoutingStream", ctx, [id, { sessionId: options.sessionId, idempotencyKey: options.idempotencyKey }], options.signal),
     async openServerLogStream(ctx, id, input = {}, options = {}) {
       return openStreamValues<Uint8Array>("projects.serverLogs", ctx, [id, input], options.signal);
     },
@@ -308,6 +321,7 @@ export async function createNativePlatform(value: NativePlatformOptions): Promis
     credentials: Object.freeze(credentials),
     servers: Object.freeze(servers),
     backups: Object.freeze(backups),
+    affiliates: Object.freeze(Object.fromEntries(Object.keys(AffiliateOperationSchemas).map(name => [name, (...args: unknown[]) => call(`affiliates.${name}`, ...args)]))) as PlatformAffiliateOperations,
     billing: Object.freeze(Object.fromEntries(Object.keys({ ...BillingPublicSchemas, ...BillingOperationSchemas }).map(name => [name, (...args: unknown[]) => call(`billing.${name}`, ...args)]))) as PlatformBillingOperations,
     notices: Object.freeze(Object.fromEntries(Object.keys({ ...NoticeCollectionSchemas }).map(name => [name, (...args: unknown[]) => call(`notices.${name}`, ...args)]))) as PlatformNoticeOperations,
     github: Object.freeze(Object.fromEntries(Object.keys({ ...GitHubCollectionSchemas, ...GitHubResourceSchemas }).map(name => [name, (...args: unknown[]) => call(`github.${name}`, ...args)]))) as PlatformGitHubOperations,
@@ -321,6 +335,7 @@ export async function createNativePlatform(value: NativePlatformOptions): Promis
     issues: Object.freeze(Object.fromEntries(Object.keys({ ...IssueCollectionSchemas, ...IssueJobSchemas }).map(name => [name, (...args: unknown[]) => call(`issues.${name}`, ...args)]))) as PlatformIssueOperations,
     analytics: Object.freeze(analytics),
     jobs: Object.freeze(jobs),
+    actions: Object.freeze(Object.fromEntries(Object.keys({ ...ActionCollectionSchemas, ...ActionResourceSchemas }).map(name => [name, (...args: unknown[]) => call(`actions.${name}`, ...args)]))) as PlatformActionOperations,
     system: Object.freeze(Object.fromEntries([...Object.keys(SystemOperationSchemas), "info"].map(name => [name, (...args: unknown[]) => call(`system.${name}`, ...args)]))) as PlatformSystemOperations,
     apps: Object.freeze(Object.fromEntries(Object.keys({ ...AppCollectionSchemas, ...AppResourceSchemas }).map(name => [name, (...args: unknown[]) => call(`apps.${name}`, ...args)]))) as PlatformAppOperations,
     backupDestinations: Object.freeze(Object.fromEntries(Object.keys({ ...BackupDestinationCollectionSchemas, ...BackupDestinationResourceSchemas }).map(name => [name, (...args: unknown[]) => call(`backupDestinations.${name}`, ...args)]))) as PlatformBackupDestinationOperations,

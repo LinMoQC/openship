@@ -1,5 +1,11 @@
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import type { ProjectDependencies } from "../../../projects";
-import type { CreateProjectInput, EnsureProjectInput } from "@repo/contracts";
+import {
+  isEnsureProjectResult,
+  isProject,
+  type CreateProjectInput,
+  type EnsureProjectInput,
+} from "@repo/contracts";
 import type { ExecutionContext } from "../../../context";
 import { authorization } from "../../lib/authorization";
 import { audit } from "../../lib/audit-emitter";
@@ -12,6 +18,8 @@ import { createProjectLocalDependencies } from "./project-local.operations";
 import { getProjectHome } from "./project-home.operations";
 import { subscribeProjectLogs, openProjectServerLogs } from "./project-logs.operations";
 import { subscribeRoutingRetry } from "./project-routing-retry.operations";
+import { maybeCloudProjectRequest } from "../../lib/cloud/project-creation";
+import { assertHostMountWriteAccess } from "../deployments/host-mount-policy";
 
 async function checkSource(input: Partial<CreateProjectInput>) {
   if (input.localPath && process.env.OPENSHIP_NATIVE === "true")
@@ -39,14 +47,19 @@ const recordAudit: ProjectDependencies["recordAudit"] = (ctx, event) => {
 };
 
 const create = async (ctx: ExecutionContext, input: EnsureProjectInput) => {
+  const cloud = await maybeCloudProjectRequest(ctx, "/api/projects", input, isProject, {
+    envelope: "data",
+  });
+  if (cloud) return { ...cloud, source: "cloud" as const };
+  await assertHostMountWriteAccess(ctx, input);
   const service = await import("./project.service");
   await checkSource(input);
   if (input.routeStrategy === undefined) {
     const { getRouteStrategy } = await import("../settings/settings.service");
-    const preference = await getRouteStrategy(ctx.userId).catch(() => "auto" as const);
+    const preference = await getRouteStrategy(ctx.userId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/projects/project.operations"); return "auto" as const; });
     if (preference !== "auto") input.routeStrategy = preference;
   }
-  return service.createProject(input, ctx.organizationId, ctx.tokenScope ?? undefined);
+  return service.createProject(input, ctx.organizationId, ctx.tokenScope ?? undefined, ctx);
 };
 
 export const projectDependencies: ProjectDependencies = {
@@ -60,9 +73,17 @@ export const projectDependencies: ProjectDependencies = {
   local: createProjectLocalDependencies(create),
   create,
   async ensure(ctx, input) {
+    const cloud = await maybeCloudProjectRequest(
+      ctx,
+      "/api/projects/ensure",
+      input,
+      isEnsureProjectResult,
+    );
+    if (cloud) return cloud;
+    await assertHostMountWriteAccess(ctx, input);
     const service = await import("./project.service");
     await checkSource(input);
-    return service.ensureProject(input, ctx.organizationId);
+    return service.ensureProject(input, ctx.organizationId, ctx);
   },
   async get(ctx, id) {
     const service = await import("./project.service");
@@ -71,6 +92,7 @@ export const projectDependencies: ProjectDependencies = {
     return project;
   },
   async update(ctx, id, input) {
+    await assertHostMountWriteAccess(ctx, input);
     const service = await import("./project.service");
     await checkSource(input);
     return service.updateProject(id, input, ctx.organizationId);

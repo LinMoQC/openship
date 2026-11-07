@@ -136,7 +136,7 @@ export function MailAdminPanel({ status, serverId, onRefresh, onForgotten }: Mai
       {/* Engine state first: when it isn't serving, every tab below fails, so the
           one condition and the one fix belong above the tab bar rather than
           rediscovered as an error inside whichever tab the operator opened. */}
-      <MailEngineBanner serverId={serverId} engine={status.engine} onRepaired={onRefresh} />
+      <MailEngineBanner serverId={serverId} engine={status.engine} observationError={status.observationError} onRepaired={onRefresh} />
 
       {primaryDomain && (
         <ReputationBanner serverId={serverId} domain={primaryDomain} />

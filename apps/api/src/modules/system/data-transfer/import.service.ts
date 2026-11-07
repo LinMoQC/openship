@@ -12,8 +12,10 @@
  * updates to matching project records; they can never wipe an instance.
  */
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import {
   db,
+  assertDumpSchemaCompatible,
   eq,
   inArray,
   restoreSubgraphInTransaction,
@@ -24,6 +26,7 @@ import {
 
 import { env } from "@repo/platform/engine/config/env";
 import { reconcileRuntimeStateAfterImport } from "../../../lib/database-runtime-state";
+import { rebindLocalUserAfterInstanceRestore } from "../../../lib/local-user";
 import { reassertMigrationLockAfterRestore, withMigrationLock } from "../migration/migration-lock";
 import { CloudInstanceNotTransferableError } from "./errors";
 import { openTransferSecrets, transferSecretsRequirePassphrase } from "./passphrase-crypto";
@@ -33,12 +36,12 @@ import {
   planProjectImport,
   ProjectImportError,
   remapProjectSecrets,
+  removeReplacedProjectRows,
   validateImportSelection,
   type ImportContext,
 } from "./project-import";
 import { summarizeExportCounts } from "./selection";
 import { transferServer } from "./export.service";
-import { getCloudConnectionStatusForOrg } from "@repo/platform/engine/lib/cloud/session";
 import type {
   DataTransferFile,
   ImportMode,
@@ -66,6 +69,8 @@ const SINGLETON_AND_AUTH = [
   "instance_settings",
   "user",
   "account",
+  "passkey",
+  "two_factor",
   "session",
   "organization",
   "member",
@@ -96,9 +101,9 @@ export function assertValidEnvelope(file: DataTransferFile): void {
   ) {
     throw new InvalidTransferFileError("Not an Openship export file.");
   }
-  if (file.envelopeVersion !== 1 && file.envelopeVersion !== 2 && file.envelopeVersion !== 3) {
+  if (![1, 2, 3, 4].includes(file.envelopeVersion)) {
     throw new InvalidTransferFileError(
-      `Unsupported export version ${file.envelopeVersion}; this build reads versions 1, 2 and 3.`,
+      `Unsupported export version ${file.envelopeVersion}; this build reads versions 1–4. Update the destination before importing a newer export.`,
     );
   }
   if (
@@ -120,6 +125,14 @@ export function assertValidEnvelope(file: DataTransferFile): void {
   ) {
     throw new InvalidTransferFileError("The export contains an invalid database snapshot.");
   }
+  if (file.envelopeVersion >= 4) {
+    try {
+      assertDumpSchemaCompatible(file.dump);
+    } catch (error) {
+      observeCaughtError(error, "api/modules/system/data-transfer/import.service");
+      throw new InvalidTransferFileError(error instanceof Error ? error.message : "This export requires a newer destination build.");
+    }
+  }
   if (file.secrets) {
     if (typeof file.secrets !== "object" || Array.isArray(file.secrets)) {
       throw new InvalidTransferFileError("The credential bundle is invalid.");
@@ -127,11 +140,11 @@ export function assertValidEnvelope(file: DataTransferFile): void {
     if ("encoding" in file.secrets) {
       if (
         file.secrets.encoding !== "plaintext" ||
-        file.envelopeVersion !== 3 ||
-        file.kind !== "openship-project-export" ||
+        (file.envelopeVersion !== 3 && file.envelopeVersion !== 4) ||
+        (file.envelopeVersion === 3 && file.kind !== "openship-project-export") ||
         "kdf" in file.secrets || "blob" in file.secrets
       ) {
-        throw new InvalidTransferFileError("Plaintext credentials require a version 3 project export.");
+        throw new InvalidTransferFileError("Plaintext credentials require a version 4 export or a legacy version 3 project export.");
       }
       assertValidSecretBundle(file.secrets);
     }
@@ -175,7 +188,8 @@ function assertValidSecretBundle(bundle: SecretBundle | null): void {
   if (bundle.version !== 1 || !Array.isArray(bundle.entries)) {
     throw new InvalidTransferFileError("The credential bundle is invalid.");
   }
-  const schemes = new Set(["scalar", "enc1", "map", "notification-config", "plaintext", "json"]);
+  const schemes = new Set(["scalar", "enc1", "map", "notification-config", "plaintext", "json", "better-auth"]);
+  const seen = new Set<string>();
   for (const entry of bundle.entries) {
     if (
       !entry ||
@@ -187,6 +201,12 @@ function assertValidSecretBundle(bundle: SecretBundle | null): void {
       throw new InvalidTransferFileError("The credential bundle contains an invalid entry.");
     }
     const knownSpec = SECRET_SPEC_BY_KEY.get(`${entry.table}.${entry.column}`);
+    if (!knownSpec) {
+      throw new InvalidTransferFileError("This export contains an unsupported credential field. Update the destination before importing.");
+    }
+    const key = JSON.stringify([entry.table, entry.id, entry.column]);
+    if (seen.has(key)) throw new InvalidTransferFileError("The credential bundle contains duplicate entries for the same field.");
+    seen.add(key);
     if (knownSpec && entry.scheme !== knownSpec.scheme) {
       throw new InvalidTransferFileError(
         "The credential bundle does not match the destination schema.",
@@ -194,12 +214,12 @@ function assertValidSecretBundle(bundle: SecretBundle | null): void {
     }
     const validValue =
       entry.scheme === "json"
-        ? entry.json !== null && typeof entry.json === "object"
+        ? entry.json === null || typeof entry.json === "object"
         : entry.scheme === "map"
-          ? isStringRecord(entry.map)
+          ? entry.map === null || isStringRecord(entry.map)
           : entry.scheme === "notification-config"
-            ? isStringRecord(entry.config)
-            : typeof entry.value === "string";
+            ? entry.config === null || isStringRecord(entry.config)
+            : entry.value === null || typeof entry.value === "string";
     if (!validValue) {
       throw new InvalidTransferFileError("The credential bundle contains an invalid secret value.");
     }
@@ -321,6 +341,23 @@ export async function importPreparedInstance(opts: {
 
   const secretsSkipped = !bundle;
 
+  // Refuse an incomplete account restore before touching the destination. A
+  // missing factor must neither lock out the owner nor silently disable 2FA.
+  if (!projectScope) {
+    for (const user of file.dump.tables.user ?? []) {
+      if (user.twoFactorEnabled !== true) continue;
+      const factor = file.dump.tables.two_factor?.find(row => row.userId === user.id);
+      if (!factor || !["secret", "backupCodes"].every(column => bundle?.entries.some(entry =>
+        entry.table === "two_factor" && entry.id === factor.id && entry.column === column &&
+        entry.scheme === "better-auth" && typeof entry.value === "string" && entry.value.length > 0,
+      ))) {
+        throw new InvalidTransferFileError(
+          "This instance contains accounts with two-factor authentication. Include their credentials when exporting and importing, or transfer projects only.",
+        );
+      }
+    }
+  }
+
   let rowsRestored = 0;
 
   // Local-folder (localPath / folder-upload) projects carry a SOURCE-machine path
@@ -332,25 +369,19 @@ export async function importPreparedInstance(opts: {
 
   let secretsRehydrated = 0;
   let projectPreview: ImportPreview | undefined;
-  // Resolve cloud identity before opening the DB transaction. PGlite has one
-  // connection; a global repo query inside its transaction would deadlock.
-  const cloud =
-    projectScope && file.dump.tables.project?.some((row) => row.cloudWorkspaceId)
-      ? await getCloudConnectionStatusForOrg(opts.context!.organizationId)
-      : undefined;
 
   await withMigrationLock(async () => {
     await db.transaction(async (rawTx) => {
       const tx = rawTx as DatabaseTransaction;
       let updateTables: string[] | undefined;
       let retargetedDeployments: string[] = [];
+      let replacementRows = new Map<string, string[]>();
       if (projectScope) {
         const plan = await planProjectImport(
           file,
           { ...opts.selection, scope: "projects" },
           opts.context!,
           tx,
-          cloud,
         );
         if (plan.preview.blockers.length)
           throw new ProjectImportError(plan.preview.blockers.join("\n"));
@@ -359,6 +390,7 @@ export async function importPreparedInstance(opts: {
         bundle = remapProjectSecrets(bundle, plan);
         updateTables = plan.updateTables;
         retargetedDeployments = [...plan.retargetedDeployments];
+        replacementRows = plan.replacementRows;
         localPathProjects = (file.dump.tables.project ?? [])
           .filter((row) => row.localPath)
           .map((row) => ({ slug: String(row.slug), localPath: String(row.localPath) }));
@@ -377,6 +409,8 @@ export async function importPreparedInstance(opts: {
         writtenRows,
       });
       rowsRestored = writtenRows.count;
+      if (mode === "wipe" && !projectScope) await rebindLocalUserAfterInstanceRestore(tx);
+      await removeReplacedProjectRows(tx, replacementRows);
       // Unlike an ordinary overwrite, a changed host invalidates even the
       // destination's previous frozen runtime snapshot. Its secrets must not
       // reintroduce source-host bindings later in this transaction.
@@ -408,22 +442,18 @@ export async function importPreparedInstance(opts: {
         for (const { spec: rowSpec, entries } of rows.values()) {
           const id = entries[0]!.entry.id;
 
-          // notification-config re-hydration merges secrets back into the
-          // restored (scrubbed) config, so read it first.
+          // Merge notification secrets into the source's public configuration.
+          // A destination row may have kept its old secret-bearing column during
+          // the upsert; using it here would also retain outdated public settings.
           let currentCell: unknown;
           if (entries.some((e) => e.spec.scheme === "notification-config")) {
-            const [current] = (await tx
-              .select()
-              .from(rowSpec.table)
-              .where(eq(rowSpec.pk, id))
-              .limit(1)) as Array<Record<string, unknown>>;
-            currentCell =
-              current?.[entries.find((e) => e.spec.scheme === "notification-config")!.spec.column];
+            const column = entries.find((e) => e.spec.scheme === "notification-config")!.spec.column;
+            currentCell = file.dump.tables[rowSpec.sqlName]?.find((row) => row.id === id)?.[column];
           }
 
           const set: Record<string, unknown> = {};
           for (const { spec, entry } of entries) {
-            set[spec.column] = sealForInstance(spec, entry, currentCell);
+            set[spec.column] = await sealForInstance(spec, entry, currentCell);
           }
           const updated = await tx
             .update(rowSpec.table)

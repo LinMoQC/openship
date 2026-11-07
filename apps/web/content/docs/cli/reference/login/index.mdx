@@ -8,7 +8,7 @@ See the [workflow guide](/docs/cli/access) for examples. Global flags such as `-
 
 ## openship login
 
-Authenticate with a Personal Access Token (create one in dashboard Settings)
+Connect to Cloud or self-hosted Openship with a Personal Access Token
 
 ```text
 openship login [options]
@@ -16,7 +16,10 @@ openship login [options]
 
 | Option | Meaning |
 | --- | --- |
-| `--token <token>` | Personal Access Token (opsh_pat_...) for non-interactive login |
-| `--api-url <url>` | API base URL (defaults to the saved context or local installation) |
-| `--dashboard-url <url>` | Dashboard base URL (defaults to the saved context or local installation) |
-| `--context <name>` | Name of the context to store this login under (default: "default") |
+| `--token <token>` | Personal Access Token (opsh_pat_...) |
+| `--token-file <file>` | Token file, or - for stdin (keeps credentials out of process arguments) |
+| `--cloud` | Connect directly to Openship Cloud |
+| `--api-url <url>` | API or public instance URL (prompts on a fresh interactive login) |
+| `--dashboard-url <url>` | Dashboard URL if different from the API's public instance URL |
+| `--context <name>` | Connection name (cloud with --cloud; saved connection when logging in again) |
+| `--organization <id>` | Save a fixed organization for this connection |

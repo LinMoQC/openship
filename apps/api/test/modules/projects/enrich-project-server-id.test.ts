@@ -1,8 +1,10 @@
 import "../mail/_setup-env";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const deploymentRepo = vi.hoisted(() => ({ findById: vi.fn() }));
-const serverRepo = vi.hoisted(() => ({ getInOrganization: vi.fn() }));
+const deploymentRepo = vi.hoisted(() => ({ findById: vi.fn(), findManyById: vi.fn() }));
+const serverRepo = vi.hoisted(() => ({ getInOrganization: vi.fn(), getMany: vi.fn() }));
+const incidentRepo = vi.hoisted(() => ({ listOpenForActiveProjects: vi.fn() }));
+const migrationRepo = vi.hoisted(() => ({ findActiveForProject: vi.fn(), findActiveForProjects: vi.fn() }));
 
 vi.mock("@repo/db", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@repo/db")>();
@@ -12,11 +14,13 @@ vi.mock("@repo/db", async (importOriginal) => {
       ...actual.repos,
       deployment: deploymentRepo,
       server: serverRepo,
+      serviceIncident: incidentRepo,
+      dockerMigrationRun: migrationRepo,
     },
   };
 });
 
-import { enrichProject } from "@repo/platform/engine/modules/projects/project-crud.service";
+import { enrichProject, enrichProjectsBatch } from "@repo/platform/engine/modules/projects/project-crud.service";
 
 const baseProject = {
   id: "proj_1",
@@ -25,7 +29,7 @@ const baseProject = {
   slug: "app",
   name: "App",
   port: 3000,
-  cloudWorkspaceId: null,
+  workspaceId: null,
   resources: null,
   buildResources: null,
   sleepMode: "auto_sleep",
@@ -37,6 +41,11 @@ const baseProject = {
 describe("enrichProject serverId coalesce", () => {
   beforeEach(() => {
     deploymentRepo.findById.mockReset();
+    incidentRepo.listOpenForActiveProjects.mockReset().mockResolvedValue([]);
+    migrationRepo.findActiveForProject.mockResolvedValue(null);
+    migrationRepo.findActiveForProjects.mockResolvedValue(new Map());
+    deploymentRepo.findManyById.mockResolvedValue(new Map());
+    serverRepo.getMany.mockResolvedValue(new Map());
     serverRepo.getInOrganization.mockReset();
     serverRepo.getInOrganization.mockResolvedValue(null);
   });
@@ -152,6 +161,11 @@ describe("enrichProject serverId coalesce", () => {
 describe("enrichProject deployTarget derivation", () => {
   beforeEach(() => {
     deploymentRepo.findById.mockReset();
+    incidentRepo.listOpenForActiveProjects.mockReset().mockResolvedValue([]);
+    migrationRepo.findActiveForProject.mockResolvedValue(null);
+    migrationRepo.findActiveForProjects.mockResolvedValue(new Map());
+    deploymentRepo.findManyById.mockResolvedValue(new Map());
+    serverRepo.getMany.mockResolvedValue(new Map());
     serverRepo.getInOrganization.mockReset();
     serverRepo.getInOrganization.mockResolvedValue(null);
   });
@@ -164,7 +178,7 @@ describe("enrichProject deployTarget derivation", () => {
 
     const enriched = await enrichProject({
       ...baseProject,
-      cloudWorkspaceId: "ws_1",
+      workspaceId: "ws_1",
       activeDeploymentId: "dep_1",
       serverId: null,
     });
@@ -184,7 +198,7 @@ describe("enrichProject deployTarget derivation", () => {
 
     const enriched = await enrichProject({
       ...baseProject,
-      cloudWorkspaceId: "ws_1",
+      workspaceId: "ws_1",
       activeDeploymentId: "dep_1",
       serverId: null,
     });
@@ -205,11 +219,11 @@ describe("enrichProject deployTarget derivation", () => {
     expect(enriched.serverId).toBeNull();
   });
 
-  it("never reports a server id without a server target", async () => {
+  it("reports a server id for both connected and managed server targets", async () => {
     // The pair has to agree: a card showing "Local" next to a server name, or a wizard
     // hydrating one field from the target and the other from the id, is the same bug.
-    for (const [cloudWorkspaceId, metaServerId, colServerId] of [
-      ["ws_1", "srv_meta", null],
+    for (const [workspaceId, metaServerId, colServerId] of [
+      ["ws_1", "srv_meta", "srv_col"],
       ["ws_1", null, "srv_col"],
       [null, "srv_meta", null],
       [null, null, "srv_col"],
@@ -224,14 +238,35 @@ describe("enrichProject deployTarget derivation", () => {
 
       const enriched = await enrichProject({
         ...baseProject,
-        cloudWorkspaceId,
+        workspaceId,
         activeDeploymentId: "dep_1",
         serverId: colServerId,
       });
 
       expect(Boolean(enriched.serverId), `target=${enriched.deployTarget}`).toBe(
-        enriched.deployTarget === "server",
+        enriched.deployTarget === "server" || enriched.deployTarget === "cloud",
       );
     }
+  });
+});
+
+
+describe("project runtime health batch", () => {
+  it("uses one incident query for the whole list and flags only the authorized affected project", async () => {
+    const projects = Array.from({ length: 100 }, (_, index) => ({ ...baseProject,
+      id: `project-${index}`, activeDeploymentId: `deployment-${index}` }));
+    deploymentRepo.findManyById.mockResolvedValue(new Map(projects.map(project => [project.activeDeploymentId,
+      { id: project.activeDeploymentId, projectId: project.id, organizationId: project.organizationId, status: "ready" }])));
+    incidentRepo.listOpenForActiveProjects.mockReset().mockResolvedValue([
+      { projectId: "project-2", organizationId: "org_1", status: "open", kind: "down" },
+      { projectId: "project-3", organizationId: "foreign", status: "open", kind: "down" },
+    ]);
+    const rows = await enrichProjectsBatch(projects);
+    expect(incidentRepo.listOpenForActiveProjects).toHaveBeenCalledTimes(1);
+    expect(incidentRepo.listOpenForActiveProjects.mock.calls[0]![0]).toHaveLength(100);
+    expect(rows.filter(row => row.runtimeUnhealthy).map(row => row.id)).toEqual(["project-2"]);
+    expect(rows[2]?.activeDeploymentStatus).toBe("ready");
+    incidentRepo.listOpenForActiveProjects.mockResolvedValue([]);
+    expect((await enrichProjectsBatch(projects)).some(row => row.runtimeUnhealthy)).toBe(false);
   });
 });

@@ -19,6 +19,7 @@
  * segments.
  */
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { repos, type BackupDestination } from "@repo/db";
@@ -28,6 +29,8 @@ import { resolveSafeSshKeyPath } from "../../lib/ssh-key-path";
 import { safeErrorMessage } from "@repo/core";
 import { assertLocalDestinationAllowed } from "./local-gate";
 import { assertNativeSshSettings } from "../../native/execution-policy";
+import { env } from "../../config/env";
+import { assertOperatorSshAccess } from "../../lib/operator-ssh-access";
 
 /**
  * Take a raw backup_destination DB row and produce a BackupDestinationRow
@@ -59,6 +62,7 @@ export async function toAdapterRow(row: BackupDestination): Promise<BackupDestin
   // All other kinds: straight pass-through of the row fields the
   // adapter expects.
   return {
+    publicNetworkOnly: env.CLOUD_MODE,
     id: row.id,
     organizationId: row.organizationId,
     name: row.name,
@@ -104,9 +108,13 @@ export async function hydrateServerAdapterRow(params: {
       `Server ${serverId} referenced by destination "${name}" no longer exists`,
     );
   }
+  if (server.workspaceId) {
+    throw new Error("Managed Cloud servers do not expose SFTP credentials. Choose object storage or an external SFTP destination for backups.");
+  }
 
   // A stored destination must obey the same native host-key-file policy as deployments.
   assertNativeSshSettings(server);
+  await assertOperatorSshAccess(server, organizationId);
 
   let sftpPasswordEnc: string | null = null;
   let sftpPrivateKeyEnc: string | null = null;
@@ -130,6 +138,7 @@ export async function hydrateServerAdapterRow(params: {
           extraRoots: [homedir()],
         });
       } catch (err) {
+        observeCaughtError(err, "platform/engine/modules/backup-destinations/hydrate-server");
         throw new Error(
           `Server ${server.id} sshKeyPath rejected: ${
             safeErrorMessage(err)
@@ -140,6 +149,7 @@ export async function hydrateServerAdapterRow(params: {
       try {
         keyMaterial = await readFile(keyPath, "utf-8");
       } catch (err) {
+        observeCaughtError(err, "platform/engine/modules/backup-destinations/hydrate-server");
         throw new Error(
           `Failed to read SSH key at ${keyPath} for server ${server.id}: ${
             safeErrorMessage(err)
@@ -158,6 +168,7 @@ export async function hydrateServerAdapterRow(params: {
   }
 
   return {
+    publicNetworkOnly: env.CLOUD_MODE,
     id,
     organizationId,
     name,
@@ -169,6 +180,7 @@ export async function hydrateServerAdapterRow(params: {
     sshHost: server.sshHost,
     sshPort: server.sshPort ?? 22,
     sshUser: server.sshUser ?? "root",
+    sshHostKey: server.sshHostKey,
     serverId,
     accessKeyIdEnc: null,
     secretAccessKeyEnc: null,

@@ -36,7 +36,7 @@ export interface DeploymentDependencies {
   trigger(
     ctx: ExecutionContext,
     input: CreateDeploymentInput & { trigger?: "webhook" },
-  ): Promise<{ deployment: StoredDeployment; skipped?: boolean }>;
+  ): Promise<{ deployment: StoredDeployment; skipped?: boolean; awaitingActions?: undefined } | { deployment?: undefined; skipped: true; awaitingActions: { id: string; projectId: string } }>;
   present(deployment: StoredDeployment): Deployment;
   /** Typed external gateway; never a request to this same process's HTTP server. */
   forward?(
@@ -82,6 +82,7 @@ export function createDeploymentOperations(deps: DeploymentDependencies): Platfo
         resourceType: "project",
         resourceId: input.projectId,
         action: "write",
+        capability: "deployments:trigger",
       });
       // The existing engine validates registered-server ownership and runtime
       // admission using this resolved organization, along with source access,
@@ -91,7 +92,12 @@ export function createDeploymentOperations(deps: DeploymentDependencies): Platfo
       let result = await deps.forward?.(authorized, input, options);
       if (!result) {
         const triggered = await deps.trigger(authorized, { ...input, trigger: options.trigger });
-        result = {
+        result = triggered.awaitingActions ? {
+          awaiting_actions: true,
+          action_request_id: triggered.awaitingActions.id,
+          project_id: triggered.awaitingActions.projectId,
+          skipped: true,
+        } : {
           deployment_id: triggered.deployment.id,
           project_id: triggered.deployment.projectId,
           deployment: deps.present(triggered.deployment),
@@ -101,7 +107,7 @@ export function createDeploymentOperations(deps: DeploymentDependencies): Platfo
       deps.recordAudit(authorized, {
         eventType: "deployment:write",
         resourceType: "deployment",
-        resourceId: result.deployment_id,
+        resourceId: result.deployment_id ?? result.action_request_id,
       });
       return { context: authorized, data: result };
     },

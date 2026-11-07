@@ -1,5 +1,6 @@
 "use client";
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { Icon as UiIcon } from "@repo/ui/icons";
 
 import { useCallback, useEffect, useState } from "react";
@@ -11,6 +12,7 @@ import { JobRunLogsModal } from "@/components/jobs/JobRunLogs";
 import { JobsEmptyState } from "@/components/jobs/JobsEmptyState";
 import { formatTime, formatDuration, statusTone, statusIcon } from "@/components/jobs/jobFormat";
 import { usePlatform } from "@/context/PlatformContext";
+import { useCloudDeployPricing } from "@/hooks/useCloudDeployPricing";
 import { useToast } from "@/context/ToastContext";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 
@@ -37,6 +39,7 @@ export default function JobsPage() {
   const { t } = useI18n();
   const j = t.jobs;
   const { selfHosted } = usePlatform();
+  const showCloudPricing = useCloudDeployPricing();
   const { showToast } = useToast();
   const router = useRouter();
 
@@ -57,7 +60,7 @@ export default function JobsPage() {
       // whole page, so their fetch degrades to empty on error.
       const [res, bs] = await Promise.all([
         jobsApi.list(),
-        jobsApi.backupSchedules().catch(() => ({ data: [] as BackupScheduleView[] })),
+        jobsApi.backupSchedules().catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "dashboard/app/(dashboard)/jobs/page"); return ({ data: [] as BackupScheduleView[] }); }),
       ]);
       setJobs(res?.data ?? []);
       setBackupSchedules(bs?.data ?? []);
@@ -69,9 +72,8 @@ export default function JobsPage() {
   }, [j.loadFailed, j.toast.title, showToast]);
 
   useEffect(() => {
-    if (selfHosted) void load();
-    else setLoading(false);
-  }, [selfHosted, load]);
+    void load();
+  }, [load]);
 
   const handleRun = async (job: JobView) => {
     if (busyKey) return;
@@ -82,6 +84,7 @@ export default function JobsPage() {
       if (res?.data?.runId) setLogRunId(res.data.runId);
       await load();
     } catch (err) {
+      if (showCloudPricing(err)) return;
       showToast(getApiErrorMessage(err, interpolate(j.toast.ranFailed, { label: job.label })), "error", j.toast.title);
     } finally {
       setBusyKey(null);
@@ -132,14 +135,26 @@ export default function JobsPage() {
     }
   };
 
+  const getJobLabel = (job: JobView) => {
+    if (job.kind !== "custom" && j.systemJobLabels) {
+      const labels = j.systemJobLabels as Record<string, string>;
+      if (labels[job.key]) return labels[job.key]!;
+      if (labels[job.label]) return labels[job.label]!;
+    }
+    return job.label;
+  };
+
   const systemJobs = jobs.filter((job) => job.kind !== "custom");
   const customJobs = jobs.filter((job) => job.kind === "custom");
 
   // Search (by label) + status facet. Counts are over ALL jobs so the overview
   // is stable while a filter narrows the list.
   const q = query.trim().toLowerCase();
-  const jobMatches = (job: JobView) =>
-    (!q || job.label.toLowerCase().includes(q)) && matchesJobStatus(job, statusFilter);
+  const jobMatches = (job: JobView) => {
+    const localized = getJobLabel(job).toLowerCase();
+    const raw = job.label.toLowerCase();
+    return (!q || localized.includes(q) || raw.includes(q)) && matchesJobStatus(job, statusFilter);
+  };
   const filteredCustom = customJobs.filter(jobMatches);
   const filteredSystem = systemJobs.filter(jobMatches);
   const counts: Record<JobStatusFilter, number> = {
@@ -184,7 +199,7 @@ export default function JobsPage() {
             <div className="flex items-center gap-2">
               <UiIcon name="clock" className="size-4 text-muted-foreground/70" />
               <Link href={`/jobs/${encodeURIComponent(job.key)}`} className="text-[14px] font-medium text-foreground hover:text-primary">
-                {job.label}
+                {getJobLabel(job)}
               </Link>
               <span className="rounded-md bg-foreground/[0.06] px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
                 {isCustom ? j.kind.custom : j.kind.system}
@@ -267,14 +282,12 @@ export default function JobsPage() {
       <div className="mb-6 flex items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-medium text-foreground/80" style={{ letterSpacing: "-0.2px" }}>{j.title}</h1>
-          <p className="text-sm text-muted-foreground/70 mt-1">{j.subtitle}</p>
+          <p className="mt-1 text-sm text-muted-foreground">{selfHosted ? j.subtitle : j.cloudSubtitle}</p>
         </div>
-        {selfHosted && (
-          <button onClick={() => router.push("/jobs/new")}
-            className="inline-flex items-center gap-1.5 rounded-xl bg-primary px-4 py-2.5 text-[13px] font-medium text-primary-foreground transition-colors hover:bg-primary/90">
-            <UiIcon name="plus" className="size-4" /> {j.newJob}
-          </button>
-        )}
+        <button onClick={() => router.push("/jobs/new")}
+          className="inline-flex items-center gap-1.5 rounded-xl bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90">
+          <UiIcon name="plus" className="size-4" /> {j.newJob}
+        </button>
       </div>
 
       {loading ? (
@@ -520,4 +533,3 @@ function BackupScheduleCard({ s }: { s: BackupScheduleView }) {
     </div>
   );
 }
-

@@ -110,6 +110,15 @@ const ALL = [
 ];
 const names = (tools: McpToolDef[]) => tools.map((t) => t.name).sort();
 
+it("advertises informational permission requests to restricted and read-only clients, without permission writes", () => {
+  const request = tool({ name: "get_permissions_access_request", method: "GET", path: "/api/permissions/access-request", perm: { root: "permissions", leaf: "permissions", action: "read", wildcard: true } });
+  const grants = tool({ name: "get_permissions_grants", method: "GET", path: "/api/permissions/grants", perm: { root: "permissions", leaf: "permissions", action: "read", wildcard: true } });
+  const write = tool({ name: "post_permissions_grants", method: "POST", path: "/api/permissions/grants", perm: { root: "permissions", leaf: "permissions", action: "write", wildcard: true } });
+  for (const readOnly of [true, false]) {
+    expect(names(filterToolsForPrincipal([request, grants, write], principal({ readOnly })))).toEqual(["get_permissions_access_request"]);
+  }
+});
+
 /**
  * `wildcards` is the shorthand for "holds {type,'*',perms}". It also seeds
  * `grantedRootTypes`, because a real wildcard row IS a grant on that type and
@@ -131,6 +140,7 @@ function principal(
     wildcardGrants: p.wildcardGrants ?? new Map(Object.entries(wildcards)),
     canCreateProjects: p.canCreateProjects ?? false,
     sourceCapabilities: p.sourceCapabilities ?? new Set(),
+    grantedCapabilities: p.grantedCapabilities,
   };
 }
 
@@ -304,4 +314,23 @@ describe("filterToolsForPrincipal", () => {
     // still no GitHub, since no github grant
     expect(names(out)).not.toContain("get_github_repos_by_owner_by_repo");
   });
+
+  it("a capability-only grant lists exactly the tools its capabilities map to", () => {
+    const domainGet = tool({
+      name: "get_domains_by_id",
+      method: "GET",
+      perm: { root: "domain", leaf: "domain", action: "read", wildcard: false, grantRoot: "project" },
+    });
+    const domainDelete = tool({
+      name: "delete_domains_by_id",
+      method: "DELETE",
+      perm: { root: "domain", leaf: "domain", action: "admin", wildcard: false, grantRoot: "project" },
+    });
+    const out = filterToolsForPrincipal(
+      [...ALL, domainGet, domainDelete],
+      principal({ grantedCapabilities: new Set(["domains:delete"]) }),
+    );
+    expect(names(out)).toEqual(["delete_domains_by_id"]);
+  });
 });
+

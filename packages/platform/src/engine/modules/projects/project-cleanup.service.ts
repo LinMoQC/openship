@@ -11,10 +11,13 @@
  *   - deleteDeployment()        → single deployment teardown
  */
 
+import { observedAllSettled, reportCaughtError as observeCaughtError, diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import { repos, type Project, type Deployment } from "@repo/db";
 import {
   DockerRuntime,
+  BareRuntime,
   CloudDockerRuntime,
+  CloudInfraProvider,
   edgeProxyFor,
   ownsBuiltImage,
   type EdgeProxyApi,
@@ -50,6 +53,7 @@ const TEARDOWN_MATCH_TIERS: readonly LiveMatchKind[] = ["label", "name", "tracke
  *  rejects — it hangs. Without a timeout the deletion-preview handler (and the
  *  "Scanning attached services and volumes…" UI) loads forever. */
 const INSPECT_TIMEOUT_MS = 10_000;
+const CONNECT_TIMEOUT_MS = 60_000;
 
 // ─── Resource Manifest ───────────────────────────────────────────────────────
 
@@ -61,7 +65,6 @@ export interface CleanupResource {
     | "route"
     | "volume"
     | "network"
-    | "cloud_workspace"
     /**
      * A resource we KNOW exists but can't reach right now (cloud down, or a
      * server that still exists but is transiently unreachable). Its destroy
@@ -95,6 +98,8 @@ export interface CleanupManifest {
   projectId: string;
   /** Only a full project teardown may remove the runtime's project namespace. */
   projectCleanup?: boolean;
+  /** Explicit data-removal choice for project-owned storage on a shared host. */
+  wipeVolumes?: boolean;
   /**
    * Owning org — needed to release a managed (`*.opsh.io`) route on Openship
    * Cloud's edge, which is namespace-scoped upstream. Optional so an older
@@ -180,6 +185,18 @@ export interface CleanupResult {
 
 // ─── Manifest Collectors ─────────────────────────────────────────────────────
 
+/** Failed container creation can leave claimed volumes without any mounts. */
+async function ownedProjectVolumeNames(
+  runtime: DockerRuntime,
+  projectId: string,
+): Promise<string[]> {
+  if (runtime instanceof CloudDockerRuntime && runtime.projectId !== projectId)
+    throw new Error("Cloud volume inventory belongs to another project");
+  return (await runtime.listAllVolumes())
+    .filter((volume) => volume.labels["openship.project"] === projectId)
+    .map((volume) => volume.name);
+}
+
 /**
  * Collect ALL resources owned by a project into a flat manifest.
  * Single pass: queries DB once per resource type, no per-item queries in loops.
@@ -191,8 +208,7 @@ export async function collectProjectManifest(
   const wipeVolumes = options.wipeVolumes ?? false;
   const resources: CleanupResource[] = [];
   const dockerBinding = await cloudDockerWorkspaceForCleanup(project.id, project.organizationId);
-  const cloudWorkspaceId = dockerBinding?.workspaceId ?? project.cloudWorkspaceId;
-  const services = await repos.service.listByProject(project.id);
+  const services = await repos.service.listByProject(project.id, { includeArchived: true });
   const seenContainers = new Set<string>();
   const seenVolumes = new Set<string>();
   const seenRouteHostnames = new Set<string>();
@@ -202,6 +218,7 @@ export async function collectProjectManifest(
     try {
       return await withTimeout(operation, INSPECT_TIMEOUT_MS, label);
     } catch (error) {
+      observeCaughtError(error, "platform/engine/modules/projects/project-cleanup.service");
       for (const runtime of resolvedRuntimes) disposeRuntime(runtime);
       throw new Error(`${label} failed: ${safeErrorMessage(error)}`);
     }
@@ -223,7 +240,7 @@ export async function collectProjectManifest(
   type CollectedTarget = {
     key: string;
     serverId: string | null;
-    runtimeMode: "docker" | "bare" | "cloud";
+    runtimeMode: "docker" | "bare";
   };
   const runtimeTargets = new Map<RuntimeAdapter, CollectedTarget>();
   const resourceKey = (target: CollectedTarget, ref: string) => `${target.key}\0${ref}`;
@@ -242,20 +259,11 @@ export async function collectProjectManifest(
     resolved: Awaited<ReturnType<typeof resolveDeploymentRuntime>>,
     dep: Deployment,
   ): CollectedTarget => {
-    const runtimeMode =
-      resolved.runtime.name === "cloud"
-        ? "cloud"
-        : resolved.runtime.name === "bare"
-          ? "bare"
-          : "docker";
+    const runtimeMode = resolved.runtime.name === "bare" ? "bare" : "docker";
     return {
       key:
         resolved.hostPortTarget?.targetKey ??
-        (resolved.serverId
-          ? `server:${resolved.serverId}`
-          : runtimeMode === "cloud"
-            ? `cloud:${((dep.meta ?? {}) as DeploymentMeta).cloudDockerWorkspace?.workspaceId ?? dep.containerId ?? ((dep.meta ?? {}) as DeploymentMeta).workspaceId ?? dep.id}`
-            : `local:${runtimeMode}`),
+        (resolved.serverId ? `server:${resolved.serverId}` : `local:${runtimeMode}`),
       serverId: resolved.serverId,
       runtimeMode,
     };
@@ -328,6 +336,24 @@ export async function collectProjectManifest(
     });
   };
 
+  const pushVolume = (
+    name: string,
+    runtime: DockerRuntime,
+    labelPrefix: string,
+    target: CollectedTarget,
+  ) => {
+    const key = resourceKey(target, name);
+    if (seenVolumes.has(key)) return;
+    seenVolumes.add(key);
+    resources.push({
+      type: "volume",
+      ref: name,
+      label: `${labelPrefix} volume ${name}`,
+      runtime,
+      ...targetFields(target),
+    });
+  };
+
   /** When wipeVolumes=true, enumerate named volumes attached to this container
    *  and add them as separate cleanup resources. Must run BEFORE the container
    *  is destroyed - once the container is gone, the volume names are lost. */
@@ -347,22 +373,88 @@ export async function collectProjectManifest(
       `inspect volumes ${labelPrefix}`,
     );
     for (const name of names) {
-      const key = resourceKey(target, name);
-      if (seenVolumes.has(key)) continue;
-      seenVolumes.add(key);
-      resources.push({
-        type: "volume",
-        ref: name,
-        label: `${labelPrefix} volume ${name}`,
-        runtime,
-        ...targetFields(target),
-      });
+      pushVolume(name, runtime, labelPrefix, target);
     }
   };
 
   // ── Deployment containers + images + service containers ────────────
   const { rows: allDeps } = await repos.deployment.listByProject(project.id, { perPage: 1000 });
+  // The subscription's server exists independently of this project. With no
+  // deployment history, a managed draft has never written containers or routes
+  // there. Its configured domains are only desired state, not remote resources.
+  if (project.workspaceId && allDeps.length === 0) {
+    return { projectId: project.id, projectCleanup: true, wipeVolumes,
+      organizationId: project.organizationId, resources: [] };
+  }
   const seenImages = new Set<string>();
+  for (const dep of allDeps) {
+    const host = (dep.meta as DeploymentMeta | null)?.managedServer;
+    if (host && (host.projectId !== project.id || host.workspaceId !== dockerBinding?.workspaceId ||
+        (host.ownerWorkspaceId ?? null) !== (dockerBinding?.ownerWorkspaceId ?? null))) {
+      throw new Error("Cloud Docker cleanup target does not match the project's owned workspace");
+    }
+  }
+
+  const managedRuntimes = new Map<"docker" | "bare", RuntimeAdapter>();
+  let managedHostMissing = false;
+  if (dockerBinding?.workspaceId) {
+    // Inventory the owned host even when a failed deployment saved no process ID.
+    // Sidecars always use Docker; a bare main app also needs its process inventory.
+    const modes: Array<"docker" | "bare"> = ["docker"];
+    if (project.runtimeMode === "bare" || allDeps.some(dep => (dep.meta as DeploymentMeta)?.runtimeMode === "bare"))
+      modes.push("bare");
+    try {
+      for (const runtimeMode of modes) {
+        const resolved = await resolveDeploymentPlatform({
+          deployTarget: "cloud", managedWorkspaceId: project.workspaceId ?? undefined,
+          serverId: project.serverId ?? undefined, runtimeMode,
+          managedServer: { projectId: project.id, workspaceId: dockerBinding.workspaceId,
+            ownerWorkspaceId: dockerBinding.ownerWorkspaceId },
+        }, { organizationId: project.organizationId });
+        const runtime = resolved.platform.runtime;
+        resolvedRuntimes.add(runtime);
+        if (!(runtime instanceof CloudDockerRuntime) && !(runtime instanceof BareRuntime))
+          throw new Error("Managed server cleanup resolved to an unexpected runtime");
+        // Only the scoped provider's host read can establish that a VM is gone.
+        // A missing container, stopped host or failed Docker bridge cannot.
+        if (runtime instanceof CloudDockerRuntime) {
+          try {
+            await withTimeout(runtime.connection.state(), INSPECT_TIMEOUT_MS,
+              "inspect managed server for cleanup");
+          } catch (error) {
+            if ((error as { status?: number })?.status !== 404) throw error;
+            managedHostMissing = true;
+          }
+          if (!managedHostMissing) {
+            // A failed first deployment may never have opened its Docker bridge.
+            // Connect only to the existing running host; never resume it here.
+            await withTimeout(runtime.docker.ping(), CONNECT_TIMEOUT_MS,
+              "connect to managed server for cleanup", () => disposeRuntime(runtime));
+          }
+        }
+        const routing = resolved.platform.routing;
+        if (!(routing instanceof CloudInfraProvider)) throw new Error("Managed server routing is unavailable");
+        if (!cloudRouteContexts.length) {
+          cloudRouteContexts.push({ key: `cloud:${dockerBinding.workspaceId}`, routing });
+          for (const hostname of await routing.listProjectRouteHostnames()) pushRoute(hostname, `cloud route ${hostname}`);
+        }
+        if (managedHostMissing) {
+          // Pages/routes outlive their source VM, so retain their ownership-checked
+          // cleanup above, but never reconnect to or recreate the deleted host.
+          disposeRuntime(runtime);
+          resolvedRuntimes.delete(runtime);
+          break;
+        }
+        if (runtime instanceof DockerRuntime) dockerRuntimes.add(runtime);
+        managedRuntimes.set(runtimeMode, runtime);
+        runtimeTargets.set(runtime, { key: `server:${project.serverId}`, serverId: project.serverId, runtimeMode });
+      }
+    } catch (error) {
+      observeCaughtError(error, "platform/engine/modules/projects/project-cleanup.service");
+      for (const opened of resolvedRuntimes) disposeRuntime(opened);
+      throw new Error(`Managed server cleanup could not confirm project ownership: ${safeErrorMessage(error)}`);
+    }
+  }
 
   /**
    * An `image_ref` column can hold EITHER a Docker tag or a host DIRECTORY — a
@@ -397,7 +489,7 @@ export async function collectProjectManifest(
     // Only Docker holds images. Bare has no removeImage at all, so a tag reaching
     // here on a bare runtime is a no-op we should say out loud rather than drop.
     if (!(runtime instanceof DockerRuntime)) {
-      console.warn(`[cleanup] skipping image ${ref}: ${runtime.name} runtime cannot remove images`);
+      errorDiagnostics.warn("platform/engine/modules/projects/project-cleanup.service", `[cleanup] skipping image ${ref}: ${runtime.name} runtime cannot remove images`);
       return;
     }
     // Registry/adopted images are shared daemon cache, not deployment-owned
@@ -410,14 +502,25 @@ export async function collectProjectManifest(
 
   const clusterRuntimes = new Map<string, Awaited<ReturnType<typeof resolveDeploymentRuntime>>>();
   for (const dep of allDeps) {
-    const dockerHost = (dep.meta as DeploymentMeta | null)?.cloudDockerWorkspace;
-    if (dockerHost) {
-      if (dockerHost.projectId !== project.id || dockerHost.workspaceId !== dockerBinding?.workspaceId) {
-        throw new Error("Cloud Docker cleanup target does not match the project's owned workspace");
+    const managedHost = (dep.meta as DeploymentMeta | null)?.managedServer;
+    if (managedHost) {
+      if (managedHostMissing) continue;
+      const mode = (dep.meta as DeploymentMeta).runtimeMode === "bare" ? "bare" : "docker";
+      const runtime = managedRuntimes.get(mode);
+      const docker = managedRuntimes.get("docker");
+      if (!runtime || !docker) throw new Error("Managed project cleanup is missing its runtime");
+      const target = runtimeTargets.get(runtime)!;
+      if (dep.containerId) pushContainer(dep.containerId, runtime, "deployment", target);
+      if (dep.imageRef) pushImageOrArtifact(dep.imageRef, runtime, "deployment artifact", target);
+      for (const row of await repos.service.listByDeployment(dep.id)) {
+        const serviceRuntime = row.containerId && row.containerId === dep.containerId ? runtime : docker;
+        const serviceTarget = runtimeTargets.get(serviceRuntime)!;
+        if (row.containerId) {
+          await pushVolumesForContainer(row.containerId, serviceRuntime, "service", serviceTarget);
+          pushContainer(row.containerId, serviceRuntime, "service", serviceTarget);
+        }
+        if (row.imageRef) pushImageOrArtifact(row.imageRef, serviceRuntime, "service artifact", serviceTarget);
       }
-      // Full project teardown removes the VM and its entire disk after its
-      // routes. Individual Docker deletes add no coverage, and would require
-      // starting a VM that billing or the customer deliberately stopped.
       continue;
     }
     // Fast-fail: if this deployment targets a server that's UNREACHABLE right
@@ -427,10 +530,10 @@ export async function collectProjectManifest(
     // and the delete still completes. Skip entirely if the server was removed.
     {
       const meta = (dep.meta ?? {}) as DeploymentMeta;
-      const serverId = meta.serverId;
+      const serverId = meta.managedWorkspaceId || meta.deployTarget === "cloud" ? undefined : meta.serverId;
       if (serverId && !(await reachProbe.isReachable(serverId))) {
         const server = await repos.server.getInOrganization(serverId, dep.organizationId);
-        if (server) {
+        if (server?.sshHost && !server.workspaceId) {
           const mode = meta.runtimeMode === "bare" ? "bare" : "docker";
           const targetKey = server.isLocal
             ? "local"
@@ -449,7 +552,7 @@ export async function collectProjectManifest(
           const serviceRows = await repos.service.listByDeployment(dep.id);
           recordUnreachableDeployment(serverId, targetKey, mode, dep, serviceRows);
         } else {
-          console.warn(
+          errorDiagnostics.warn("platform/engine/modules/projects/project-cleanup.service",
             `[cleanup] skipping deployment ${dep.id} — server ${serverId} removed from org`,
           );
         }
@@ -495,7 +598,7 @@ export async function collectProjectManifest(
       const server = meta.serverId
         ? await repos.server.getInOrganization(meta.serverId, dep.organizationId)
         : null;
-      if (server && meta.serverId) {
+      if (server?.sshHost && !server.workspaceId && meta.serverId) {
         const serverId = meta.serverId!;
         const mode = meta.runtimeMode === "bare" ? "bare" : "docker";
         const targetKey = server.isLocal
@@ -514,7 +617,7 @@ export async function collectProjectManifest(
         });
         const serviceRows = await repos.service.listByDeployment(dep.id);
         recordUnreachableDeployment(serverId, targetKey, mode, dep, serviceRows);
-      } else if (!meta.serverId) {
+      } else if (!meta.serverId || server?.workspaceId) {
         // A local/cloud target has no removable server row that could explain
         // the failure. Silently skipping its known refs would let teardown drop
         // the only DB record for a workload/artifact we never even attempted to
@@ -530,12 +633,12 @@ export async function collectProjectManifest(
             `Could not resolve cleanup target for deployment ${dep.id}: ${safeErrorMessage(err)}`,
           );
         }
-        console.warn(
-          `[cleanup] skipping unresolvable empty deployment ${dep.id}: ${safeErrorMessage(err)}`,
+        errorDiagnostics.warn("platform/engine/modules/projects/project-cleanup.service",
+          `[cleanup] skipping unresolvable empty deployment ${dep.id}: ${safeErrorMessage(err)}`, err,
         );
       } else {
-        console.warn(
-          `[cleanup] skipping unresolvable deployment ${dep.id} (server gone or never deployed): ${safeErrorMessage(err)}`,
+        errorDiagnostics.warn("platform/engine/modules/projects/project-cleanup.service",
+          `[cleanup] skipping unresolvable deployment ${dep.id} (server gone or never deployed): ${safeErrorMessage(err)}`, err,
         );
       }
       continue;
@@ -614,21 +717,25 @@ export async function collectProjectManifest(
   // references — started by a deploy that then failed during routing, or
   // whose row was lost to a crash. This is how leaked containers ("3 for
   // one project") get cleaned, even retroactively. Sweep every docker
-  // runtime the deployments resolved to PLUS the local platform runtime
-  // (so a single-host install is swept even when no deployment row
-  // resolved). De-duped via pushContainer's seenContainers; best-effort +
-  // bounded (SSH can hang). A separate set keeps the networks block above
-  // from gaining a spurious local-host network resource.
-  const sweepRuntimes = new Set<RuntimeAdapter>([...dockerRuntimes, ...[...resolvedRuntimes].filter(runtime => runtime.supports("projectContainerSweep"))]);
-  const localRuntime = platform().runtime;
-  if (localRuntime instanceof DockerRuntime) {
-    sweepRuntimes.add(localRuntime);
-    runtimeTargets.set(localRuntime, { key: "local", serverId: null, runtimeMode: "docker" });
+  // runtime the deployments resolved to. A local project can also sweep the
+  // local daemon when no deployment row resolved. A remote project's missing
+  // history never authorizes execution on the control-plane host.
+  const sweepRuntimes = new Set<RuntimeAdapter>([...dockerRuntimes, ...[...resolvedRuntimes].filter(runtime => runtimeTargets.has(runtime) && runtime.supports("projectContainerSweep"))]);
+  if (!project.workspaceId && platform().target !== "cloud") {
+    const localTarget = !project.serverId ||
+      (await repos.server.getInOrganization(project.serverId, project.organizationId))?.isLocal;
+    if (localTarget) {
+      const localRuntime = platform().runtime;
+      if (localRuntime instanceof DockerRuntime) {
+        sweepRuntimes.add(localRuntime);
+        runtimeTargets.set(localRuntime, { key: "local", serverId: null, runtimeMode: "docker" });
+      }
+    }
   }
   for (const docker of sweepRuntimes) {
     const target = runtimeTargets.get(docker);
     if (!target) {
-      console.warn(`[cleanup] skipping unlocated runtime sweep for project ${project.id}`);
+      errorDiagnostics.warn("platform/engine/modules/projects/project-cleanup.service", `[cleanup] skipping unlocated runtime sweep for project ${project.id}`);
       continue;
     }
     if (!docker.supports("projectContainerSweep") || !docker.listProjectContainerIds) continue;
@@ -643,6 +750,19 @@ export async function collectProjectManifest(
       pushContainer(id, docker, "orphan container", target);
     }
   }
+
+  // Claimed persistent volumes can survive a failed deploy without any container.
+  // Enumerate them only on an explicit wipe, after confirming the owned host.
+  if (wipeVolumes)
+    for (const runtime of dockerRuntimes) {
+      const target = runtimeTargets.get(runtime);
+      if (!target) throw new Error("Volume cleanup has no owned target");
+      const names = await authoritativeRead(
+        ownedProjectVolumeNames(runtime, project.id),
+        "inspect managed project volumes",
+      );
+      for (const name of names) pushVolume(name, runtime, "project", target);
+    }
 
   // ── Adopted-container sweep (identity-based, not label-based) ─────
   // A migration can adopt a container IN PLACE, and docker labels are immutable
@@ -715,101 +835,6 @@ export async function collectProjectManifest(
     }
   }
 
-  // ── Cloud workspace (the canonical Oblien binding) ────────────────
-  // `project.cloudWorkspaceId` is the CURRENT workspace this project
-  // deploys to. Deployment rows may reference OLD workspaces (re-provisioned)
-  // or none at all (provision succeeded but no deploy row reached ready),
-  // and the per-deployment runtime resolution above may have been skipped
-  // (server gone). Enumerate it explicitly so deleting the project always
-  // tears the workspace down on Oblien — fixes "deleted locally but still
-  // live on Openship Cloud". De-duped against any deployment container that
-  // already covers it.
-  const cloudWorkspaceTarget: CollectedTarget | null = cloudWorkspaceId
-    ? {
-        key: `cloud:${cloudWorkspaceId}`,
-        serverId: null,
-        runtimeMode: "cloud",
-      }
-    : null;
-  if (
-    cloudWorkspaceId &&
-    cloudWorkspaceTarget &&
-    !seenContainers.has(resourceKey(cloudWorkspaceTarget, cloudWorkspaceId))
-  ) {
-    try {
-      if (dockerBinding) {
-        const resolved = await resolveDeploymentPlatform({ deployTarget: "cloud",
-          cloudDockerWorkspace: { projectId: project.id, workspaceId: cloudWorkspaceId },
-        }, { organizationId: project.organizationId });
-        const docker = resolved.platform.runtime;
-        resolvedRuntimes.add(docker);
-        if (!(docker instanceof CloudDockerRuntime)) throw new Error("Cloud Docker cleanup resolved to an unexpected runtime");
-        cloudRouteContexts.push({ key: `cloud:${cloudWorkspaceId}`, routing: resolved.platform.routing });
-        for (const hostname of await docker.listProjectRouteHostnames()) pushRoute(hostname, `cloud route ${hostname}`);
-      }
-      // BOUNDED: this resolution mints a cloud token (cloudFetch, no native
-      // timeout). Without withTimeout a cloud-side hang would stall manifest
-      // collection while the teardown holds the deletion lock — the same hang
-      // class the SSH paths above are bounded against.
-      const { platform: cloudPlatform } = await withTimeout(
-        resolveDeploymentPlatform(
-          { deployTarget: "cloud", workspaceId: cloudWorkspaceId },
-          { organizationId: project.organizationId },
-        ),
-        INSPECT_TIMEOUT_MS,
-        `resolve cloud workspace ${cloudWorkspaceId}`,
-      );
-      // Guard against a non-cloud base resolving to local/server (a pure
-      // self-hosted project never has a cloud workspace anyway).
-      if (cloudPlatform.runtime.name === "cloud") {
-        seenContainers.add(resourceKey(cloudWorkspaceTarget, cloudWorkspaceId));
-        resources.push({
-          type: "cloud_workspace",
-          ref: cloudWorkspaceId,
-          label: `cloud workspace ${cloudWorkspaceId}`,
-          runtime: cloudPlatform.runtime,
-          ...targetFields(cloudWorkspaceTarget),
-        });
-      } else {
-        // Don't silently drop it — an orphaned workspace should be visible.
-        console.warn(
-          `[cleanup] cloud workspace ${project.cloudWorkspaceId} resolved to non-cloud runtime "${cloudPlatform.runtime.name}" — skipped`,
-        );
-      }
-    } catch (err) {
-      if (dockerBinding) {
-        for (const opened of resolvedRuntimes) disposeRuntime(opened);
-        throw new Error(`Cloud Docker cleanup could not confirm its workspace and route ownership: ${safeErrorMessage(err)}`);
-      }
-      // Two very different failures land here — distinguish them like the
-      // gone-server branch above:
-      //   • PERMANENT (org has no Openship Cloud link → owner unlinked/never
-      //     linked): we can never reach this workspace from here, so blocking
-      //     the delete forever helps nobody. Skip + warn so the project stays
-      //     deletable (the workspace may remain on Oblien; re-link to clean it).
-      //   • TRANSIENT (link exists but cloud/token-mint is down, or we timed
-      //     out above): mark unreachable so the atomicity gate KEEPS the row and
-      //     the user retries once Cloud is reachable. On an inconclusive link
-      //     check we also keep (never orphan on uncertainty).
-      const linkUserId = await resolveOrgCloudUserId(project.organizationId).catch(
-        () => "unknown" as const,
-      );
-      if (linkUserId === null) {
-        console.warn(
-          `[cleanup] cloud workspace ${project.cloudWorkspaceId} skipped — org ${project.organizationId} has no Openship Cloud link (${safeErrorMessage(err)}); workspace may remain on Oblien. Re-link to clean it up.`,
-        );
-      } else {
-        resources.push({
-          type: "unreachable",
-          ref: cloudWorkspaceId,
-          label: `cloud workspace ${cloudWorkspaceId} (cloud unreachable)`,
-          runtime: null,
-          runtimeMode: "cloud",
-        });
-      }
-    }
-  }
-
   // ── Project networks (always cleaned - they're clutter, not data) ──
   // One per docker runtime (Docker installs are per-machine), keyed off
   // project slug to match the `openship-<slug>` naming in DockerRuntime.
@@ -855,7 +880,6 @@ export async function collectProjectManifest(
   const TYPE_ORDER: Record<CleanupResource["type"], number> = {
     container: 0,
     artifact: 0,
-    cloud_workspace: 5,
     unreachable: 0,
     image: 1,
     route: 2,
@@ -867,6 +891,7 @@ export async function collectProjectManifest(
   return {
     projectId: project.id,
     projectCleanup: true,
+    wipeVolumes,
     organizationId: project.organizationId,
     resources,
     runtimes: [...resolvedRuntimes],
@@ -885,18 +910,20 @@ export async function collectProjectManifest(
  * Read-only - does NOT modify state. Cheap enough to call on modal open.
  */
 export async function previewProjectDeletion(project: Project): Promise<DeletionPreview> {
-  const services = await repos.service.listByProject(project.id).catch(() => []);
+  const services = await repos.service.listByProject(project.id, { includeArchived: true }).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/projects/project-cleanup.service"); return []; });
   const { rows: allDeps } = await repos.deployment.listByProject(project.id, { perPage: 1000 });
 
   const previewServices: DeletionPreviewService[] = [];
   const deploymentVolumes: string[] = [];
+  const ownedVolumes = new Set<string>();
+  const volumeTargets = new Set<string>();
   const networkSlugs = new Set<string>();
   // Self-hosted is a STATIC fact of the project (anything not cloud-managed), not
   // something to infer from a live runtime probe: an imported/migrated project on
   // an unreachable server would otherwise resolve to `false` and hide the
   // record-only ("Remove from Openship") delete — exactly when it's most useful.
   // The loop below only strengthens (never un-sets) this.
-  let selfHosted = !project.cloudWorkspaceId;
+  let selfHosted = !project.workspaceId;
 
   // Map service id → its container id (most recent deployment wins, which
   // matches the order rows come back in). We resolve volumes per container.
@@ -908,20 +935,32 @@ export async function previewProjectDeletion(project: Project): Promise<Deletion
   try {
   for (const dep of allDeps) {
     let runtime: RuntimeAdapter;
+    let serverId: string | null;
     try {
-      ({ runtime } = await resolveDeploymentRuntime(dep));
-    } catch {
+      ({ runtime, serverId } = await resolveDeploymentRuntime(dep));
+    } catch (diagnosticFailure) {
+      observeCaughtError(diagnosticFailure, "platform/engine/modules/projects/project-cleanup.service");
       continue;
     }
     // Later volume/container probes use this transport too. Keep it alive
     // through the preview and release every opened runtime on all exit paths.
     openedRuntimes.add(runtime);
-    if (runtime instanceof DockerRuntime) {
-      selfHosted = selfHosted || runtime.name !== "cloud";
-      networkSlugs.add(project.slug);
-    } else if (!(runtime instanceof DockerRuntime)) {
-      // Bare runtime is also self-hosted; only the cloud adapter is "managed."
-      selfHosted = selfHosted || runtime.name !== "cloud";
+    if (runtime instanceof DockerRuntime) networkSlugs.add(project.slug);
+    const volumeTarget = runtime instanceof CloudDockerRuntime ? runtime.workspaceId : serverId ?? "local";
+    if (runtime instanceof DockerRuntime && !volumeTargets.has(volumeTarget)) {
+      volumeTargets.add(volumeTarget);
+      const names = await withTimeout(
+        ownedProjectVolumeNames(runtime, project.id),
+        INSPECT_TIMEOUT_MS,
+        `preview managed project volumes ${project.id}`,
+      ).catch((diagnosticFailure) => {
+        observeCaughtError(
+          diagnosticFailure,
+          "platform/engine/modules/projects/project-cleanup.service",
+        );
+        return [] as string[];
+      });
+      for (const name of names) ownedVolumes.add(name);
     }
 
     if (dep.containerId && runtime instanceof DockerRuntime) {
@@ -929,7 +968,7 @@ export async function previewProjectDeletion(project: Project): Promise<Deletion
         runtime.inspectNamedVolumes(dep.containerId),
         INSPECT_TIMEOUT_MS,
         `preview volumes ${dep.containerId}`,
-      ).catch(() => [] as string[]);
+      ).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/projects/project-cleanup.service"); return [] as string[]; });
       for (const v of vols) deploymentVolumes.push(v);
     }
 
@@ -950,7 +989,7 @@ export async function previewProjectDeletion(project: Project): Promise<Deletion
         runtime.listAllContainers(),
         INSPECT_TIMEOUT_MS,
         `preview host containers ${project.id}`,
-      ).catch(() => [] as Awaited<ReturnType<DockerRuntime["listAllContainers"]>>);
+      ).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/projects/project-cleanup.service"); return [] as Awaited<ReturnType<DockerRuntime["listAllContainers"]>>; });
       if (containers.length > 0) {
         const matches = resolveLiveServiceState({
           services: services.map((s) => ({ id: s.id, name: s.name })),
@@ -979,7 +1018,7 @@ export async function previewProjectDeletion(project: Project): Promise<Deletion
         link.runtime.inspectNamedVolumes(link.containerId),
         INSPECT_TIMEOUT_MS,
         `preview volumes ${link.containerId}`,
-      ).catch(() => []);
+      ).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/projects/project-cleanup.service"); return []; });
     }
     previewServices.push({
       id: svc.id,
@@ -990,8 +1029,11 @@ export async function previewProjectDeletion(project: Project): Promise<Deletion
     });
   }
 
-  const totalVolumes =
-    deploymentVolumes.length + previewServices.reduce((n, s) => n + s.volumes.length, 0);
+  const attachedVolumes = new Set([...deploymentVolumes, ...previewServices.flatMap(service => service.volumes)]);
+  for (const name of ownedVolumes) {
+    if (!attachedVolumes.has(name)) deploymentVolumes.push(name);
+  }
+  const totalVolumes = new Set([...attachedVolumes, ...ownedVolumes]).size;
 
   return {
     projectId: project.id,
@@ -1040,18 +1082,20 @@ export async function collectDeploymentManifest(
   opts: DeploymentCleanupOpts,
 ): Promise<CleanupManifest> {
   const resources: CleanupResource[] = [];
-  const serviceRows = await repos.service.listByDeployment(dep.id).catch(() => []);
+  const serviceRows = await repos.service.listByDeployment(dep.id).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/projects/project-cleanup.service"); return []; });
   const serviceContainerIds = serviceRows
     .map((r) => r.containerId)
     .filter((id): id is string => !!id);
   const containerIds = [
-    ...new Set(
-      serviceContainerIds.length > 0
+    ...new Set([
+      ...(serviceContainerIds.length > 0
         ? serviceContainerIds
         : dep.containerId
           ? [dep.containerId]
-          : [],
-    ),
+          : []),
+      // Runtime roles (workers, schedulers) die with the release that owns them.
+      ...(dep.roleContainers ?? []).map((ref) => ref.containerId).filter((id) => !!id),
+    ]),
   ];
 
   // A project-less deployment has no retained releases to protect, so the keep
@@ -1065,7 +1109,7 @@ export async function collectDeploymentManifest(
           // Fail CLOSED: an unresolvable keep set must not license destroying a
           // live release. Cleanup is retried by the image GC sweep; a deleted
           // container is not.
-          console.error(`[CLEANUP] ${dep.id}: keep set failed, protecting everything:`, err);
+          errorDiagnostics.error("platform/engine/modules/projects/project-cleanup.service", `[CLEANUP] ${dep.id}: keep set failed, protecting everything:`, err);
           return null;
         })
       : { images: new Set<string>(), containers: new Set<string>() };
@@ -1084,7 +1128,8 @@ export async function collectDeploymentManifest(
   let runtime: RuntimeAdapter | null = null;
   try {
     runtime = (await resolveDeploymentRuntime(dep)).runtime;
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "platform/engine/modules/projects/project-cleanup.service");
     return { projectId: dep.projectId, organizationId: dep.organizationId, resources };
   }
 
@@ -1148,7 +1193,6 @@ const CLEANUP_PHASES: ReadonlyArray<ReadonlySet<CleanupResource["type"]>> = [
   new Set(["route"]),
   new Set(["volume"]),
   new Set(["network"]),
-  new Set(["cloud_workspace"]),
 ];
 
 /**
@@ -1230,10 +1274,10 @@ export async function executeCleanup(
       }
       for (let i = 0; i < resources.length; i += concurrency) {
         const batch = resources.slice(i, i + concurrency);
-        const settled = await Promise.allSettled(
+        const settled = await observedAllSettled(
           batch.map((resource) =>
             destroyResource(resource, routeContexts, manifest.organizationId),
-          ),
+          ), "platform/engine/modules/projects/project-cleanup.service",
         );
 
         for (let j = 0; j < settled.length; j++) {
@@ -1257,8 +1301,9 @@ export async function executeCleanup(
       for (const runtime of new Set(manifest.runtimes ?? [])) {
         if (!runtime.cleanupProject) continue;
         result.total++;
-        try { await runtime.cleanupProject(manifest.projectId); result.succeeded++; }
-        catch (error) { result.failed.push({ type: "container", ref: manifest.projectId, label: "Cluster project namespace", error: safeErrorMessage(error) }); }
+        try { await runtime.cleanupProject(manifest.projectId, { wipeVolumes: manifest.wipeVolumes }); result.succeeded++; }
+        catch (error) {
+          observeCaughtError(error, "platform/engine/modules/projects/project-cleanup.service"); result.failed.push({ type: "container", ref: manifest.projectId, label: "Project storage and namespace", error: safeErrorMessage(error) }); }
       }
     }
     // Claims are a resource too. Reclaim them only after ALL workload and route
@@ -1285,6 +1330,7 @@ export async function executeCleanup(
           }
           result.succeeded += 1;
         } catch (error) {
+          observeCaughtError(error, "platform/engine/modules/projects/project-cleanup.service");
           result.failed.push({
             ref: routeContext.key,
             label: `host-port claims on ${routeContext.key}`,
@@ -1336,6 +1382,7 @@ async function destroyResource(
   try {
     await attempt();
   } catch (error) {
+    observeCaughtError(error, "platform/engine/modules/projects/project-cleanup.service");
     // A settled rejection may be transient and is safe to retry once.
     await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
     await attempt();
@@ -1349,11 +1396,6 @@ async function destroyResourceOnce(
 ): Promise<void> {
   switch (resource.type) {
     case "container": {
-      if (!resource.runtime) return;
-      await resource.runtime.destroy(resource.ref);
-      return;
-    }
-    case "cloud_workspace": {
       if (!resource.runtime) return;
       await resource.runtime.destroy(resource.ref);
       return;
@@ -1383,12 +1425,20 @@ async function destroyResourceOnce(
       // continued serving the hostname. Isolate failures per target: stopping at
       // the first broken edge leaves every later (possibly healthy) edge dirty.
       const failures: string[] = [];
-      const targetResults = await Promise.allSettled(
-        routeContexts.map(({ routing }) => routing.removeRoute(resource.ref)),
+      let foreignRoute = false;
+      const targetResults = await observedAllSettled(
+        routeContexts.map(({ routing }) =>
+          routing.removeProjectRoute
+            ? routing.removeProjectRoute(resource.ref)
+            : routing.removeRoute(resource.ref),
+        ),
+        "platform/engine/modules/projects/project-cleanup.service",
       );
       for (const [index, result] of targetResults.entries()) {
         if (result.status === "rejected") {
           failures.push(`${routeContexts[index]!.key}: ${safeErrorMessage(result.reason)}`);
+        } else if (result.value === "foreign") {
+          foreignRoute = true;
         }
       }
       // Then the Cloud edge record, which is a SEPARATE resource for a managed
@@ -1401,13 +1451,16 @@ async function destroyResourceOnce(
       // still failed and the project row is therefore staying alive. The retry
       // will release it after every target has converged.
       const providerOwnsRelease = routeContexts.length > 0 && routeContexts.every(context => context.key.startsWith("cloud:"));
-      if (organizationId && failures.length === 0 && !providerOwnsRelease) {
+      // A migrated hostname may now belong to another active project. Preserve
+      // that provider route even when historical self-hosted targets were cleaned.
+      if (organizationId && failures.length === 0 && !providerOwnsRelease && !foreignRoute) {
         try {
           const released = await releaseManagedHostnames([resource.ref], { organizationId });
           if (released.failures.length > 0) {
             failures.push(`cloud edge: ${released.failures.join(", ")}`);
           }
         } catch (error) {
+          observeCaughtError(error, "platform/engine/modules/projects/project-cleanup.service");
           failures.push(`cloud edge: ${safeErrorMessage(error)}`);
         }
       }
@@ -1423,7 +1476,11 @@ async function destroyResourceOnce(
     }
     case "network": {
       if (!resource.runtime || !(resource.runtime instanceof DockerRuntime)) return;
-      await resource.runtime.removeNetwork(resource.ref);
+      if (resource.runtime instanceof CloudDockerRuntime) {
+        await resource.runtime.removeProjectNetwork(resource.ref);
+      } else {
+        await resource.runtime.removeNetwork(resource.ref);
+      }
       return;
     }
   }

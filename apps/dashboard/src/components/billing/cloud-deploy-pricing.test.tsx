@@ -15,6 +15,7 @@ import { BillingUsage } from "./BillingUsage";
 import { BillingCapacity } from "./BillingCapacity";
 
 const mocks = vi.hoisted(() => ({ state: vi.fn(), get: vi.fn(), post: vi.fn(), deploy: vi.fn(), toast: vi.fn() }));
+vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: vi.fn() }) }));
 vi.mock("@/lib/api/billing", () => ({ billingApi: { getBillingState: mocks.state } }));
 vi.mock("@/lib/api/client", async (original) => ({ ...await original<typeof import("@/lib/api/client")>(), api: { get: mocks.get, post: mocks.post } }));
 vi.mock("./UsageChart", () => ({ UsageChart: ({ buckets }: { buckets: unknown }) => <div data-testid="chart">{JSON.stringify(buckets)}</div> }));
@@ -44,7 +45,7 @@ function Harness() {
   const showPricing = useCloudDeployPricing();
   const [name, setName] = useState("My configured project");
   const deploy = async () => {
-    try { await mocks.deploy(); } catch (error) { if (!showPricing(error)) mocks.toast(error); }
+    try { await mocks.deploy(); } catch (error) { if (!showPricing(error, () => mocks.deploy())) mocks.toast(error); }
   };
   return <>
     <input aria-label="Project name" value={name} onChange={(event) => setName(event.target.value)} />
@@ -89,6 +90,22 @@ afterEach(async () => {
 });
 
 describe("deployment plan selection", () => {
+  it("retries after an entitlement refresh and keeps configuration when the retry fails", async () => {
+    await render();
+    await click("Deploy");
+    mocks.state.mockResolvedValue(paid);
+    await click(copy.deployGate.checkPlan);
+    mocks.deploy.mockRejectedValueOnce(new Error("Server is still provisioning"));
+    await click(copy.workspaces.retryDeployment);
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(document.body.textContent).toContain("Server is still provisioning");
+    expect(container.querySelector("input")?.value).toBe("My configured project");
+    mocks.deploy.mockResolvedValueOnce({ deploymentId: "retry-deploy" });
+    await click(copy.workspaces.retryDeployment);
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(mocks.deploy).toHaveBeenCalledTimes(3);
+  });
+
   it("waits for Deploy, preserves project settings on dismissal, and allows a later retry", async () => {
     await render();
     await click("Save configuration");
@@ -116,7 +133,7 @@ describe("deployment plan selection", () => {
     expect(checkoutTab.opener).toBeNull();
     expect(checkoutTab.location.href).toBe("about:blank");
     expect(mocks.post).toHaveBeenCalledTimes(1);
-    expect(mocks.post).toHaveBeenCalledWith("billing/subscription", expect.objectContaining({ planTierId: "starter", interval: "monthly", idempotencyKey: expect.any(String) }));
+    expect(mocks.post).toHaveBeenCalledWith("billing/subscription", expect.objectContaining({ planTierId: "starter", interval: "annual", idempotencyKey: expect.any(String) }));
     await act(async () => resolveCheckout({ data: { checkoutUrl: "https://checkout.example.test/session" } }));
     expect(checkoutTab.location.href).toBe("https://checkout.example.test/session");
     expect(container.querySelector("input")?.value).toBe("My configured project");
@@ -126,11 +143,28 @@ describe("deployment plan selection", () => {
     mocks.state.mockResolvedValue(paid);
     await click(copy.deployGate.checkPlan);
     expect(document.body.textContent).toContain(copy.deployGate.ready);
-    await click(copy.deployGate.close);
     mocks.deploy.mockResolvedValueOnce({ deploymentId: "paid-deploy" });
-    await click("Deploy");
+    await click(copy.workspaces.retryDeployment);
     expect(document.querySelector('[role="dialog"]')).toBeNull();
     expect(mocks.deploy).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps recovery open during one continuation when Retry is clicked twice", async () => {
+    await render();
+    await click("Deploy");
+    mocks.state.mockResolvedValue(paid);
+    await click(copy.deployGate.checkPlan);
+    let complete!: (value: unknown) => void;
+    mocks.deploy.mockReturnValueOnce(new Promise((resolve) => { complete = resolve; }));
+    await act(async () => {
+      button(copy.workspaces.retryDeployment).click();
+      button(copy.workspaces.retryDeployment).click();
+    });
+    expect(mocks.deploy).toHaveBeenCalledTimes(2);
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    await act(async () => complete({ deploymentId: "paid-deploy" }));
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(container.querySelector("input")?.value).toBe("My configured project");
   });
 
   it("offers a secure checkout link when popups are blocked, without navigating the project", async () => {
@@ -179,12 +213,18 @@ describe("deployment plan selection", () => {
   });
 
   it("uses the selected interval's live price and credits while build limits stay monthly", async () => {
+    // An older saved plan can still have a separate monthly time limit.
+    mocks.get.mockResolvedValue({ data: { locale: "en", annual: { enabled: true, monthsFree: 0 }, ui: pricingUi("en"),
+      plans: plans.map(plan => ({ ...plan, limits: { ...plan.limits, buildMinutesPerMonth: 3000 } })) } });
     await render();
     await click("Deploy");
-    expect(document.body.textContent).toContain("1,234 credits / billing cycle");
+    await click(copy.pricing.monthly);
+    expect(document.querySelector('[role="note"]')?.textContent).toContain("Hobby: 1,234");
+    expect(document.querySelector<HTMLDetailsElement>('[role="dialog"] details')?.open).toBe(false);
+    expect(document.querySelectorAll('[role="dialog"] [role="note"]')).toHaveLength(1);
     await click(copy.pricing.annual);
     expect(document.body.textContent).toContain("$150");
-    expect(document.body.textContent).toContain("14,555 credits / billing cycle");
+    expect(document.querySelector('[role="note"]')?.textContent).toContain("Hobby: 14,555");
     expect(document.body.textContent).toContain("3,000 min / month");
     await click("Choose Hobby");
     expect(mocks.post.mock.calls[0]![1].interval).toBe("annual");
@@ -236,26 +276,21 @@ describe("readable Cloud usage", () => {
   it("does not advertise the legacy free build limit as usable Cloud compute", async () => {
     await render(<BillingCapacity state={free} />);
     expect(container.textContent).toContain(copy.onboarding.workspaceDescription);
-    expect(container.textContent).toContain(copy.onboarding.planRequired);
+    expect(container.querySelector('a[href="/billing/plans"]')).not.toBeNull();
     expect(container.textContent).not.toContain("500");
   });
-  it("shows actual resource measurements and whole credit totals without fabricated resource costs", async () => {
+  it("shows actual resource measurements without attributing credits to individual resources", async () => {
     mocks.get.mockResolvedValue({ data: { usage: {
       buckets: [{ timestamp: "2026-09-18T00:00:00Z", credits: 125.5 }],
       totals: { vcpu_hours: 2, gb_hours: 4, disk_io_gb: 0.25, network_gb: 1.5, credits: 125.5 },
     } } });
     await render(<BillingUsage state={paid} />);
-    expect(container.textContent).not.toContain("125.5");
-    expect(container.textContent).toContain("2 vCPU-hours");
-    expect(container.textContent).toContain("4 GB-hours");
-    expect(container.textContent).toContain("0.25 GB");
+    expect(container.querySelector('[aria-live="polite"]')?.textContent).toContain("125.5");
+    const measurements = [...container.querySelectorAll("tbody td")].map(cell => cell.textContent);
+    expect(measurements).toEqual(["2vCPU-hours", "4GB-hours", "0.25GB", "1.5GB"]);
     expect(container.textContent).toContain(copy.resourcesGuide.diskHint);
     expect(container.querySelector("table")?.textContent).not.toContain("Credits");
     expect(container.querySelector("table")?.textContent).not.toContain("%");
-    const accounting = container.querySelector("details")!;
-    expect(accounting.open).toBe(false);
-    await act(async () => { accounting.open = true; accounting.dispatchEvent(new Event("toggle")); });
-    expect(container.textContent).toContain("125.5");
     const requestedEnd = new Date(mocks.get.mock.calls[0]![1].params.to).getTime();
     expect(requestedEnd).toBeLessThanOrEqual(Date.now());
     expect(requestedEnd).toBeGreaterThan(Date.now() - 10_000);

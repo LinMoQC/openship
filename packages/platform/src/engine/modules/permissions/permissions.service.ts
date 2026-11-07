@@ -1,4 +1,5 @@
-import type { PermissionGrantInput, InviteWithGrantsInput } from "@repo/contracts";
+import { reportCaughtError as observeCaughtError, diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
+import type { PermissionGrantInput, InviteWithGrantsInput, PermissionAccessRequest, PermissionAccessRequestInput } from "@repo/contracts";
 import { assertAccountMutation, assertOrgAdmin, createInvitationWithGrants, materializeForUser, lockOrganization } from "./organization.service";
 import { db, schema, eq, and, type DatabaseTransaction } from "@repo/db";
 import { createResourceGrantRepo } from "@repo/db/repos";
@@ -48,6 +49,18 @@ import {
 
 // ─── Constants + helpers ────────────────────────────────────────────────────
 
+/** Identity-gated, stateless preview. Only the user's ordinary consent flow can grant access. */
+export async function requestAccess(ctx: ExecutionContext, input: PermissionAccessRequestInput): Promise<PermissionAccessRequest> {
+  return {
+    kind: "permission_request", granted: false,
+    reason: input.reason, access: input.access,
+    organizationId: ctx.organizationId,
+    clientId: ctx.principalKind === "oauth" && ctx.sessionId?.startsWith("oauth:")
+      ? ctx.sessionId.slice("oauth:".length) : null,
+    reviewPath: ctx.principalKind === "pat" ? "/settings?tab=tokens" : "/settings?tab=mcp",
+  };
+}
+
 // The grantable surface lives in lib/grantable-types.ts so the satisfiability
 // ratchet test can bind to the same list this endpoint validates against — a copy
 // would let the two drift, which is how an unsatisfiable type gets offered.
@@ -88,7 +101,7 @@ async function resourceBelongsToOrg(
         // proxy stays the authoritative existence gate. Mirrors the permission
         // resolver's cloud fallback.
         if (env.CLOUD_MODE || fixedScope) return false;
-        const linked = await resolveOrgCloudUserId(organizationId).catch(() => null);
+        const linked = await resolveOrgCloudUserId(organizationId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/permissions/permissions.service"); return null; });
         return !!linked;
       }
       case "server":
@@ -107,7 +120,8 @@ async function resourceBelongsToOrg(
         // caller short-circuits the "*" id before reaching here.
         return false;
     }
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "platform/engine/modules/permissions/permissions.service");
     return false;
   }
 }
@@ -124,7 +138,7 @@ export async function orgMeta(ctx: ExecutionContext) {
   const org = await repos.organization.findById(organizationId);
   const members = await repos.member
     .listByOrganization(organizationId)
-    .catch(() => []);
+    .catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/permissions/permissions.service"); return []; });
   return {
       organizationId,
       isTeam: org?.isTeam === true,
@@ -203,7 +217,8 @@ export async function listResources(ctx: ExecutionContext, input: { type: string
   }
 
   if (type === "server") {
-    const list = await permittedRows(ctx, "server", await repos.server.listByOrganization(organizationId));
+    const servers = await repos.server.listByOrganization(organizationId, true);
+    const list = await permittedRows(ctx, "server", servers.filter(server => env.CLOUD_MODE === !!server.workspaceId));
     return list.map((s) => ({
         id: s.id,
         label: s.name || s.sshHost || s.id,
@@ -216,10 +231,10 @@ export async function listResources(ctx: ExecutionContext, input: { type: string
     // that has mail provisioning enabled by joining through server.
     const servers = await repos.server
       .listByOrganization(organizationId)
-      .catch(() => []);
+      .catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/permissions/permissions.service"); return []; });
     const mailRows: Array<{ id: string; label: string }> = [];
     for (const s of await permittedRows(ctx, "mail_server", servers)) {
-      const mail = await repos.mailServer.get(s.id).catch(() => null);
+      const mail = await repos.mailServer.get(s.id).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/permissions/permissions.service"); return null; });
       if (mail) {
         mailRows.push({ id: s.id, label: s.name || s.sshHost || s.id });
       }
@@ -236,6 +251,7 @@ export async function listResources(ctx: ExecutionContext, input: { type: string
       }));
   }
 
+
   if (type === "github_installation" || type === "github_repository") {
     assertOrgAdmin(ctx);
     // This branch fetches the FULL org repo/account list as the owner, so
@@ -246,7 +262,7 @@ export async function listResources(ctx: ExecutionContext, input: { type: string
     // per-member visibility filter that the github controller applies.
     const requester = await repos.member
       .find(organizationId, ctx.userId)
-      .catch(() => null);
+      .catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/permissions/permissions.service"); return null; });
     if (!requester || (requester.role !== "owner" && requester.role !== "admin")) {
       throw responseError({ error: "Forbidden" }, 403);
     }
@@ -255,18 +271,18 @@ export async function listResources(ctx: ExecutionContext, input: { type: string
     // unfiltered; per-member filtering lives only in the github controller.
     // One call yields both accounts (orgs/installations, keyed by login)
     // and repos (keyed by "owner/repo" — the exact grant resourceIds).
-    const owner = await resolveOrgOwner(organizationId).catch(() => null);
+    const owner = await resolveOrgOwner(organizationId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/permissions/permissions.service"); return null; });
     if (!owner) return [];
     const ownerCtx = buildBackgroundContext({
       userId: owner.userId,
       organizationId,
       label: "permissions:github-catalog",
     });
-    const source = await createGitHubSource(ownerCtx).catch(() => null);
+    const source = await createGitHubSource(ownerCtx).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/permissions/permissions.service"); return null; });
     if (!source) return [];
 
     if (type === "github_installation") {
-      const home = await source.getHome().catch(() => ({ accounts: [], repos: [] }));
+      const home = await source.getHome().catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/permissions/permissions.service"); return ({ accounts: [], repos: [] }); });
       return (home.accounts ?? []).map((a) => ({
           id: a.login,
           label: a.login,
@@ -280,8 +296,8 @@ export async function listResources(ctx: ExecutionContext, input: { type: string
     // surfaces. No owner → fall back to the primary-installation repos.
     const ownerParam = input.owner;
     const repoList = ownerParam
-      ? (await source.listReposForOwner(ownerParam).catch(() => null)) ?? []
-      : (await source.getHome().catch(() => ({ repos: [] }))).repos ?? [];
+      ? (await source.listReposForOwner(ownerParam).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/permissions/permissions.service"); return null; })) ?? []
+      : (await source.getHome().catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/permissions/permissions.service"); return ({ repos: [] }); })).repos ?? [];
     return repoList.map((r) => ({
         id: r.full_name,
         label: r.full_name,
@@ -325,7 +341,7 @@ export async function createTeamOrg(ctx: ExecutionContext, body: { name: string;
       body: { name, slug, userId, keepCurrentActiveOrganization: true },
     })
     .catch((err: unknown) => {
-      console.error("[create-team-org] Better Auth createOrganization failed:", err);
+      errorDiagnostics.error("platform/engine/modules/permissions/permissions.service", "[create-team-org] Better Auth createOrganization failed:", err);
       return null;
     });
 
@@ -530,7 +546,7 @@ export async function replaceGrants(ctx: ExecutionContext, body: { userId: strin
     const resourceGrants = createResourceGrantRepo(tx);
   const existing = await resourceGrants.listByMember(organizationId, body.userId);
   const existingByKey = new Map(existing.map((g) => [`${g.resourceType}:${g.resourceId}`, g]));
-  const permsKey = (p: Permission[]) => [...p].sort().join(",");
+  const permsKey = (p: readonly string[]) => [...p].sort().join(",");
 
   for (const g of existing) {
     if (!desired.has(`${g.resourceType}:${g.resourceId}`)) {
@@ -657,9 +673,8 @@ export async function listInvitations(ctx: ExecutionContext) {
  *   grants?: { resourceType, resourceId, permissions[] }[]
  * }
  *
- * One-call invite. Wraps Better Auth's inviteMember + persists
- * pending grants. On accept, the accept-invite page calls
- * /invitations/:id/materialize which upserts resource_grant rows.
+ * Creates the invitation and its pending grants through the shared service.
+ * Acceptance commits membership and resource grants in one transaction.
  *
  * For role !== "restricted", any provided grants are stored but won't
  * affect access (the permission resolver short-circuits non-restricted

@@ -1,3 +1,4 @@
+import { reportCaughtError as observeCaughtError, diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import { mkdirSync, existsSync, readFileSync, unlinkSync } from "fs";
 import { resolve, dirname, join } from "path";
 import { fileURLToPath } from "url";
@@ -9,6 +10,7 @@ import { createPgliteLock } from "./pglite-lock";
 import { awaitPgReady } from "./pg-ready";
 import { sql } from "drizzle-orm";
 import { readMigrationFiles } from "drizzle-orm/migrator";
+import { bridgeLegacyGitopsMigration } from "./legacy-migration-bridge";
 
 /**
  * Unified database type - works regardless of driver (pg or PGlite).
@@ -76,6 +78,7 @@ export async function createDatabase(input: DatabaseOptions): Promise<DatabaseCo
       if (last?.hash !== expected.hash || Number(last?.created_at) !== expected.folderMillis)
         throw new Error("The database schema does not match this Openship build");
     } catch (cause) {
+      observeCaughtError(cause, "db/connection");
       throw new Error("Database schema verification failed. Use a compatible build or explicitly apply migrations with the database owner.", { cause });
     }
   }
@@ -110,7 +113,7 @@ export async function createDatabase(input: DatabaseOptions): Promise<DatabaseCo
     // own; all this has to do is exist. Attached before the first connect so no window
     // is uncovered.
     pool.on("error", (err) => {
-      console.warn("[db] idle postgres client error (connection retired):", err.message);
+      errorDiagnostics.warn("db/connection", "[db] idle postgres client error (connection retired):", err);
     });
     _pgPool = pool;
 
@@ -128,6 +131,7 @@ export async function createDatabase(input: DatabaseOptions): Promise<DatabaseCo
       const migrationLock = await pool.connect();
       try {
         await migrationLock.query("select pg_advisory_lock($1)", [0x6f73686d]);
+        await bridgeLegacyGitopsMigration(db);
         await migrate(db, { migrationsFolder: MIGRATIONS_DIR });
       } finally {
         try { await migrationLock.query("select pg_advisory_unlock($1)", [0x6f73686d]); }
@@ -154,9 +158,9 @@ export async function createDatabase(input: DatabaseOptions): Promise<DatabaseCo
     try {
       unlinkSync(controlPath);
     } catch (err) {
-      console.warn(
+      errorDiagnostics.warn("db/connection",
         `[db] failed to remove stale pglite postmaster.pid at ${controlPath}:`,
-        err instanceof Error ? err.message : err,
+        err instanceof Error ? err.message : err, err,
       );
     }
   }
@@ -195,7 +199,10 @@ export async function createDatabase(input: DatabaseOptions): Promise<DatabaseCo
       _pgliteClient = client;
       const db = drizzle(client, { schema });
       if (options.migrations === "verify") await verifySchema(db);
-      else await migrate(db, { migrationsFolder: MIGRATIONS_DIR });
+      else {
+        await bridgeLegacyGitopsMigration(db);
+        await migrate(db, { migrationsFolder: MIGRATIONS_DIR });
+      }
       return db;
     }
     const dataDir = resolve(options.dataDir!);
@@ -209,8 +216,8 @@ export async function createDatabase(input: DatabaseOptions): Promise<DatabaseCo
     // 30s) so a hot-reload / restart handoff — where the previous process is
     // still draining + releasing the DB — reliably succeeds instead of racing a
     // 5s window (the recurring "already using the database" reload failure). A
-    // crashed predecessor is reclaimed instantly (dead pid), so this only ever
-    // waits while a LIVE predecessor is actively shutting down.
+    // crashed Linux predecessors release their kernel lock; legacy records use
+    // PID liveness. A live owner retains the wait/error path.
     await lock.acquire(dataDir, { waitMs: options.lockWaitMs ?? 30_000, pollMs: 250, takeover: options.takeover ?? false });
     clearStalePgliteControlFile(dataDir);
 
@@ -222,7 +229,10 @@ export async function createDatabase(input: DatabaseOptions): Promise<DatabaseCo
     // Run pending migrations. Drizzle wraps each migration in a transaction and
     // the lock guarantees we're the only writer, so this is atomic and race-free.
     if (options.migrations === "verify") await verifySchema(db);
-    else await migrate(db, { migrationsFolder: MIGRATIONS_DIR });
+    else {
+      await bridgeLegacyGitopsMigration(db);
+      await migrate(db, { migrationsFolder: MIGRATIONS_DIR });
+    }
 
     return db;
   }
@@ -233,7 +243,8 @@ export async function createDatabase(input: DatabaseOptions): Promise<DatabaseCo
     return Object.freeze({ db, driver: _driver, get pool() { return _pgPool; }, close });
   } catch (error) {
     try { await close(); }
-    catch (cleanupError) { throw new AggregateError([error, cleanupError], "Database initialization and cleanup failed"); }
+    catch (cleanupError) {
+      observeCaughtError(cleanupError, "db/connection"); throw new AggregateError([error, cleanupError], "Database initialization and cleanup failed"); }
     throw error;
   }
 }

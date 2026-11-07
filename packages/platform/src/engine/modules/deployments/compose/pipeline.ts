@@ -12,7 +12,11 @@
  * request includes parsed compose services.
  */
 
-import { listActiveServiceDeployments } from "@repo/platform/engine/lib/active-deployment";
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
+import {
+  findActiveDeployment,
+  listActiveServiceDeployments,
+} from "@repo/platform/engine/lib/active-deployment";
 import { repos } from "@repo/db";
 import type { Deployment, Project } from "@repo/db";
 import type {
@@ -25,10 +29,16 @@ import type {
   SystemManager,
 } from "@repo/adapters";
 import { BuildLogger } from "@repo/adapters";
+import { deploymentResourceFailure } from "../resource-failure";
+import { recordRuntimeImageReceipts } from "../../../lib/runtime-image-receipts";
 
 import type { BuildConfigSnapshotLike } from "../build-config";
 import {
   cleanupBuildArtifact,
+  beginBuildTiming,
+  completeBuildTiming,
+  finishServiceDeploymentTimings,
+  collectLogs,
   onCancelled,
   onFailure,
   onNoChanges,
@@ -42,6 +52,7 @@ import type { DeployableService } from "../../../lib/deployable-service";
 import { webhookProxyTarget } from "../../../config/index";
 
 import { buildComposeImages } from "./build.service";
+import { ServiceCutoverRecoveryError } from "./cutover-recovery";
 import { composeDeployMadeNoChanges, deployComposeServices } from "./deploy.service";
 import { COMPOSE_SENTINEL } from "../../../lib/container-ref";
 import { safeErrorMessage } from "@repo/core";
@@ -53,6 +64,11 @@ import {
   throwIfDeploymentCancelled,
 } from "../deployment-cancellation";
 import { assertExactServiceTargets } from "../exact-service-targets";
+import { strictRefreshImages } from "../pinned-artifacts";
+import { cloudCapacityFailure } from "../../../lib/cloud-capacity";
+import { retirePreviousRoleContainers } from "../role-runtime";
+import { assertRequiredServiceEnvironment } from "./required-env-preflight";
+import { deploymentArtifacts, recordDeploymentArtifacts } from "../deployment-artifacts";
 
 export interface ComposePipelineOpts {
   project: Project;
@@ -83,6 +99,7 @@ export interface ComposePipelineOpts {
   buildResources: ResourceConfig;
   runtimeResources: ResourceConfig;
   gitToken?: string;
+  gitTokenRepositories?: string[];
   /** Path to the git-credential relay helper on the build host (desktop relay).
    *  When set, service clones authenticate through it instead of a token. */
   gitCredentialHelperPath?: string;
@@ -95,6 +112,8 @@ export interface ComposePipelineOpts {
   cloneOnServer?: boolean;
   /** Outer deployment cancellation signal. */
   signal?: AbortSignal;
+  /** All image-build tasks have settled; deployment/health checks do not occupy a build slot. */
+  onBuildFinished?: () => Promise<void>;
 }
 
 async function cleanupBuiltArtifacts(
@@ -114,6 +133,7 @@ async function cleanupBuiltArtifacts(
   for (const [serviceId, imageRef] of builtImageRefs) {
     if (retainedRefs.has(imageRef)) continue;
     await cleanupBuildArtifact(runtime, imageRef).catch((err) => {
+      observeCaughtError(err, "platform/engine/modules/deployments/compose/pipeline");
       logger.log(
         `Warning: failed to clean up built service artifact ${serviceId}: ${safeErrorMessage(err)}\n`,
         "warn",
@@ -153,6 +173,7 @@ async function recordCohortAbort(opts: {
         reason: opts.failures.has(service.id) ? "build-failed" : "cohort-aborted",
       })
       .catch((err) => {
+        observeCaughtError(err, "platform/engine/modules/deployments/compose/pipeline");
         opts.logger.log(
           `Warning: could not record the aborted service "${service.name}": ${safeErrorMessage(err)}\n`,
           "warn",
@@ -180,6 +201,7 @@ async function cleanupUnusedBuiltArtifactsAfterDeployError(
   try {
     rows = await repos.service.listByDeployment(dep.id);
   } catch (err) {
+    observeCaughtError(err, "platform/engine/modules/deployments/compose/pipeline");
     logger.log(
       `Warning: could not verify which built service artifacts are unused; retaining them: ${safeErrorMessage(err)}\n`,
       "warn",
@@ -201,6 +223,7 @@ async function cleanupUnusedBuiltArtifactsAfterDeployError(
   for (const [serviceId, imageRef] of builtImageRefs) {
     if (referencedArtifacts.has(imageRef)) continue;
     await cleanupBuildArtifact(runtime, imageRef).catch((err) => {
+      observeCaughtError(err, "platform/engine/modules/deployments/compose/pipeline");
       logger.log(
         `Warning: failed to clean up unused built service artifact ${serviceId}: ${safeErrorMessage(err)}\n`,
         "warn",
@@ -236,6 +259,7 @@ export async function executeComposePipeline(opts: ComposePipelineOpts): Promise
     buildResources,
     runtimeResources,
     gitToken,
+    gitTokenRepositories,
     gitCredentialHelperPath,
     gitSsh,
     gitAmbient,
@@ -267,34 +291,21 @@ export async function executeComposePipeline(opts: ComposePipelineOpts): Promise
   if (strictScope && (dep.forceAll || !targetServiceIds?.size)) {
     throw new Error("An exclusive Compose scope cannot be empty or combined with forceAll");
   }
+  const getCurrentServices = () => repos.service.listByProject(project.id);
 
-  // Service rows can change after request-time/reconciliation validation. Do
-  // one final fail-closed check in the worker before any image build, pull, or
-  // container replacement begins.
-  const checksCloudImageRefresh =
-    snapshot.forcePullImages && runtime.name === "cloud" && !runtime.supports("dockerHost") && Boolean(project.activeDeploymentId);
-  let currentServices: Awaited<ReturnType<typeof repos.service.listByProject>> | undefined;
-  const getCurrentServices = async () => {
-    currentServices ??= await repos.service.listByProject(project.id);
-    return currentServices;
-  };
-  if ((strictScope && targetServiceIds) || checksCloudImageRefresh) {
-    const services = await getCurrentServices();
-    if (strictScope && targetServiceIds) {
-      assertExactServiceTargets(services, [...targetServiceIds]);
-    }
+  if (strictScope && targetServiceIds) {
+    assertExactServiceTargets(await getCurrentServices(), [...targetServiceIds]);
   }
-  // Read this before building too. If the ownership query is unavailable, the
-  // safe result is a failed deployment with no newly-created artifact to leak.
-  const priorCloudWorkspaceServiceIds = checksCloudImageRefresh
-    ? new Set(
-        (await listActiveServiceDeployments(project))
-          .filter((row) => Boolean(row.containerId))
-          .map((row) => row.serviceId),
-      )
-    : undefined;
+  await assertRequiredServiceEnvironment({
+    projectId: project.id,
+    dep,
+    targetServiceIds,
+    logger,
+  });
+  throwIfDeploymentCancelled(opts.signal);
   const keepProvisionedOnCancel = () => deploymentCancellationKeepsProvisioned(opts.signal);
 
+  beginBuildTiming(ctx);
   const composeBuild = await buildComposeImages({
     project,
     dep,
@@ -306,6 +317,7 @@ export async function executeComposePipeline(opts: ComposePipelineOpts): Promise
     buildEnvVars,
     buildResources,
     gitToken,
+    gitTokenRepositories,
     gitCredentialHelperPath,
     gitSsh,
     gitAmbient,
@@ -313,12 +325,23 @@ export async function executeComposePipeline(opts: ComposePipelineOpts): Promise
     targetServiceIds,
     refreshServiceIds,
     signal: opts.signal,
+    onBuildMeasured: (durationMs) => completeBuildTiming(ctx, durationMs),
   });
+  completeBuildTiming(ctx, composeBuild.durationMs);
+
+  try {
+    await opts.onBuildFinished?.();
+  } catch (error) {
+    await finishServiceDeploymentTimings(ctx);
+    await cleanupBuiltArtifacts(runtime, composeBuild.builtImageRefs, logger);
+    throw error;
+  }
 
   // Cancelled during the image phase: stop here. setDeploymentStatus below has no
   // terminal-state guard, so without this the cancelled row would be flipped back
   // to "deploying" and the services the user cancelled would start anyway.
   if (composeBuild.cancelled || opts.signal?.aborted) {
+    await finishServiceDeploymentTimings(ctx);
     if (!keepProvisionedOnCancel()) {
       await cleanupBuiltArtifacts(runtime, composeBuild.builtImageRefs, logger);
     }
@@ -328,10 +351,19 @@ export async function executeComposePipeline(opts: ComposePipelineOpts): Promise
     return;
   }
 
+  const capacityFailure = composeBuild.buildErrorCauses
+    ?.map(cause => cloudCapacityFailure(cause, project.id, buildResources)).find(Boolean);
+  if (capacityFailure) {
+    await finishServiceDeploymentTimings(ctx);
+    await cleanupBuiltArtifacts(runtime, composeBuild.builtImageRefs, logger);
+    throw capacityFailure;
+  }
+
   // An exact multi-service webhook is one coordinated rollout. If any selected
   // image failed to build, stop before the first service cutover instead of
   // updating only the successful half of the requested cohort.
   if (strictScope && composeBuild.buildFailures.size > 0) {
+    await finishServiceDeploymentTimings(ctx);
     const detail = [...composeBuild.buildFailures.values()].join("; ");
     const message = `Coordinated service deployment aborted before cutover because image preparation failed: ${detail}`;
     logger.log(`${message}\n`, "error");
@@ -344,48 +376,10 @@ export async function executeComposePipeline(opts: ComposePipelineOpts): Promise
       logger,
     });
     await cleanupBuiltArtifacts(runtime, composeBuild.builtImageRefs, logger);
-    await onFailure(ctx, message, composeBuild.durationMs);
+    await onFailure(ctx, message, composeBuild.durationMs,
+      deploymentResourceFailure({ project, message, causes: composeBuild.buildErrorCauses }));
     return;
   }
-
-  // Cloud preserves an image service's only durable disk by reusing its
-  // existing workspace. That also preserves the workspace's original image,
-  // so a forced mutable-tag refresh cannot be honoured safely there without
-  // deleting user data. Refuse the whole cohort before any service is touched;
-  // Docker remains the supported image-refresh runtime.
-  if (checksCloudImageRefresh && priorCloudWorkspaceServiceIds) {
-    const blockedIds = new Set(
-      [...composeBuild.imageRefs.keys()].filter(
-        (serviceId) =>
-          (!targetServiceIds || targetServiceIds.has(serviceId)) &&
-          !composeBuild.builtImageRefs.has(serviceId) &&
-          priorCloudWorkspaceServiceIds.has(serviceId),
-      ),
-    );
-    if (blockedIds.size > 0) {
-      const services = await getCurrentServices();
-      const blockedNames = services
-        .filter((service) => blockedIds.has(service.id))
-        .map((service) => service.name);
-      const message =
-        `Cannot refresh mutable image${blockedNames.length === 1 ? "" : "s"} for cloud service${blockedNames.length === 1 ? "" : "s"} ` +
-        `${blockedNames.join(", ")} without replacing persistent workspace data. ` +
-        "Use a self-hosted Docker target for forced image refreshes.";
-      logger.log(`${message}\n`, "error");
-      await recordCohortAbort({
-        dep,
-        services,
-        targetServiceIds,
-        failures: new Map([...blockedIds].map((id) => [id, message])),
-        reason: "cloud cannot safely refresh an existing image workspace",
-        logger,
-      });
-      await cleanupBuiltArtifacts(runtime, composeBuild.builtImageRefs, logger);
-      await onFailure(ctx, message, composeBuild.durationMs);
-      return;
-    }
-  }
-
   if (composeBuild.buildFailures.size > 0) {
     logger.log(
       `Build phase completed with ${composeBuild.buildFailures.size} failed service image${composeBuild.buildFailures.size === 1 ? "" : "s"}. Deploying available services...\n`,
@@ -394,9 +388,30 @@ export async function executeComposePipeline(opts: ComposePipelineOpts): Promise
   } else {
     logger.log("Build phase complete. Starting project service deployment...\n");
   }
-  await setDeploymentStatus(dep.id, "deploying", {
+  if (await setDeploymentStatus(dep.id, "deploying", {
     extra: { buildDurationMs: composeBuild.durationMs },
-  });
+  }) === false) {
+    await finishServiceDeploymentTimings(ctx);
+    if (!keepProvisionedOnCancel()) await cleanupBuiltArtifacts(runtime, composeBuild.builtImageRefs, logger);
+    await onCancelled(ctx, composeBuild.durationMs, { keepProvisioned: keepProvisionedOnCancel() });
+    return;
+  }
+  if (composeBuild.buildFailures.size === 0) {
+    try {
+      const services = await getCurrentServices();
+      const images = [...composeBuild.imageRefs]
+        .filter(([serviceId]) => !targetServiceIds || targetServiceIds.has(serviceId))
+        .map(([serviceId, imageRef]) => ({
+          serviceId,
+          serviceName: services.find(service => service.id === serviceId)?.name ?? "",
+          imageRef,
+        }));
+      if (images.every(image => image.serviceName)) await recordDeploymentArtifacts(dep, runtime, images);
+    } catch (error) {
+      observeCaughtError(error, "platform/engine/modules/deployments/compose/pipeline");
+      logger.log("Completed service images could not be retained for a deployment-only retry.\n", "warn");
+    }
+  }
   sessionManager.broadcastInstallPhase(dep.id, { id: "services", status: "active" });
 
   let composeResult;
@@ -422,6 +437,7 @@ export async function executeComposePipeline(opts: ComposePipelineOpts): Promise
       serverId: snapshot.serverId,
       targetServiceIds,
       strictScope,
+      retainedImages: strictRefreshImages(snapshot),
       forcePullImages: snapshot.forcePullImages,
       onArtifactActivationStart: () => {
         artifactActivationStarted = true;
@@ -435,6 +451,16 @@ export async function executeComposePipeline(opts: ComposePipelineOpts): Promise
       signal: opts.signal,
     });
   } catch (err) {
+    await finishServiceDeploymentTimings(ctx);
+    if (err instanceof ServiceCutoverRecoveryError) {
+      if (opts.signal?.aborted) {
+        await onCancelled(ctx, composeBuild.durationMs, { keepProvisioned: true });
+      } else {
+        await onFailure(ctx, err.message, composeBuild.durationMs,
+          { errorCode: "SERVICE_CUTOVER_RECOVERY_REQUIRED" }, { keepProvisioned: true });
+      }
+      return;
+    }
     if (opts.signal?.aborted) {
       // The cancel endpoint may have raced this service call. The parent owns
       // the terminal transition and cleanup; do it here once and return so the
@@ -462,12 +488,14 @@ export async function executeComposePipeline(opts: ComposePipelineOpts): Promise
           logger,
         });
       }
-      await cleanupUnusedBuiltArtifactsAfterDeployError(
+      if (!deploymentArtifacts(dep.meta)) await cleanupUnusedBuiltArtifactsAfterDeployError(
         dep,
         runtime,
         composeBuild.builtImageRefs,
         logger,
-      ).catch(() => {});
+      ).catch((diagnosticFailure) => {
+        observeCaughtError(diagnosticFailure, "platform/engine/modules/deployments/compose/pipeline");
+      });
     } else {
       logger.log(
         "Warning: service activation may have started; retaining built artifacts for reconciliation.\n",
@@ -477,16 +505,18 @@ export async function executeComposePipeline(opts: ComposePipelineOpts): Promise
     throw err;
   }
 
+  const cancelAfterCutover = async () => {
+    const preserved = keepProvisionedOnCancel() || Boolean(composeResult.cutover && !await composeResult.cutover.rollback());
+    if (!preserved) await cleanupBuiltArtifacts(runtime, composeBuild.builtImageRefs, logger);
+    await onCancelled(ctx, composeBuild.durationMs, { keepProvisioned: preserved });
+  };
   if (opts.signal?.aborted) {
-    if (!keepProvisionedOnCancel()) {
-      await cleanupBuiltArtifacts(runtime, composeBuild.builtImageRefs, logger);
-    }
-    await onCancelled(ctx, composeBuild.durationMs, {
-      keepProvisioned: keepProvisionedOnCancel(),
-    });
+    await finishServiceDeploymentTimings(ctx);
+    await cancelAfterCutover();
     return;
   }
 
+  try {
   // RECONCILING: the connection dropped after some containers started, so the
   // outcome is unknown. Must be handled BEFORE the `failed` branch and must NOT
   // go through onFailure (which destroys containers) — the containers may be
@@ -513,8 +543,10 @@ export async function executeComposePipeline(opts: ComposePipelineOpts): Promise
   );
 
   if (composeResult.status === "failed") {
-    await cleanupBuiltArtifacts(runtime, composeBuild.builtImageRefs, logger, publishedServiceIds);
-    await onFailure(ctx, composeResult.error ?? "Compose deploy failed", composeBuild.durationMs);
+    await finishServiceDeploymentTimings(ctx);
+    if (!deploymentArtifacts(dep.meta)) await cleanupBuiltArtifacts(runtime, composeBuild.builtImageRefs, logger, publishedServiceIds);
+    await onFailure(ctx, composeResult.error ?? "Compose deploy failed", composeBuild.durationMs,
+      deploymentResourceFailure({ project, message: composeResult.error ?? "", causes: composeBuild.buildErrorCauses }));
     return;
   }
 
@@ -528,7 +560,7 @@ export async function executeComposePipeline(opts: ComposePipelineOpts): Promise
   // the vhost was just pointed at — into the unused list, so every SUCCESSFUL
   // compose deploy `rm -rf`'d the static site it had just published, reported
   // ready, and then 404'd every request.
-  await cleanupBuiltArtifacts(runtime, composeBuild.builtImageRefs, logger, publishedServiceIds);
+  if (!deploymentArtifacts(dep.meta)) await cleanupBuiltArtifacts(runtime, composeBuild.builtImageRefs, logger, publishedServiceIds);
 
   // Routing failures are best-effort (domains are optional — never fail the
   // deploy). Fold them into the SAME top-level "action required" signal the
@@ -538,7 +570,9 @@ export async function executeComposePipeline(opts: ComposePipelineOpts): Promise
     composeResult.routeWarnings?.length || composeResult.tlsPendingDomains?.length
       ? routeIssuesWarning(composeResult.routeWarnings ?? [], composeResult.tlsPendingDomains ?? [])
       : undefined;
-  const successWarning = routingWarning ?? composeResult.warning;
+  const successWarnings = [composeResult.warning, routingWarning].filter(
+    (warning): warning is string => typeof warning === "string" && warning.length > 0,
+  );
   const decisionPending = composeResult.summary.failed > 0 && composeResult.summary.successful > 0;
   sessionManager.broadcastInstallPhase(dep.id, { id: "ready", status: "done" });
 
@@ -549,25 +583,71 @@ export async function executeComposePipeline(opts: ComposePipelineOpts): Promise
   // the live ones still serving.
   if (composeDeployMadeNoChanges(composeResult)) {
     await onNoChanges(ctx, {
-      warningMessage: successWarning,
+      warningMessage: successWarnings.join(" · ") || undefined,
       durationMs: composeBuild.durationMs,
     });
     return;
   }
 
+  // A single-app predecessor's roles are not part of this stack. Retire them
+  // before the terminal event and log persistence, matching single-app rollout.
+  // A cleanup failure is advisory: the replacement services are already live.
+  const previous = project.activeDeploymentId
+    ? await findActiveDeployment(project).catch((err) => {
+        observeCaughtError(err, "platform/engine/modules/deployments/compose/pipeline");
+        return null;
+      })
+    : null;
+  throwIfDeploymentCancelled(opts.signal);
+  const roleWarning = await retirePreviousRoleContainers({
+    previous,
+    currentDeploymentId: dep.id,
+    log: (message, level) => logger.log(`${message}\n`, level),
+  }).catch((err) => {
+    observeCaughtError(err, "platform/engine/modules/deployments/compose/pipeline");
+    return null;
+  });
+  if (roleWarning) successWarnings.push(roleWarning);
+  const warningMessage = [...new Set(successWarnings)].join(" · ") || undefined;
+  if (warningMessage) {
+    logger.log(`Deployment completed with warnings: ${warningMessage}\n`, "warn");
+  }
+
+  if (composeResult.cutover && opts.signal?.aborted) {
+    await cancelAfterCutover();
+    return;
+  }
+  throwIfDeploymentCancelled(opts.signal);
   await onSuccess(ctx, {
     containerId: composeResult.primaryContainerId ?? COMPOSE_SENTINEL,
     url: composeResult.publicUrl,
     durationMs: composeBuild.durationMs,
-    warningMessage: successWarning,
+    warningMessage,
     decisionPending,
+    failureMeta: project.workspaceId && composeResult.summary.failed > 0 ? deploymentResourceFailure({
+      project,
+      message: composeResult.services.filter(service => service.status === "failed")
+        .map(service => service.error ?? "").join("\n"),
+      logs: ctx.resourceEvidence ?? collectLogs(ctx),
+      causes: composeBuild.buildErrorCauses,
+    }) : undefined,
     metaPatch: {
+      runtimeImages: recordRuntimeImageReceipts(
+        (dep.meta as { runtimeImages?: unknown } | null)?.runtimeImages ??
+          (previous?.meta as { runtimeImages?: unknown } | null)?.runtimeImages,
+        composeResult.services.filter(service => !service.carried && service.status !== "failed" && service.status !== "failure" &&
+          composeBuild.builtImageRefs.has(service.serviceId)).map(service => ({
+          serviceId: service.serviceId,
+          imageRef: composeBuild.builtImageRefs.get(service.serviceId)!,
+          baseImages: composeBuild.baseImages?.get(service.serviceId),
+        })),
+      ),
       composeDeployment: {
         totalServices: composeResult.summary.total,
         successfulServices: composeResult.summary.successful,
         failedServices: composeResult.summary.failed,
         failedServiceNames: composeResult.summary.failedServices,
-        warningMessage: composeResult.warning,
+        warningMessage,
         ...(decisionPending ? { decision: "pending" } : {}),
       },
       ...(routingWarning ? { edgeUnsynced: true, deployWarning: routingWarning } : {}),
@@ -576,4 +656,31 @@ export async function executeComposePipeline(opts: ComposePipelineOpts): Promise
         : {}),
     },
   });
+  if (composeResult.cutover) {
+    if (ctx.settled === "cancelled") {
+      await cancelAfterCutover();
+    } else if (ctx.settled === "ready") {
+      // onSuccess treats this pointer write as best effort. Never retire the
+      // serving predecessor unless the new release is durably authoritative.
+      const [active, recorded] = await Promise.all([
+        repos.project.findById(project.id), repos.deployment.findById(dep.id),
+      ]).catch(error => {
+        observeCaughtError(error, "platform/engine/modules/deployments/compose/pipeline");
+        return [null, null] as const;
+      });
+      if (active?.activeDeploymentId === dep.id && recorded?.status === "ready") await composeResult.cutover.commit();
+      else logger.log("The new service is live; keeping its predecessor until the ready outcome and active deployment are confirmed.\n", "warn");
+    }
+  }
+  } catch (error) {
+    if (composeResult.cutover && ctx.settled !== "ready") {
+      if (!await composeResult.cutover.rollback()) {
+        if (opts.signal?.aborted) await onCancelled(ctx, composeBuild.durationMs, { keepProvisioned: true });
+        else await onFailure(ctx, "Service routing recovery is incomplete; both containers were preserved.",
+          composeBuild.durationMs, { errorCode: "SERVICE_CUTOVER_RECOVERY_REQUIRED" }, { keepProvisioned: true });
+        return;
+      }
+    }
+    throw error;
+  }
 }

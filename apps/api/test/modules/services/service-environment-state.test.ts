@@ -8,6 +8,10 @@ import { decrypt, encrypt } from "@repo/platform/engine/lib/encryption";
 import * as deploymentRuntime from "@repo/platform/engine/lib/deployment-runtime";
 import * as edgeTarget from "@repo/platform/engine/lib/edge-target";
 import * as serverTarget from "@repo/platform/engine/lib/server-target";
+import { assertSyncedServiceEnvironment } from "@repo/platform/engine/modules/services/service-environment-state";
+import { buildBackgroundContext } from "@repo/platform/engine/lib/background-context";
+import { mintPatToken } from "@repo/platform/engine/lib/pat";
+import { parseComposeFile } from "@repo/platform/engine/lib/compose-parser";
 import { serviceRoutes } from "../../../src/modules/services/service.routes";
 import { healthRoutes } from "../../../src/modules/health/health.routes";
 import { handleApiError } from "../../../src/middleware/error-handler";
@@ -69,6 +73,38 @@ describe("effective service environment through HTTP, SDK and real storage", () 
   });
   afterEach(() => vi.restoreAllMocks());
 
+  it("captures a synced service override without image defaults and rejects missing or unsaved live values", async () => {
+    await repos.project.bulkSetEnvVars(project.id, "production", [
+      { key: "SHARED", value: encrypt("service-wins") },
+    ], service.id);
+    const active = (await repos.project.findById(project.id))!.activeDeploymentId!;
+    await seedServiceDeployment(active, service, { containerId: "current-api" });
+    const runtime = await DockerRuntime.create({ dockerSocketPath: "/tmp/openship-test-absent.sock" });
+    vi.spyOn(runtime, "supports").mockReturnValue(false);
+    vi.spyOn(runtime, "dispose").mockResolvedValue(undefined);
+    const env = {
+      INLINE: "compose-default", DATABASE_URL: "postgres://project-secret@db/app",
+      DB_PASSWORD: "project-secret", SHARED: "service-wins", PROJECT_ONLY: "shared",
+    };
+    const detail = {
+      id: "current-api", name: "api", image: "node:22", imageId: "sha256:node-image", state: "running" as const,
+      env: [...Object.entries(env).map(([key, value]) => `${key}=${value}`), "NODE_VERSION=22.0.0"],
+      labels: { "openship.project": project.id, "openship.service": service.name },
+      networks: [], mounts: [], ports: [],
+    };
+    const inspect = vi.spyOn(runtime, "inspectContainer").mockResolvedValue(detail);
+    vi.spyOn(runtime, "inspectImageEnv").mockResolvedValue(["NODE_VERSION=22.0.0"]);
+    vi.mocked(deploymentRuntime.resolveDeploymentRuntimeForRead).mockResolvedValue({ runtime, serverId: null, hostPortTarget: null });
+    const ctx = buildBackgroundContext({ userId: owner.userId, organizationId: owner.orgId });
+    expect(await assertSyncedServiceEnvironment(ctx, project.id, service.id)).toEqual(env);
+    inspect.mockResolvedValue({ ...detail, env: [...detail.env, "UNSAVED=keep-me"] });
+    await expect(assertSyncedServiceEnvironment(ctx, project.id, service.id)).rejects.toThrow(/saved and running environments differ/);
+    inspect.mockResolvedValue({ ...detail, env: detail.env.filter((item) => !item.startsWith("SHARED=")) });
+    await expect(assertSyncedServiceEnvironment(ctx, project.id, service.id)).rejects.toThrow(/saved and running environments differ/);
+    inspect.mockRejectedValue(new Error("Docker unavailable"));
+    await expect(assertSyncedServiceEnvironment(ctx, project.id, service.id)).rejects.toThrow(/Docker unavailable/);
+  });
+
   it("shows Compose and shared variables with zero overrides, without contacting Docker or leaking secrets", async () => {
     const state = await client.services.getEnvironment(project.id, service.id);
     expect(state.status).toBe("unchecked");
@@ -107,7 +143,12 @@ describe("effective service environment through HTTP, SDK and real storage", () 
   it.each(["docker", "cloud"])(
     "resolves port-only public URLs on the %s deployment target",
     async (target) => {
+      const managed = target === "cloud"
+        ? await repos.cloudWorkspace.create({ organizationId: owner.orgId, name: "Managed server" })
+        : null;
+      const server = managed ? await repos.server.findByWorkspace(managed.id, owner.orgId) : null;
       const stack = await seedProject(owner.orgId, {
+        serverId: server?.id,
         framework: "docker-compose",
         runtimeMode: "docker",
       });
@@ -116,13 +157,15 @@ describe("effective service environment through HTTP, SDK and real storage", () 
         environment: { BACKEND_ORIGIN: "{{publicUrl:backend:8080}}" },
       });
       await seedService(stack.id, { name: "backend", exposed: false, ports: ["8080:8080"] });
-      const deployment = await seedDeployment(stack);
+      const deployment = await seedDeployment(stack, {
+        meta: server ? { deployTarget: "cloud", serverId: server.id, managedWorkspaceId: managed!.id,
+          managedServer: { projectId: stack.id, workspaceId: "provider-vm", ownerWorkspaceId: managed!.id } } : {},
+      });
       await setActive(stack.id, deployment.id);
       await seedServiceDeployment(deployment.id, api, { containerId: "current-api" });
       const runtime = await DockerRuntime.create({
         dockerSocketPath: "/tmp/openship-test-absent.sock",
       });
-      Object.defineProperty(runtime, "name", { value: target });
       vi.spyOn(runtime, "supports").mockReturnValue(false);
       vi.spyOn(runtime, "dispose").mockResolvedValue(undefined);
       vi.spyOn(runtime, "inspectContainer").mockResolvedValue({
@@ -140,7 +183,7 @@ describe("effective service environment through HTTP, SDK and real storage", () 
       vi.spyOn(runtime, "inspectImageEnv").mockResolvedValue([]);
       vi.mocked(deploymentRuntime.resolveDeploymentRuntimeForRead).mockResolvedValue({
         runtime,
-        serverId: null,
+        serverId: server?.id ?? null,
         hostPortTarget: null,
       });
       vi.spyOn(serverTarget, "resolveServerHost").mockResolvedValue(null);
@@ -166,6 +209,112 @@ describe("effective service environment through HTTP, SDK and real storage", () 
       }
     },
   );
+
+  it("does not offer unchanged image defaults for recovery, even if explicitly repeated by a legacy container", async () => {
+    const deployment = (await repos.deployment.findById(
+      (await repos.project.findById(project.id))!.activeDeploymentId!,
+    ))!;
+    await seedServiceDeployment(deployment.id, service, { containerId: "legacy-api" });
+    const runtime = await DockerRuntime.create({
+      dockerSocketPath: "/tmp/openship-test-absent.sock",
+    });
+    vi.spyOn(runtime, "supports").mockReturnValue(false);
+    vi.spyOn(runtime, "dispose").mockResolvedValue(undefined);
+    vi.spyOn(runtime, "inspectContainer").mockResolvedValue({
+      id: "legacy-api",
+      name: "api",
+      image: "node:22",
+      imageId: "sha256:node-image",
+      state: "running",
+      // Docker appends non-overridden image defaults; these equal defaults were
+      // explicitly included by an older deployment and precede that suffix.
+      env: ["NODE_VERSION=22.0.0", "YARN_VERSION=1.22.22", "RECOVER_ME=keep-me", "PATH=/usr/bin"],
+      labels: { "openship.project": project.id, "openship.service": service.name },
+      networks: [],
+      mounts: [],
+      ports: [],
+    });
+    vi.spyOn(runtime, "inspectImageEnv").mockResolvedValue([
+      "PATH=/usr/bin",
+      "NODE_VERSION=22.0.0",
+      "YARN_VERSION=1.22.22",
+    ]);
+    vi.mocked(deploymentRuntime.resolveDeploymentRuntimeForRead).mockResolvedValue({
+      runtime,
+      serverId: null,
+      hostPortTarget: null,
+    });
+    const state = await client.services.getEnvironment(project.id, service.id, {
+      inspectRuntime: true,
+    });
+    expect(state.recoverableKeys).toEqual(["RECOVER_ME"]);
+    const recovered = await client.services.revealEnv(project.id, service.id, {
+      keys: ["RECOVER_ME", "NODE_VERSION", "YARN_VERSION"],
+      environment: "production",
+      source: "runtime",
+      containerId: "legacy-api",
+    });
+    expect(recovered).toEqual({ RECOVER_ME: "keep-me" });
+  });
+
+  it.each(["absent", "empty"])(
+    "repairs an %s legacy service deployment record transactionally after Apply",
+    async (record) => {
+      const active = (await repos.project.findById(project.id))!.activeDeploymentId!;
+      if (record === "empty") await seedServiceDeployment(active, service, { containerId: null });
+      await repos.service.recordEnvironmentApply({
+        projectId: project.id,
+        organizationId: owner.orgId,
+        deploymentId: active,
+        serviceId: service.id,
+        expectedContainerId: null,
+        previousContainerId: "legacy-api",
+        containerId: "replacement-api",
+        ip: "172.22.0.9",
+        appliedAt: new Date(),
+      });
+      const rows = await repos.service.listByDeployment(active);
+      expect(rows.filter((row) => row.serviceId === service.id)).toHaveLength(1);
+      expect(rows.find((row) => row.serviceId === service.id)).toMatchObject({
+        containerId: "replacement-api",
+        status: "success",
+        ip: "172.22.0.9",
+      });
+      expect((await repos.project.findById(project.id))!.activeDeploymentId).toBe(active);
+    },
+  );
+
+  it("rolls back legacy bookkeeping if the service or active release no longer belongs to this apply", async () => {
+    const active = (await repos.project.findById(project.id))!.activeDeploymentId!;
+    const other = await seedProject(owner.orgId);
+    const foreign = await seedService(other.id, { name: "foreign" });
+    await expect(
+      repos.service.recordEnvironmentApply({
+        projectId: project.id,
+        organizationId: owner.orgId,
+        deploymentId: active,
+        serviceId: foreign.id,
+        expectedContainerId: null,
+        previousContainerId: "legacy-api",
+        containerId: "wrong-target",
+        appliedAt: new Date(),
+      }),
+    ).rejects.toThrow("service changed");
+    await setActive(project.id, (await seedDeployment(project)).id);
+    await expect(
+      repos.service.recordEnvironmentApply({
+        projectId: project.id,
+        organizationId: owner.orgId,
+        deploymentId: active,
+        serviceId: service.id,
+        expectedContainerId: null,
+        previousContainerId: "legacy-api",
+        containerId: "stale-release",
+        appliedAt: new Date(),
+      }),
+    ).rejects.toThrow("service changed");
+    expect(await repos.service.listByDeployment(active)).toEqual([]);
+  });
 
   it("saves only deliberate edits, retaining ciphertext, row identity and other scopes", async () => {
     await client.services.setEnvVars(project.id, service.id, {
@@ -387,5 +536,191 @@ describe("effective service environment through HTTP, SDK and real storage", () 
     );
     expect([403, 404]).toContain(denied.status);
     expect(await repos.project.listEnvVars(project.id, "production", service.id)).toEqual([]);
+  });
+
+  const sharedEdit = () => ({
+    environment: "production" as const, deletes: [],
+    upserts: [{ key: "DB_PASSWORD", value: "rotated-secret", sourceId: null, isSecret: true }],
+  });
+
+  it("reviews anchored Compose references and derived values, then updates the shared source once", async () => {
+    const parsed = parseComposeFile(`
+x-backend: &backend
+  DB_PASSWORD: \${DB_PASSWORD}
+  DATABASE_URL: postgres://\${DB_PASSWORD}@db/app
+services:
+  api:
+    environment: *backend
+  worker:
+    environment: *backend
+`);
+    await repos.service.update(service.id, {
+      environment: parsed.services[0]!.environmentTemplates,
+      advanced: parsed.services[0]!.advanced,
+    });
+    const worker = await seedService(project.id, {
+      name: "worker", environment: parsed.services[1]!.environmentTemplates,
+      advanced: parsed.services[1]!.advanced,
+    });
+    const independent = await seedService(project.id, {
+      name: "independent", environment: { DB_PASSWORD: "project-secret" },
+      advanced: { environmentTemplateKeys: [] },
+    });
+    await repos.project.bulkSetEnvVars(project.id, "preview", [{ key: "DB_PASSWORD", value: encrypt("preview-secret"), isSecret: true }], null);
+    const input = sharedEdit();
+    const review = await client.services.reviewEnvVars(project.id, service.id, input);
+    expect(review.changes).toEqual([{
+      key: "DB_PASSWORD", projectKey: "DB_PASSWORD",
+      services: expect.arrayContaining([
+        { id: service.id, name: "api", keys: ["DATABASE_URL", "DB_PASSWORD"] },
+        { id: worker.id, name: "worker", keys: ["DATABASE_URL", "DB_PASSWORD"] },
+      ]),
+    }]);
+    expect(review.changes[0]!.services).toHaveLength(2);
+    expect(JSON.stringify(review)).not.toMatch(/rotated-secret|project-secret|postgres:\/\//);
+    expect(deploymentRuntime.resolveDeploymentRuntimeForRead).not.toHaveBeenCalled();
+    expect(await repos.project.listEnvVars(project.id, "production", service.id)).toEqual([]);
+    const result = await client.services.mergeEnvVars(project.id, service.id, {
+      ...input, shared: { keys: ["DB_PASSWORD"], revision: review.revision },
+    });
+    expect(result.affectedServices?.map((item) => item.id).sort()).toEqual([service.id, worker.id].sort());
+    for (const target of [service, worker]) {
+      expect(await repos.project.listEnvVars(project.id, "production", target.id)).toEqual([]);
+      expect(await client.services.revealEnv(project.id, target.id, {
+        source: "effective", keys: ["DB_PASSWORD", "DATABASE_URL"],
+      })).toEqual({ DB_PASSWORD: "rotated-secret", DATABASE_URL: "postgres://rotated-secret@db/app" });
+    }
+    expect(await client.services.revealEnv(project.id, independent.id, { source: "effective", keys: ["DB_PASSWORD"] })).toEqual({ DB_PASSWORD: "project-secret" });
+    const preview = await repos.project.listEnvVars(project.id, "preview", null);
+    expect(decrypt(preview[0]!.value)).toBe("preview-secret");
+    const changed = (await repos.project.listEnvVars(project.id, "production", null)).filter((row) => row.key === "DB_PASSWORD");
+    expect(changed).toHaveLength(1);
+    expect(changed[0]!.isSecret).toBe(true);
+    expect(changed[0]!.value).not.toBe("rotated-secret");
+  });
+
+  it("supports direct aliases without guessing a source for literals, embedded URLs or service overrides", async () => {
+    await repos.service.update(service.id, {
+      environment: { ...service.environment, PASSWORD_ALIAS: "${DB_PASSWORD}" },
+      advanced: { environmentTemplateKeys: ["DATABASE_URL", "PASSWORD_ALIAS"] },
+    });
+    const input = { ...sharedEdit(), upserts: [
+      { key: "PASSWORD_ALIAS", value: "new-secret", sourceId: null },
+      { key: "DATABASE_URL", value: "postgres://other/db", sourceId: null },
+      { key: "SHARED", value: "new-literal", sourceId: null },
+    ] };
+    const review = await client.services.reviewEnvVars(project.id, service.id, input);
+    expect(review.changes.map(({ key, projectKey }) => ({ key, projectKey }))).toEqual([{ key: "PASSWORD_ALIAS", projectKey: "DB_PASSWORD" }]);
+    await client.services.mergeEnvVars(project.id, service.id, input);
+    expect(decrypt((await repos.project.listEnvVars(project.id, "production", null)).find((row) => row.key === "DB_PASSWORD")!.value)).toBe("project-secret");
+    const overrides = await repos.project.listEnvVars(project.id, "production", service.id);
+    const alias = overrides.find((row) => row.key === "PASSWORD_ALIAS")!;
+    expect((await client.services.reviewEnvVars(project.id, service.id, {
+      ...sharedEdit(), upserts: [{ key: alias.key, value: "again", sourceId: alias.id }],
+    })).changes).toEqual([]);
+  });
+
+  it("rejects a stale shared review before applying any local or shared edits", async () => {
+    const input = { ...sharedEdit(), upserts: [...sharedEdit().upserts, { key: "LOCAL", value: "must-not-save", sourceId: null }] };
+    const review = await client.services.reviewEnvVars(project.id, service.id, input);
+    await repos.project.mergeEnvVars(project.id, "production", [{ key: "DB_PASSWORD", value: encrypt("concurrent"), isSecret: true }], [], null);
+    await expect(client.services.mergeEnvVars(project.id, service.id, {
+      ...input, shared: { keys: ["DB_PASSWORD"], revision: review.revision },
+    })).rejects.toMatchObject({ code: "ENVIRONMENT_CHANGED" });
+    expect(await repos.project.listEnvVars(project.id, "production", service.id)).toEqual([]);
+    expect(decrypt((await repos.project.listEnvVars(project.id, "production", null)).find((row) => row.key === "DB_PASSWORD")!.value)).toBe("concurrent");
+  });
+
+  it("rechecks sources inside the write transaction when configuration changes after validation", async () => {
+    const input = sharedEdit();
+    const review = await client.services.reviewEnvVars(project.id, service.id, input);
+    const merge = repos.project.mergeEnvVarScopes.bind(repos.project);
+    vi.spyOn(repos.project, "mergeEnvVarScopes").mockImplementationOnce(async (...args) => {
+      await repos.service.update(service.id, { environment: { DB_PASSWORD: "pinned-after-review" }, advanced: { environmentTemplateKeys: [] } });
+      return merge(...args);
+    });
+    await expect(client.services.mergeEnvVars(project.id, service.id, {
+      ...input, shared: { keys: ["DB_PASSWORD"], revision: review.revision },
+    })).rejects.toMatchObject({ code: "ENVIRONMENT_CHANGED" });
+    expect(decrypt((await repos.project.listEnvVars(project.id, "production", null)).find((row) => row.key === "DB_PASSWORD")!.value)).toBe("project-secret");
+  });
+
+  it("requires project write access even when a caller reuses an owner's shared review", async () => {
+    const token = mintPatToken();
+    const pat = await repos.personalAccessToken.create({ userId: owner.userId, organizationId: owner.orgId,
+      name: "Project reader", tokenPrefix: token.tokenPrefix, tokenHash: token.tokenHash,
+      readOnly: false, scoped: true, expiresAt: null });
+    await repos.patGrant.createMany(pat.id, [{ resourceType: "project", resourceId: project.id, permissions: ["read"] }]);
+    const limited = new OpenshipClient({ baseUrl: "http://openship.test", token: token.token,
+      organizationId: owner.orgId, fetch: ((url, init) => app.request(url as string, init)) as typeof fetch });
+    const input = sharedEdit();
+    const review = await client.services.reviewEnvVars(project.id, service.id, input);
+    await expect(limited.services.reviewEnvVars(project.id, service.id, input)).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(limited.services.mergeEnvVars(project.id, service.id, {
+      ...input, shared: { keys: ["DB_PASSWORD"], revision: review.revision },
+    })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    const outsider = await seedOwner();
+    const denied = await app.request(`/api/projects/${project.id}/services/${service.id}/env/review`, {
+      method: "POST", headers: { ...outsider.auth, "content-type": "application/json" }, body: JSON.stringify(input),
+    });
+    expect([403, 404]).toContain(denied.status);
+    expect(decrypt((await repos.project.listEnvVars(project.id, "production", null)).find((row) => row.key === "DB_PASSWORD")!.value)).toBe("project-secret");
+  });
+
+  it("requires consistent values when two edited aliases share one source", async () => {
+    await repos.service.update(service.id, { environment: { ALIAS: "${DB_PASSWORD}" }, advanced: { environmentTemplateKeys: ["ALIAS"] } });
+    const input = { ...sharedEdit(), upserts: [...sharedEdit().upserts, { key: "ALIAS", value: "different", sourceId: null }] };
+    const review = await client.services.reviewEnvVars(project.id, service.id, input);
+    await expect(client.services.mergeEnvVars(project.id, service.id, {
+      ...input, shared: { keys: ["DB_PASSWORD", "ALIAS"], revision: review.revision },
+    })).rejects.toMatchObject({ code: "ENVIRONMENT_SHARED_CONFLICT" });
+    expect(await repos.project.listEnvVars(project.id, "production", service.id)).toEqual([]);
+  });
+
+  it("saves shared and local edits together, without treating conditional or embedded values as shared", async () => {
+    await repos.service.update(service.id, {
+      environment: { ALIAS: "${DB_PASSWORD}", CONDITIONAL: "${DB_PASSWORD:+enabled}", FALLBACK: "${PROJECT_ONLY:-default}" },
+      advanced: { environmentTemplateKeys: ["ALIAS", "CONDITIONAL", "FALLBACK"] },
+    });
+    const input = { ...sharedEdit(), upserts: [
+      ...sharedEdit().upserts,
+      { key: "ALIAS", value: "local-alias", sourceId: null },
+      { key: "CONDITIONAL", value: "disabled", sourceId: null },
+      { key: "FALLBACK", value: "", sourceId: null },
+    ] };
+    const review = await client.services.reviewEnvVars(project.id, service.id, input);
+    expect(review.changes.map(({ key }) => key)).toEqual(["DB_PASSWORD", "ALIAS"]);
+    await client.services.mergeEnvVars(project.id, service.id, {
+      ...input, shared: { keys: ["DB_PASSWORD"], revision: review.revision },
+    });
+    expect(await client.services.revealEnv(project.id, service.id, { source: "effective", keys: input.upserts.map(row => row.key) })).toEqual({
+      DB_PASSWORD: "rotated-secret", ALIAS: "local-alias", CONDITIONAL: "disabled", FALLBACK: "",
+    });
+    expect((await repos.project.listEnvVars(project.id, "production", service.id)).map(row => row.key).sort()).toEqual(["ALIAS", "CONDITIONAL", "FALLBACK"]);
+  });
+
+  it("rejects a local override that would change the selected shared alias's requested value", async () => {
+    await repos.service.update(service.id, { environment: { ALIAS: "${DB_PASSWORD}" }, advanced: { environmentTemplateKeys: ["ALIAS"] } });
+    const input = { ...sharedEdit(), upserts: [...sharedEdit().upserts, { key: "ALIAS", value: "different", sourceId: null }] };
+    const review = await client.services.reviewEnvVars(project.id, service.id, input);
+    await expect(client.services.mergeEnvVars(project.id, service.id, {
+      ...input, shared: { keys: ["ALIAS"], revision: review.revision },
+    })).rejects.toMatchObject({ code: "ENVIRONMENT_SHARED_CONFLICT" });
+    expect(await repos.project.listEnvVars(project.id, "production", service.id)).toEqual([]);
+    expect(decrypt((await repos.project.listEnvVars(project.id, "production", null)).find(row => row.key === "DB_PASSWORD")!.value)).toBe("project-secret");
+  });
+
+  it("rejects reusing a review for a changed payload or changed set of services", async () => {
+    const input = sharedEdit();
+    const review = await client.services.reviewEnvVars(project.id, service.id, input);
+    await expect(client.services.mergeEnvVars(project.id, service.id, {
+      ...input, upserts: [{ ...input.upserts[0]!, value: "not-reviewed" }],
+      shared: { keys: ["DB_PASSWORD"], revision: review.revision },
+    })).rejects.toMatchObject({ code: "ENVIRONMENT_CHANGED" });
+    await seedService(project.id, { name: "new-consumer" });
+    await expect(client.services.mergeEnvVars(project.id, service.id, {
+      ...input, shared: { keys: ["DB_PASSWORD"], revision: review.revision },
+    })).rejects.toMatchObject({ code: "ENVIRONMENT_CHANGED" });
+    expect(decrypt((await repos.project.listEnvVars(project.id, "production", null)).find(row => row.key === "DB_PASSWORD")!.value)).toBe("project-secret");
   });
 });

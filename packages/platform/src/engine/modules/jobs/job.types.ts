@@ -23,6 +23,19 @@ export interface CommandConfig {
   secrets?: Record<string, string>;
 }
 
+export interface WorkflowJobConfig {
+  workflowId: string;
+  inputs: Record<string, string>;
+  /** Captured by the operation, never accepted or exposed by the API. */
+  authority: import("@repo/core").ExecutionAuthority;
+}
+
+export function workflowJobConfig(row: { actionType: string; actionConfig: unknown }): WorkflowJobConfig | null {
+  if (row.actionType !== "workflow") return null;
+  const config = row.actionConfig as WorkflowJobConfig | null;
+  return config?.workflowId && config.authority?.organizationId ? config : null;
+}
+
 export const JOB_RUN_STATES = ["running", "success", "failed"] as const;
 export type JobRunState = (typeof JOB_RUN_STATES)[number];
 
@@ -41,4 +54,14 @@ export function resolveServerIds(cfg: {
     if (id && !out.includes(id)) out.push(id);
   }
   return out;
+}
+
+/** The complete stored target set owns a job, never its creator's first org. */
+export function jobTargetsOrganization(
+  ids: readonly string[],
+  servers: ReadonlyMap<string, { organizationId: string | null }>,
+): string | null {
+  const organizationId = ids.length ? servers.get(ids[0]!)?.organizationId : undefined;
+  return organizationId && ids.every(id => servers.get(id)?.organizationId === organizationId)
+    ? organizationId : null;
 }

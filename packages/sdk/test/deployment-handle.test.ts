@@ -30,10 +30,35 @@ describe("deployment handles", () => {
     expect(s.buildStatus).toHaveBeenCalledTimes(2);
   });
 
+  it.each(["ready", "failed", "cancelled", "partial_failure", "no_changes", "action_required", "rejected"])(
+    "waits for the execution lease after the %s outcome is persisted",
+    async (deploymentStatus) => {
+      const s = setup();
+      s.buildStatus.mockResolvedValueOnce(status({ deploymentStatus, is_active: false, completionPending: true }))
+        .mockResolvedValueOnce(status({ deploymentStatus, is_active: false, completionPending: false }));
+      await expect(s.handle.wait({ pollIntervalMs: 10 })).resolves.toMatchObject({ status: deploymentStatus });
+      expect(s.buildStatus).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it("can time out while terminal cleanup is still pending", async () => {
+    const s = setup();
+    s.buildStatus.mockResolvedValue(status({ deploymentStatus: "ready", is_active: false, completionPending: true }));
+    await expect(s.handle.wait({ timeoutMs: 100, pollIntervalMs: 10 })).rejects.toMatchObject({ name: "TimeoutError" });
+    expect(s.cancel).not.toHaveBeenCalled();
+  });
+
+  it("accepts terminal responses from older servers without completionPending", async () => {
+    const s = setup();
+    s.buildStatus.mockResolvedValue(status({ deploymentStatus: "ready", is_active: false }));
+    await expect(s.handle.wait()).resolves.toMatchObject({ status: "ready", success: true });
+    expect(s.buildStatus).toHaveBeenCalledTimes(1);
+  });
+
   it("returns an actionable prompt without guessing a response", async () => {
     const s = setup();
     const prompt = { promptId: "p", title: "Port conflict", message: "Choose", actions: [{ id: "abort", label: "Abort" }] };
-    s.buildStatus.mockResolvedValue(status({ pendingPrompt: prompt }));
+    s.buildStatus.mockResolvedValue(status({ deploymentStatus: "action_required", pendingPrompt: prompt, completionPending: true }));
     await expect(s.handle.wait()).resolves.toMatchObject({ status: "action_required", prompt, success: false });
     expect(s.respond).not.toHaveBeenCalled();
   });
@@ -82,5 +107,21 @@ describe("deployment handles", () => {
   it("does not claim completion after an interrupted event stream", async () => {
     async function* stream() { yield { event: "complete", data: JSON.stringify({ success: true }) }; }
     expect((await consumeDeploymentEvents(stream())).completed).toBe(false);
+  });
+
+  it("closes the event source when an unattended caller hands back a prompt", async () => {
+    let closed = false;
+    async function* events() {
+      try {
+        yield { event: "prompt", data: JSON.stringify({ promptId: "p", title: "Decision required" }) };
+        throw new Error("Must not consume beyond the pending decision");
+      } finally { closed = true; }
+    }
+    const delivered = vi.fn();
+    const result = await consumeDeploymentEvents(events(), delivered, { stopOnPrompt: true });
+    expect(closed).toBe(true);
+    expect(delivered).toHaveBeenCalledOnce();
+    expect(result.completed).toBe(false);
+    expect(result.success).toBeUndefined();
   });
 });

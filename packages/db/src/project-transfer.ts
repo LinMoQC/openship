@@ -1,6 +1,6 @@
 import { getTableColumns, inArray, sql } from "drizzle-orm";
 import { getTableConfig } from "drizzle-orm/pg-core";
-import { AppError, type ExportSelection, type TransferProject } from "@repo/core";
+import { AppError, normalizeTrackedDomain, type ExportSelection, type TransferProject } from "@repo/core";
 import { db, getDriver, type DatabaseTransaction } from "./client";
 import { DUMP_FORMAT_VERSION, topoOrderedTables, type DatabaseDump } from "./dump";
 
@@ -15,7 +15,6 @@ export type TransferRowReader = (
 export const PROJECT_TRANSFER_TABLES = new Set([
   "project_app",
   "project",
-  "cloud_docker_workspace",
   "env_var",
   "deployment",
   "domain",
@@ -23,6 +22,7 @@ export const PROJECT_TRANSFER_TABLES = new Set([
   "service_deployment",
   "incoming_webhook",
   "route_rule",
+  "route_protection",
   "project_connection",
   "backup_destination",
   "backup_policy",
@@ -52,8 +52,20 @@ export const PROJECT_TRANSFER_UNSUPPORTED_TABLES: Readonly<Record<string, string
   release_plan: "Fixed release plans require a whole-instance export with matched controller and host ownership.",
   release_run: "Release execution and acceptance records require a whole-instance export with matched controller and host ownership.",
   service_cutover_journal: "Container cutover recovery requires a whole-instance export with matched controller and host ownership.",
+  pull_request_preview: "Managed PR previews require a whole-instance export to preserve source, environment and cleanup ownership. Disable previews and wait for cleanup before transferring projects individually.",
+  ingress_hostname: "Disconnect managed Cloudflare hostnames before transferring this project individually. Use a whole-instance export to preserve its server, credentials and provider ownership.",
+  action_project:
+    "Projects linked to Actions require a whole-instance export to preserve workflow secrets, runners and execution authority.",
+  action_deployment:
+    "Projects with Actions deployment approvals require a whole-instance export to preserve their workflow and deployment ownership.",
   cluster_database:
     "Projects with cluster databases cannot be transferred individually yet. Use a whole-instance export to preserve cluster and database ownership.",
+};
+
+/** Configuration tied to the source approver/runtime must be reviewed on a new owner. */
+export const PROJECT_TRANSFER_RESET_TABLES: Readonly<Record<string, string>> = {
+  project_security: "Security observations and automatic-refresh consent are reset on project import. Review advisories and opt in again on the destination.",
+  security_refresh_attempt: "Security refresh attempts belong to the source controller and are not replayed by a project import.",
 };
 
 const specs = new Map(topoOrderedTables().map((spec) => [spec.sqlName, spec]));
@@ -85,24 +97,64 @@ export function transferUniqueKeys(name: string): string[][] {
 
 export const transferReferences = topoOrderedTables().flatMap((spec) => {
   const columns = getTableColumns(spec.table);
-  return getTableConfig(spec.table).foreignKeys.flatMap((fk) => {
+  const references = new Map<
+    string,
+    {
+      table: string;
+      column: string;
+      parent: string;
+      parentColumn: string;
+      nullable: boolean;
+    }
+  >();
+  for (const fk of getTableConfig(spec.table).foreignKeys) {
     const ref = fk.reference();
     const parent = getTableConfig(ref.foreignTable).name;
     const parentColumns = getTableColumns(ref.foreignTable);
-    return ref.columns.map((column, i) => ({
-      table: spec.sqlName,
-      column: Object.keys(columns).find((key) => columns[key] === column)!,
-      parent,
-      parentColumn: Object.keys(parentColumns).find(
-        (key) => parentColumns[key] === ref.foreignColumns[i],
-      )!,
-      nullable: !column.notNull,
-    }));
-  });
+    // Owner-scoped composite FKs include an identity plus scope columns. Only
+    // the identity is a dependency: following organizationId independently
+    // would export every parent's row in that organization and mistake scope
+    // values for resource IDs during import. The full FK still guards restore.
+    const identity = ref.foreignColumns.findIndex((column) => column.primary);
+    for (const [i, column] of ref.columns.entries()) {
+      if (ref.columns.length > 1 && identity >= 0 && i !== identity) continue;
+      // Drizzle's table-level constraints use distinct column objects from
+      // getTableColumns; SQL names identify both inline and composite FKs.
+      const columnKey = Object.keys(columns).find((key) => columns[key]!.name === column.name)!;
+      const parentColumn = Object.keys(parentColumns).find(
+        (key) => parentColumns[key]!.name === ref.foreignColumns[i]!.name,
+      )!;
+      references.set(`${columnKey}:${parent}:${parentColumn}`, {
+        table: spec.sqlName,
+        column: columnKey,
+        parent,
+        parentColumn,
+        nullable: !column.notNull,
+      });
+    }
+  }
+  return [...references.values()];
 });
 
+/** Derive child ownership from schema FKs, including children reached through a
+ * domain or deployment. Organization/server parents do not imply project ownership. */
+const projectOwnershipReferences = new Map<string, typeof transferReferences>();
+const projectOwnedTables = new Set(["project"]);
+for (const spec of topoOrderedTables()) {
+  const refs = transferReferences.filter(ref =>
+    ref.table === spec.sqlName && projectOwnedTables.has(ref.parent),
+  );
+  if (refs.length) {
+    // An explicit project FK is authoritative. Avoid scanning deployment history
+    // or following another linked project's child when that owner is available.
+    const direct = refs.filter(ref => ref.parent === "project");
+    projectOwnershipReferences.set(spec.sqlName, direct.length ? direct : refs);
+    projectOwnedTables.add(spec.sqlName);
+  }
+}
+
 /** Bounded parameter batches, shared by project exports and import preflight. */
-function transferReader(
+export function createTransferReader(
   reader: Pick<DatabaseTransaction, "select">,
   metadataOnly = false,
 ): TransferRowReader {
@@ -119,7 +171,7 @@ function transferReader(
       "environmentName",
       "groupId",
       "deletedAt",
-      "cloudWorkspaceId",
+      "workspaceId",
       "localPath",
       "gitOwner",
       "gitRepo",
@@ -158,7 +210,7 @@ function transferReader(
     return rows;
   };
 }
-export const readTransferRows: TransferRowReader = transferReader(db);
+export const readTransferRows: TransferRowReader = createTransferReader(db);
 
 export function transferProject(row: Row): TransferProject {
   return {
@@ -169,7 +221,7 @@ export function transferProject(row: Row): TransferProject {
     slug: String(row.slug ?? row.id),
     environmentName: String(row.environmentName ?? "Production"),
     serverId: typeof row.serverId === "string" ? row.serverId : null,
-    cloudWorkspaceId: typeof row.cloudWorkspaceId === "string" ? row.cloudWorkspaceId : null,
+    workspaceId: typeof row.workspaceId === "string" ? row.workspaceId : null,
     localPath: typeof row.localPath === "string" ? row.localPath : null,
   };
 }
@@ -251,10 +303,28 @@ export async function selectProjectTransfer(
     }
   }
   const projectIds = ids(tables.project!);
+  const ownedRows = new Map<string, Promise<Row[]>>();
+  const readOwnedRows = (table: string): Promise<Row[]> => {
+    if (table === "project") return Promise.resolve(tables.project!);
+    const cached = ownedRows.get(table);
+    if (cached) return cached;
+    const refs = projectOwnershipReferences.get(table) ?? [];
+    const rows = Promise.all(refs.map(async ref =>
+      read(table, ref.column, ids(await readOwnedRows(ref.parent), ref.parentColumn)),
+    )).then(parts => parts.flat());
+    ownedRows.set(table, rows);
+    return rows;
+  };
   for (const [table, reason] of Object.entries(PROJECT_TRANSFER_UNSUPPORTED_TABLES)) {
-    if ((await read(table, "projectId", projectIds)).length) {
-      throw new AppError(reason, 409, table === "cluster_database" ? "CLUSTER_TRANSFER_UNSUPPORTED" : "GITOPS_TRANSFER_UNSUPPORTED");
+    if (!projectOwnershipReferences.has(table))
+      throw new Error(`Unsupported transfer child ${table} has no project ownership path`);
+    // Ownership gates deliberately ignore the user's export exclusions.
+    if ((await readOwnedRows(table)).length) {
+      throw new AppError(reason, 409, table.startsWith("release_") || table === "service_cutover_journal" ? "GITOPS_TRANSFER_UNSUPPORTED" : "CLUSTER_TRANSFER_UNSUPPORTED");
     }
+  }
+  for (const [table, reason] of Object.entries(PROJECT_TRANSFER_RESET_TABLES)) {
+    if ((await readOwnedRows(table)).length) warnings.push(reason);
   }
   const projectSet = new Set(projectIds);
   const organizations = [...new Set(ids(tables.project!, "organizationId"))];
@@ -334,7 +404,9 @@ export async function selectProjectTransfer(
     templates.filter((row) => organizations.includes(row.organizationId)),
   );
 
-  const hostnames = ids(tables.domain ?? [], "hostname");
+  const hostnames = [...new Set(ids(tables.domain ?? [], "hostname")
+    .filter((value): value is string => typeof value === "string")
+    .flatMap((hostname) => [hostname, normalizeTrackedDomain(hostname)]))];
   await fetch("server_analytics", "domain", hostnames);
   await fetch("server_analytics_geo", "domain", hostnames);
   await fetch("audit_event", "resourceId", [
@@ -388,7 +460,7 @@ export async function selectProjectTransfer(
     );
   }
   if (selection.includeDomains !== false) {
-    const hasLocalProjects = tables.project!.some((row) => !row.serverId && !row.cloudWorkspaceId);
+    const hasLocalProjects = tables.project!.some((row) => !row.serverId && !row.workspaceId);
     const verifications = await read("edge_target_verification", "organizationId", organizations);
     add(
       "edge_target_verification",
@@ -401,7 +473,10 @@ export async function selectProjectTransfer(
   // Histories can point at a fork/mail target that was not selected. Optional
   // references are detached; required references must be satisfied by the graph.
   for (const ref of transferReferences) {
-    if (["organization", "user", "servers"].includes(ref.parent)) continue;
+    // Keep managed placement as a destination hint. The subscription itself
+    // never travels; the importer requires an owned server mapping and clears
+    // live workload handles before deriving the destination workspace.
+    if (["organization", "user", "servers", "cloud_workspace"].includes(ref.parent)) continue;
     const parents = new Set(ids(tables[ref.parent] ?? [], ref.parentColumn));
     for (const row of tables[ref.table] ?? []) {
       if (row[ref.column] == null || parents.has(row[ref.column])) continue;
@@ -423,8 +498,17 @@ export async function dumpProjectTransfer(
   const graph = await db.transaction(async (rawTx) => {
     const tx = rawTx as DatabaseTransaction;
     await tx.execute(sql`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY`);
-    return selectProjectTransfer(transferReader(tx, metadataOnly), selection, excludeTables);
+    return selectProjectTransfer(createTransferReader(tx, metadataOnly), selection, excludeTables);
   });
+  // An empty selected table is authoritative on overwrite; an omitted table is
+  // not. Include empty categories even when no domains/parents were collected.
+  const omitted = new Set(excludeTables);
+  if (selection.includeServers === false) {
+    for (const name of ["servers", "server_github_auth", "github_deploy_key"]) omitted.add(name);
+  }
+  for (const name of PROJECT_TRANSFER_TABLES) {
+    if (!omitted.has(name)) graph.tables[name] ??= [];
+  }
   return {
     ...graph,
     dump: {

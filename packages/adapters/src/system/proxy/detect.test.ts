@@ -4,6 +4,7 @@ import {
   detectEdgeContainer,
   freeEdgeTargets,
   invalidateEdgeContainer,
+  isOurEdgeContainer,
   probeEdge,
   resolveOurEdgeContainer,
   stopTargetsForStatus,
@@ -15,6 +16,7 @@ function makeExecutor(rules: Array<[string, string]>): CommandExecutor {
     for (const [needle, out] of rules) {
       if (cmd.includes(needle)) return out;
     }
+    if (cmd.includes("{{json .Swarm}}")) return "null";
     return "";
   };
   return { exec } as unknown as CommandExecutor;
@@ -217,7 +219,7 @@ describe("probeEdge classification", () => {
     expect(status.classification).toBe("known");
     expect(status.occupants[0]?.isDocker).toBe(true);
     expect(status.occupants[0]?.proxy).toBe("traefik");
-    expect(stopTargetsForStatus(status).some((x) => x.container === "traefik-1")).toBe(true);
+    expect(stopTargetsForStatus(status).some((x) => x.container === "deadbeef".repeat(8))).toBe(true);
   });
 
   test("REGRESSION: a worker PID on the edge ports resolves to the nginx MASTER", async () => {
@@ -314,6 +316,7 @@ describe("freeEdgeTargets", () => {
     const executor = {
       exec: async (cmd: string) => {
         cmds.push(cmd);
+        if (cmd.includes("{{json .Swarm}}")) return "null";
         return cmd.includes("/proc/net/tcp") ? procTable([80, 443]) : "";
       },
     } as unknown as CommandExecutor;
@@ -330,6 +333,7 @@ describe("freeEdgeTargets", () => {
     let bound = true;
     const executor = {
       exec: async (cmd: string) => {
+        if (cmd.includes("{{json .Swarm}}")) return "null";
         if (cmd.includes("disable --now")) {
           bound = false;
           return "";
@@ -349,6 +353,7 @@ describe("freeEdgeTargets", () => {
     // takeover that in fact worked, on any box where reading procfs failed.
     const executor = {
       exec: async (cmd: string) => {
+        if (cmd.includes("{{json .Swarm}}")) return "null";
         if (cmd.includes("/proc/net/tcp")) throw new Error("ssh channel closed");
         return "";
       },
@@ -362,7 +367,11 @@ describe("freeEdgeTargets", () => {
 
   test("verifies only the port a target names", async () => {
     const executor = {
-      exec: async (cmd: string) => (cmd.includes("/proc/net/tcp") ? procTable([443]) : ""),
+      exec: async (cmd: string) => {
+        if (cmd.includes("{{json .Swarm}}")) return "null";
+        if (cmd.includes("{{json .Id}} {{json .Config.Labels}}")) return `"${"a".repeat(64)}" {}`;
+        return cmd.includes("/proc/net/tcp") ? procTable([443]) : "";
+      },
     } as unknown as CommandExecutor;
 
     const res = await freeEdgeTargets(
@@ -373,6 +382,59 @@ describe("freeEdgeTargets", () => {
     );
     // :443 is somebody else's business here (a target scoped to :80 was stopped).
     expect(res).toEqual({ freed: true, stillBound: [] });
+  });
+});
+
+describe("edge container identity", () => {
+  test.each([
+    ["openship-edge", "custom-edge:latest"],
+    ["my-proxy", "ghcr.io/oblien/openship-edge:0.9.5"],
+    ["my-proxy", "registry.example:5000/team/openship-edge:0.9.5"],
+    ["my-proxy", "ghcr.io/oblien/openship-edge@sha256:abc123"],
+    ["my-proxy", "openship-edge"],
+  ])("recognizes %s running %s", (name, image) => {
+    expect(isOurEdgeContainer(name, image)).toBe(true);
+  });
+
+  test.each([
+    ["openship-edge-demo-app", "0123456789ab"],
+    ["openship-edge-demo-db", "postgres:17"],
+    ["openship-edge-backup", "nginx:latest"],
+    ["my-openship-edge", "nginx:latest"],
+    ["my-proxy", "ghcr.io/example/openship-edge-demo:latest"],
+    ["my-proxy", "ghcr.io/openship-edge/console:latest"],
+    ["my-proxy", "openship-edge:5000/console:latest"],
+  ])("does not identify %s running %s as the edge", (name, image) => {
+    expect(isOurEdgeContainer(name, image)).toBe(false);
+  });
+
+  test("resolves the exact edge name after a newer app with the same prefix", async () => {
+    const executor = makeExecutor([
+      ["docker ps --filter name=openship-edge", "openship-edge-demo-app\nopenship-edge"],
+    ]);
+    expect(await resolveOurEdgeContainer(executor)).toBe("openship-edge");
+  });
+
+  test("reports no running edge when only similarly named apps exist", async () => {
+    const executor = makeExecutor([
+      ["docker ps --filter name=openship-edge", "openship-edge-demo-app"],
+      ["docker ps --format", "openship-edge-demo-app\t0123456789ab"],
+    ]);
+    expect(await resolveOurEdgeContainer(executor)).toBeNull();
+  });
+
+  test("resolves a renamed edge by image after rejecting similarly named apps", async () => {
+    const executor = makeExecutor([
+      ["docker ps --filter name=openship-edge", "openship-edge-demo-app"],
+      [
+        "docker ps --format",
+        [
+          "openship-edge-demo-app\t0123456789ab",
+          "my-proxy\tghcr.io/oblien/openship-edge:0.9.5",
+        ].join("\n"),
+      ],
+    ]);
+    expect(await resolveOurEdgeContainer(executor)).toBe("my-proxy");
   });
 });
 
@@ -491,6 +553,20 @@ describe("detectEdgeContainer", () => {
     expect(
       await detectEdgeContainer(psa("openship-edge\tghcr.io/oblien/openship-edge:0.4.0\texited")),
     ).toMatchObject({ name: "openship-edge", running: false, exists: true });
+  });
+
+  test("reads the edge version rather than a newer app with the same name prefix", async () => {
+    const inventory = [
+      "openship-edge-demo-app\t0123456789ab\trunning",
+      "openship-edge-demo-db\tpostgres:17\trunning",
+      "openship-edge\tghcr.io/oblien/openship-edge:0.9.5\trunning",
+    ].join("\n");
+    expect(await detectEdgeContainer(psa(inventory))).toEqual({
+      name: "openship-edge",
+      image: "ghcr.io/oblien/openship-edge:0.9.5",
+      running: true,
+      exists: true,
+    });
   });
 
   test("matches a container renamed off the default name but running our image", async () => {

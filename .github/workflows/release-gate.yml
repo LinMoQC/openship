@@ -34,6 +34,14 @@ permissions:
   actions: read
 
 jobs:
+  geoip:
+    name: GeoIP freshness
+    uses: ./.github/workflows/geoip.yml
+
+  actions-runner:
+    name: Actions execution
+    uses: ./.github/workflows/actions-e2e.yml
+
   scaling:
     name: Scaling E2E
     uses: ./.github/workflows/scaling-e2e.yml
@@ -86,7 +94,8 @@ jobs:
           workflow: .github/workflows/release-gate.yml
           job-id: test
 
-      # Execute release proof with the same pinned Bun used to build artifacts.
+      # The API network tests spawn Bun directly. Test the runtime shipped by
+      # the API image and release bundle, including its TLS and WebSocket paths.
       - name: Setup Bun
         if: steps.resume.outputs.reused != 'true'
         uses: oven-sh/setup-bun@v2
@@ -106,11 +115,21 @@ jobs:
         if: steps.resume.outputs.reused != 'true'
         run: bun install --frozen-lockfile
 
+      - name: Prepare installed Actions worker assets
+        if: steps.resume.outputs.reused != 'true'
+        uses: ./.github/actions/actions-runner
+
       # Covers packages/* too: they resolve to source, so an error in @repo/db surfaces
       # here. This is the only typecheck between a tag and a published image.
       - name: Typecheck apps/api
         if: steps.resume.outputs.reused != 'true'
         run: bun run --cwd apps/api lint
+
+      - name: Audit structured error boundaries
+        if: steps.resume.outputs.reused != 'true'
+        run: |
+          bun test scripts/audit-error-boundaries.test.ts
+          bun run errors:check
 
       - name: Typecheck SDK and shared platform
         if: steps.resume.outputs.reused != 'true'
@@ -120,6 +139,14 @@ jobs:
           bun run --cwd packages/sdk lint
           bun run --cwd apps/cli lint
 
+      - name: Verify scoped agents against the released Mindwire daemon
+        if: steps.resume.outputs.reused != 'true'
+        env:
+          OPENSHIP_ASSISTANT_E2E: "1"
+        run: >-
+          bun run --cwd packages/platform test
+          test/assistant-agents.e2e.test.ts test/assistant-remote.test.ts
+
       # `turbo run test` across every package with a test script. Includes the two
       # migration suites in packages/db: migrate-chain (the chain applied to a
       # POPULATED database, plus a self-check proving it can fail) and
@@ -127,7 +154,22 @@ jobs:
       # coverage for "the update crash-looped on migrations".
       - name: Run tests
         if: steps.resume.outputs.reused != 'true'
-        run: bun run test
+        run: |
+          bun run test
+          bun run test:scripts
+
+      - name: Verify project manifests against a real Kubernetes API
+        if: steps.resume.outputs.reused != 'true'
+        env:
+          RUN_KUBERNETES_E2E: "1"
+        run: bun run --cwd packages/adapters test test/project-manifests.e2e.test.ts
+
+      - name: Verify Cloud build coordination on PostgreSQL
+        if: steps.resume.outputs.reused != 'true'
+        env:
+          OPENSHIP_TEST_CLOUD_POSTGRES: "1"
+        run: |
+          OPENSHIP_TEST_PG_BIN="$(pg_config --bindir)" bun run --cwd packages/db test src/repos/cloud-build-postgres.integration.test.ts
 
   sdk-package:
     name: Installed SDK (Node ${{ matrix.node }})
@@ -158,6 +200,8 @@ jobs:
           bun-version-file: .bun-version
       - run: bun install --frozen-lockfile
         if: steps.resume.outputs.reused != 'true'
+      - uses: ./.github/actions/actions-runner
+        if: steps.resume.outputs.reused != 'true'
       - run: bun run --cwd packages/openship build
         if: steps.resume.outputs.reused != 'true'
       - run: bun run --cwd packages/openship test:package
@@ -173,17 +217,28 @@ jobs:
   # With it, an unreachable daemon fails in `beforeAll` instead of reporting skipped.
   #
   # `fast` is the ordinary daemon-level and full-cycle cases; `heavy` is
-  # rollback-build-restore alone (~225s cold, and fileParallelism is off, so it holds
-  # the whole suite up). Scaling has its own reusable job above.
+  # retained-image rebuilds and PHP version build/rollback checks. These compile
+  # real images and extensions; scaling has its own reusable job above.
   # See E2E_SCOPE in apps/api/vitest.e2e.config.ts.
   e2e-docker:
-    name: E2E (real Docker, ${{ matrix.scope }})
+    name: E2E (real Docker, ${{ matrix.label }})
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Files remain serial within each disposable daemon. Split the growing
+    # ordinary suite across two hosts so it fits the gate without relaxing tests.
+    timeout-minutes: ${{ matrix.scope == 'fast' && 45 || 30 }}
     strategy:
       fail-fast: false
       matrix:
-        scope: [fast, heavy]
+        include:
+          - scope: fast
+            label: fast 1/2
+            shard: 1/2
+          - scope: fast
+            label: fast 2/2
+            shard: 2/2
+          - scope: heavy
+            label: heavy
+            shard: ""
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -195,7 +250,7 @@ jobs:
         uses: ./.github/actions/release-resume
         with:
           scope: ${{ matrix.scope }}
-          job-name: E2E (real Docker, ${{ matrix.scope }})
+          job-name: E2E (real Docker, ${{ matrix.label }})
           workflow: .github/workflows/release-gate.yml
           job-id: e2e-docker
 
@@ -242,4 +297,8 @@ jobs:
         env:
           RUN_DOCKER_E2E: "1"
           E2E_SCOPE: ${{ matrix.scope }}
-        run: bun run --cwd apps/api test:e2e
+          E2E_SHARD: ${{ matrix.shard }}
+        run: |
+          args=()
+          if [ -n "$E2E_SHARD" ]; then args+=("--shard=$E2E_SHARD"); fi
+          bun run --cwd apps/api test:e2e "${args[@]}"

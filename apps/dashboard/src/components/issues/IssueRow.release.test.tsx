@@ -14,8 +14,9 @@ describe("GitOps home issue verdict", () => {
     const html = renderToStaticMarkup(<I18nProvider initialLocale="zh" initialDictionary={await loadDictionary("zh")}><IssueRow issue={issue} busy={false} onResolve={() => {}} onInfraFix={() => {}} /></I18nProvider>);
     expect(html).toContain(label); expect(html).not.toContain("有可用更新");
     expect(html).toContain(issue.message); expect(html).toContain('href="/projects/p/release"');
-    expect(html).toContain('aria-label="查看发布计划 · Commercial Web · PRT"');
-    expect(html).toContain('class="shrink-0">· PRT');
+    expect(html).toContain('aria-label="查看发布计划 Commercial Web"');
+    expect(html).toContain(">Commercial Web</span>"); expect(html).toContain(">PRT</span>");
+    expect(html).not.toContain("· PRT");
     expect(html).not.toContain(">Update<");
   });
 });

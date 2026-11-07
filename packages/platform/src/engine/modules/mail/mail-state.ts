@@ -19,6 +19,7 @@
  * enough for normal installs but bounded to keep the state file small
  * (SSH-read on every getStatus).
  */
+import { diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 const MAX_PERSISTED_LOGS = 800;
 
 import type { CommandExecutor } from "@repo/adapters";
@@ -389,22 +390,25 @@ export interface MailServerState {
  */
 export async function readState(
   exec: CommandExecutor,
+  options: { strict?: boolean } = {},
 ): Promise<MailServerState | null> {
-  const trimmed = await readOpenshipFile(exec, MAIL_STATE_FILE);
+  const trimmed = await readOpenshipFile(exec, MAIL_STATE_FILE, options);
   if (!trimmed) return null;
 
   try {
     const parsed = JSON.parse(trimmed) as MailServerState;
     if (parsed.version !== STATE_VERSION) {
-      console.warn(
+      if (options.strict) throw new Error("The mail setup state has an unsupported version");
+      errorDiagnostics.warn("platform/engine/modules/mail/mail-state",
         `mail-state: ${STATE_FILE_PATH} has version ${parsed.version}, expected ${STATE_VERSION} - ignoring`,
       );
       return null;
     }
     return parsed;
   } catch (err) {
-    console.warn(
-      `mail-state: failed to parse ${STATE_FILE_PATH}: ${safeErrorMessage(err)}`,
+    if (options.strict) throw new Error("The saved mail setup state could not be read", { cause: err });
+    errorDiagnostics.warn("platform/engine/modules/mail/mail-state",
+      `mail-state: failed to parse ${STATE_FILE_PATH}: ${safeErrorMessage(err)}`, err,
     );
     return null;
   }

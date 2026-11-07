@@ -11,7 +11,7 @@ import { DomainSettings } from "../DomainSettings";
 const mocks = vi.hoisted(() => ({
   get: vi.fn(), update: vi.fn(), remove: vi.fn(), verify: vi.fn(), records: vi.fn(),
   refreshServices: vi.fn(), invalidate: vi.fn(), toast: vi.fn(), changed: vi.fn(),
-  updateProject: vi.fn(), edge: vi.fn(), verifyModal: vi.fn(), cloud: vi.fn(),
+  updateProject: vi.fn(), edge: vi.fn(), retry: vi.fn(), verifyModal: vi.fn(), cloud: vi.fn(),
   connect: vi.fn(), listDomains: vi.fn(), dnsChallenge: vi.fn(), startDnsChallenge: vi.fn(), dnsPlan: vi.fn(),
 }));
 let context: ReturnType<typeof import("@/context/ProjectSettingsContext").useProjectSettings>;
@@ -20,18 +20,19 @@ vi.mock("next/navigation", () => ({ useRouter: () => ({ refresh: vi.fn(), push: 
 vi.mock("@/context/ToastContext", () => ({ useToast: () => ({ showToast: mocks.toast }) }));
 vi.mock("@/context/PlatformContext", () => ({ usePlatform: () => ({ baseDomain: "opsh.test", selfHosted: true }) }));
 vi.mock("@/context/CloudContext", () => ({ useCloud: () => ({ connected: true, requireCloud: mocks.cloud }), useDefaultDomainType: () => "custom" }));
-vi.mock("@/hooks/useSystemPrepareModal", () => ({ useEdgeModal: () => mocks.edge, useVerifyModal: () => mocks.verifyModal, useRoutingRetryModal: () => vi.fn() }));
+vi.mock("@/hooks/useSystemPrepareModal", () => ({ useEdgeModal: () => mocks.edge, useVerifyModal: () => mocks.verifyModal, useRoutingRetryModal: () => mocks.retry }));
 vi.mock("@/hooks/useProjectEndpoints", () => ({ invalidateProjectCaches: mocks.invalidate }));
 vi.mock("@/hooks/useLocalhostForward", () => ({ useLocalhostForward: () => ({ canForward: false }) }));
 vi.mock("../RoutingUnsyncedCallout", () => ({ RoutingUnsyncedCallout: () => null }));
 vi.mock("../RoutingConfigCard", () => ({ RoutingConfigCard: () => null }));
 vi.mock("../RouteRules", () => ({ RouteRules: () => null }));
+vi.mock("@/components/ingress/DomainIngressSettings", () => ({ DomainIngressMenu: () => null, IngressDestinationNotice: () => null }));
 vi.mock("@/lib/api", async (original) => {
   const actual = await original<typeof import("@/lib/api")>();
   return {
     ...actual,
     servicesApi: { ...actual.servicesApi, get: mocks.get, update: mocks.update },
-    projectsApi: { ...actual.projectsApi, update: mocks.updateProject, connectDomain: mocks.connect, getEdgeStatus: async () => ({ ready: true }) },
+    projectsApi: { ...actual.projectsApi, update: mocks.updateProject, connectDomain: mocks.connect, getEdgeStatus: async () => ({ ready: true }), listRouteProtection: async () => ({ data: [] }) },
     deployApi: { ...actual.deployApi, checkPorts: async () => ({ data: [] }), checkOutput: async () => ({ data: [] }) },
     domainsApi: { ...actual.domainsApi, remove: mocks.remove, verify: mocks.verify, records: mocks.records,
       list: mocks.listDomains, dnsChallenge: mocks.dnsChallenge, startDnsChallenge: mocks.startDnsChallenge, dnsPlan: mocks.dnsPlan,
@@ -141,22 +142,151 @@ describe("service domain controls", () => {
     expect(host.textContent).not.toContain("other.example.com");
   });
 
-  it("adds another hostname to the selected service and port without replacing existing routes", async () => {
+  it.each(["cloud", "server"] as const)(
+    "adds a %s service hostname and starts the shared HTTPS check without replacing existing routes",
+    async (target) => {
+      context.projectData.deployTarget = target;
+      await render({ serviceId: service.id, port: 3000, add: true });
+      await click(domains.addRoute.custom);
+      await input(domains.add.domainName, "www.example.com");
+      expect(host.querySelector('input[aria-label="Exposed port"]')).toBeNull();
+      expect(host.textContent).toContain("3000");
+      await submitAdd();
+      expect(mocks.update).toHaveBeenCalledOnce();
+      const [projectId, id, patch] = mocks.update.mock.calls[0];
+      expect([projectId, id]).toEqual(["project-stack", service.id]);
+      expect(patch.publicEndpoints).toEqual([
+        primary,
+        secondary,
+        { ...primary, customDomain: "www.example.com" },
+      ]);
+      expect(patch.customDomain).toBe(primary.customDomain);
+      expect(mocks.updateProject).not.toHaveBeenCalled();
+      expect(mocks.edge).not.toHaveBeenCalled();
+      expect(mocks.retry).toHaveBeenCalledExactlyOnceWith(
+        "project-stack",
+        expect.objectContaining({ onSession: expect.any(Function) }),
+      );
+      expect(mocks.changed).toHaveBeenCalledOnce();
+    },
+  );
+
+  it("prepares the edge once for a first service route instead of racing another HTTPS operation", async () => {
+    context.projectData.deployTarget = "server";
+    context.domainsData.domains = [];
+    context.projectData.domains = [];
+    context.projectData.publicEndpoints = [];
+    context.servicesData.services = [
+      { ...service, exposed: false, publicEndpoints: [], customDomain: null },
+    ];
     await render({ serviceId: service.id, port: 3000, add: true });
     await click(domains.addRoute.custom);
-    await input(domains.add.domainName, "www.example.com");
-    const port = host.querySelector<HTMLInputElement>(`input[aria-label="${copy.containerPort}"]`)!;
-    expect(port.value).toBe("3000");
-    expect(port.readOnly).toBe(true);
+    await input(domains.add.domainName, "first.example.com");
+    await submitAdd();
+    expect(mocks.update.mock.calls[0][2].publicEndpoints).toEqual([
+      { ...primary, customDomain: "first.example.com" },
+    ]);
+    expect(mocks.edge).toHaveBeenCalledExactlyOnceWith(
+      "project-stack",
+      expect.objectContaining({ onSettled: expect.any(Function) }),
+    );
+    expect(mocks.retry).not.toHaveBeenCalled();
+  });
+
+  it("uses the same HTTPS completion after a project-level domain save", async () => {
+    context.projectData.deployTarget = "server";
+    context.projectData.framework = "nextjs";
+    context.projectData.serviceCount = 0;
+    context.servicesData.services = [];
+    const domain = {
+      id: "new-project-domain",
+      hostname: "project.example.com",
+    };
+    mocks.connect.mockResolvedValue({ success: true, domain });
+    await render(null);
+    await click(domains.actions.addDomain);
+    await input(domains.add.customPlaceholder, domain.hostname);
+    await click(domains.add.submit);
+    expect(mocks.updateProject.mock.calls[0][1].publicEndpoints).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ customDomain: domain.hostname, port: 3000 }),
+      ]),
+    );
+    expect(mocks.retry).toHaveBeenCalledExactlyOnceWith(
+      "project-stack",
+      expect.objectContaining({ onSession: expect.any(Function) }),
+    );
+  });
+
+  it.each([primary.customDomain, "renamed.example.com"])(
+    "compares the saved project hostname before checking HTTPS for %s",
+    async (hostname) => {
+      context.projectData.deployTarget = "server";
+      context.projectData.framework = "nextjs";
+      context.projectData.serviceCount = 0;
+      context.projectData.publicEndpoints = [primary];
+      context.servicesData.services = [];
+      context.domainsData.domains = [
+        { ...context.domainsData.domains[0], serviceId: null },
+      ];
+      await render(null);
+      await click(`${copy.manage} ${primary.customDomain}`);
+      await click(domains.menu.editRoute);
+      const field = [...host.querySelectorAll("input")].find(
+        (input) => input.value === primary.customDomain,
+      )!;
+      expect(field).toBeDefined();
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          "value",
+        )!.set!.call(field, hostname);
+        field.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      await click(domains.edit.save);
+      expect(mocks.updateProject.mock.calls[0][1].publicEndpoints).toEqual([
+        expect.objectContaining({ customDomain: hostname }),
+      ]);
+      expect(mocks.retry).toHaveBeenCalledTimes(
+        hostname === primary.customDomain ? 0 : 1,
+      );
+    },
+  );
+
+  it("saves an undeployed service route without starting edge or certificate execution", async () => {
+    context.projectData.deployTarget = "server";
+    context.projectData.activeDeploymentId = null;
+    await render({ serviceId: service.id, port: 3000, add: true });
+    await click(domains.addRoute.custom);
+    await input(domains.add.domainName, "later.example.com");
     await submitAdd();
     expect(mocks.update).toHaveBeenCalledOnce();
-    const [projectId, id, patch] = mocks.update.mock.calls[0];
-    expect([projectId, id]).toEqual(["project-stack", service.id]);
-    expect(patch.publicEndpoints).toEqual([primary, secondary, { ...primary, customDomain: "www.example.com" }]);
-    expect(patch.customDomain).toBe(primary.customDomain);
-    expect(mocks.updateProject).not.toHaveBeenCalled();
     expect(mocks.edge).not.toHaveBeenCalled();
-    expect(mocks.changed).toHaveBeenCalledOnce();
+    expect(mocks.retry).not.toHaveBeenCalled();
+  });
+
+  it("adds a managed free hostname without retrying certificates for existing custom siblings", async () => {
+    await render({ serviceId: service.id, port: 3000, add: true });
+    await input(domains.add.domainName, "new-api");
+    await submitAdd();
+    expect(mocks.update.mock.calls[0][2].publicEndpoints).toEqual([
+      primary,
+      secondary,
+      { port: 3000, domainType: "free", domain: "new-api" },
+    ]);
+    expect(mocks.retry).not.toHaveBeenCalled();
+    expect(mocks.edge).not.toHaveBeenCalled();
+  });
+
+  it("rejects an existing service hostname without saving or retrying HTTPS", async () => {
+    await render({ serviceId: service.id, port: 3000, add: true });
+    await click(domains.addRoute.custom);
+    await input(domains.add.domainName, primary.customDomain);
+    await submitAdd();
+    expect(mocks.update).not.toHaveBeenCalled();
+    expect(mocks.retry).not.toHaveBeenCalled();
+    expect(mocks.edge).not.toHaveBeenCalled();
+    expect(host.querySelector("form")).not.toBeNull();
   });
 
   it("opens inline HTTPS setup for the persisted wildcard service domain without starting an order", async () => {
@@ -173,6 +303,7 @@ describe("service domain controls", () => {
     expect(mocks.dnsChallenge).toHaveBeenCalledWith(wildcard.id);
     expect(mocks.startDnsChallenge).not.toHaveBeenCalled();
     expect(mocks.verifyModal).not.toHaveBeenCalled();
+    expect(mocks.retry).not.toHaveBeenCalled();
     expect(host.querySelector('a[href="https://*.tenant.example.com"]')).toBeNull();
   });
 
@@ -212,6 +343,8 @@ describe("service domain controls", () => {
     expect(host.querySelector<HTMLInputElement>(`input[aria-label="${domains.add.domainName}"]`)?.value).toBe("new.example.com");
     expect(mocks.toast).toHaveBeenCalledWith("Domain is already in use", "error");
     expect(mocks.changed).not.toHaveBeenCalled();
+    expect(mocks.edge).not.toHaveBeenCalled();
+    expect(mocks.retry).not.toHaveBeenCalled();
   });
 
   it("edits the selected secondary route while preserving its primary and newly added siblings", async () => {
@@ -227,7 +360,7 @@ describe("service domain controls", () => {
     const fresh = { port: 4000, domainType: "custom" as const, customDomain: "fresh.example.com" };
     mocks.get.mockResolvedValue({ success: true, service: { ...service, publicEndpoints: [primary, secondary, fresh] } });
     await click(domains.editRoute.save);
-    expect(mocks.update.mock.calls[0][2].publicEndpoints).toEqual([primary, { ...secondary, customDomain: "monitor.example.com" }, fresh]);
+    expect(mocks.update.mock.calls[0][2].publicEndpoints).toEqual([primary, { ...secondary, customDomain: "monitor.example.com", redirectTo: "" }, fresh]);
   });
 
   it("removes the correct persisted domain and refreshes the service", async () => {
@@ -236,6 +369,7 @@ describe("service domain controls", () => {
     await click("Remove route");
     await click("Remove route");
     expect(mocks.remove).toHaveBeenCalledExactlyOnceWith("dom-metrics");
+    expect(mocks.retry).not.toHaveBeenCalled();
     expect(mocks.refreshServices).toHaveBeenCalled();
     expect(mocks.changed).toHaveBeenCalledOnce();
   });
@@ -273,14 +407,22 @@ describe("service domain controls", () => {
     await click(domains.actions.addDomain);
     await click(domains.addRoute.custom);
     await input(domains.add.domainName, "another.example.com");
-    await input(copy.containerPort, "3000");
+    await input(baseDictionary.widgets.routing.settingsCard.exposedPort, "3000");
     await submitAdd();
     expect(mocks.update).not.toHaveBeenCalled();
-    await act(async () => {
-      const select = host.querySelector<HTMLSelectElement>(`select[aria-label="${copy.service}"]`)!;
-      select.value = service.id;
-      select.dispatchEvent(new Event("change", { bubbles: true }));
-    });
+    const selectService = async (label: string) => {
+      await click(copy.service);
+      const option = [...document.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+        .find((element) => element.textContent?.startsWith(label));
+      expect(option).toBeDefined();
+      await act(async () => option!.click());
+    };
+    await selectService(service.name);
+    const port = host.querySelector<HTMLInputElement>(`input[aria-label="${baseDictionary.widgets.routing.settingsCard.exposedPort}"]`)!;
+    expect(port.value).toBe("3000");
+    await selectService(copy.selectService);
+    expect(port.value).toBe("");
+    await selectService(service.name);
     await submitAdd();
     expect(mocks.update.mock.calls[0].slice(0, 2)).toEqual(["project-stack", service.id]);
     expect(mocks.update.mock.calls[0][2].publicEndpoints).toEqual([primary, secondary, { ...primary, customDomain: "another.example.com" }]);
@@ -308,4 +450,36 @@ describe("service domain controls", () => {
     expect(host.textContent).not.toContain("other.example.com");
     expect(host.querySelector("form")).toBeNull();
   });
+});
+
+it.each(["cloud", "server"] as const)("adds apex and www together on %s through the shared form", async target => {
+  context.projectData.deployTarget = target;
+  await render({ serviceId: service.id, port: 3000, add: true });
+  await click(domains.addRoute.custom);
+  await input(domains.add.domainName, "example.com");
+  await click(domains.add.includeWww);
+  expect(host.textContent).toContain("www.example.com → example.com");
+  await submitAdd();
+  expect(mocks.update).toHaveBeenCalledOnce();
+  expect(mocks.update.mock.calls[0][2].publicEndpoints).toEqual([
+    primary, secondary,
+    { port: 3000, domainType: "custom", customDomain: "example.com" },
+    { port: 3000, domainType: "custom", customDomain: "www.example.com", redirectTo: "example.com", redirectStatus: 301 },
+  ]);
+  expect(mocks.retry).toHaveBeenCalledOnce();
+});
+
+it("edits an existing service domain into a redirect without changing its siblings", async () => {
+  await render();
+  await click(`${copy.manage} ${secondary.customDomain}`);
+  await click(domains.menu.editRoute);
+  await click(baseDictionary.widgets.routing.settingsCard.redirectTo);
+  const option = [...document.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+    .find(item => item.textContent?.includes(primary.customDomain));
+  expect(option).toBeDefined();
+  await act(async () => option!.click());
+  await click(domains.editRoute.save);
+  expect(mocks.update.mock.calls[0][2].publicEndpoints).toEqual([
+    primary, { ...secondary, redirectTo: primary.customDomain, redirectStatus: 301 },
+  ]);
 });

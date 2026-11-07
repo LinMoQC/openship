@@ -167,6 +167,18 @@ describe("imageTag", () => {
 });
 
 describe("detectServerContainers", () => {
+  it("does not overwrite mail health when its probe fails even if Docker answers another read", async () => {
+    mocked.mailServer.get.mockResolvedValue({ domain: "example.com" } as never);
+    mocked.mailEngine.mockRejectedValueOnce(new Error("connect ENETUNREACH 192.0.2.1:22"));
+    mocked.docker.mockResolvedValue(true);
+    const views = await detectServerContainers(server);
+    expect(views.some((view) => view.component === "mail")).toBe(false);
+    expect(mocked.status.upsert).not.toHaveBeenCalledWith(expect.objectContaining({ component: "mail" }));
+    expect(mocked.status.remove).not.toHaveBeenCalledWith("srv_1", "mail");
+    expect(mocked.repairMail).not.toHaveBeenCalled();
+    expect(mocked.reconcileMail).not.toHaveBeenCalled();
+  });
+
   it("marks the edge behind when its running image differs from the pin, and caches it", async () => {
     mocked.edge.mockResolvedValue(edgeContainer("ghcr.io/oblien/openship-edge:0.4.0") as never);
 

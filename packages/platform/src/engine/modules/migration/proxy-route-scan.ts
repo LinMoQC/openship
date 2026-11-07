@@ -7,10 +7,11 @@
  * Read-only; never throws (a scan failure must not fail discovery).
  */
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { buildProxyRouteIndex, edgeProxy } from "@repo/adapters";
 import type { CommandExecutor, ProxySiteRoute, ProxyKind } from "@repo/adapters";
 import { safeErrorMessage } from "@repo/core";
-import { sshManager } from "../../lib/ssh-manager";
+import { withMigrationExecution } from "./migration-runtime";
 
 /** @deprecated Use `ProxySiteRoute` from `@repo/adapters`. Kept so existing
  *  migration callers (docker-reconcile, docker-inspect) don't churn. */
@@ -30,10 +31,11 @@ function failedScan(error: unknown): ProxyRouteScan {
   };
 }
 
-export async function scanProxyRoutes(serverId: string): Promise<ProxyRouteScan> {
+export async function scanProxyRoutes(serverId: string, organizationId: string): Promise<ProxyRouteScan> {
   try {
-    return await sshManager.withExecutor(serverId, scanProxyRoutesWithExecutor);
+    return await withMigrationExecution(serverId, organizationId, scanProxyRoutesWithExecutor);
   } catch (error) {
+    observeCaughtError(error, "platform/engine/modules/migration/proxy-route-scan");
     return failedScan(error);
   }
 }
@@ -56,6 +58,7 @@ export async function scanProxyRoutesWithExecutor(
       warnings: scan.warnings,
     };
   } catch (error) {
+    observeCaughtError(error, "platform/engine/modules/migration/proxy-route-scan");
     return failedScan(error);
   }
 }

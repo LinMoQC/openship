@@ -15,11 +15,14 @@
  */
 
 import { Type, type Static } from "@sinclair/typebox";
+import { PublicEndpointInput } from "./deployment-inputs";
 import { EnvironmentScopeSchema } from "./environment-scope";
 import {
   MAX_GENERATED_CONFIG_FILES,
   MAX_GENERATED_CONFIG_FILE_BYTES,
   MAX_GENERATED_CONFIG_PATH_BYTES,
+  CONTAINER_HOST_PATTERN,
+  MAX_COMPOSE_SHM_BYTES,
 } from "@repo/core";
 import { MonorepoSubAppFieldsSchema } from "./project-inputs";
 
@@ -52,6 +55,27 @@ const HealthcheckSchema = Type.Object(
     retries: Type.Optional(Type.Integer({ minimum: 0, maximum: 100 })),
     startPeriod: Type.Optional(Type.String({ maxLength: 32 })),
     disable: Type.Optional(Type.Boolean()),
+  },
+  { additionalProperties: false },
+);
+
+const GpuRequestSchema = Type.Object(
+  {
+    driver: Type.Optional(Type.Literal("nvidia")),
+    count: Type.Optional(
+      Type.Union([Type.Literal("all"), Type.Integer({ minimum: 0, maximum: 64 })]),
+    ),
+    deviceIds: Type.Optional(
+      Type.Array(Type.String({ minLength: 1, maxLength: 128 }), { minItems: 1, maxItems: 64 }),
+    ),
+    capabilities: Type.Optional(
+      Type.Array(Type.String({ minLength: 1, maxLength: 64 }), { minItems: 1, maxItems: 16 }),
+    ),
+    options: Type.Optional(
+      Type.Record(Type.String({ minLength: 1, maxLength: 64 }), Type.String({ maxLength: 1000 }), {
+        maxProperties: 16,
+      }),
+    ),
   },
   { additionalProperties: false },
 );
@@ -163,12 +187,23 @@ const AdvancedSchema = Type.Object(
           {
             cpuCores: Type.Optional(Type.Number({ minimum: 0, maximum: 1024 })),
             memoryMb: Type.Optional(Type.Number({ minimum: 0, maximum: 4194304 })),
+            /** Docker-only: run with no swap. Requires a positive effective memory limit. */
+            swapDisabled: Type.Optional(Type.Boolean()),
           },
           { additionalProperties: false },
         ),
         Type.Null(),
       ]),
     ),
+    /** GPU request (compose `deploy.resources.reservations.devices` / `gpus` /
+     *  `runtime: nvidia`). Compose-owned like `entrypoint`: here so a client that
+     *  reads a service and PATCHes the whole `advanced` blob back does not 400
+     *  against this strict object. `null` clears it. */
+    gpus: Type.Optional(
+      Type.Union([GpuRequestSchema, Type.Array(GpuRequestSchema, { maxItems: 16 }), Type.Null()]),
+    ),
+    runtime: Type.Optional(Type.Union([Type.Literal("nvidia"), Type.Null()])),
+    shmSize: Type.Optional(Type.Union([Type.Integer({ minimum: 1, maximum: MAX_COMPOSE_SHM_BYTES }), Type.Null()])),
     /** Custom east-west DNS alias resolving ALONGSIDE the service name on the
      *  project network. Free-form here (normalized + collision-checked by
      *  validateServiceAlias); `null`/`""` clears it. */
@@ -184,6 +219,10 @@ const AdvancedSchema = Type.Object(
      */
     networkMode: Type.Optional(Type.Union([Type.String({ maxLength: 200 }), Type.Null()])),
     pidMode: Type.Optional(Type.Union([Type.String({ maxLength: 200 }), Type.Null()])),
+    extraHosts: Type.Optional(Type.Union([
+      Type.Record(Type.String({ pattern: CONTAINER_HOST_PATTERN }), Type.String({ minLength: 1, maxLength: 64 }), { maxProperties: 100 }),
+      Type.Null(),
+    ])),
     /**
      * Container ENTRYPOINT as argv (compose `entrypoint`). Same round-trip-only
      * reasoning as the two above: the compose file owns it, so this exists so a
@@ -242,6 +281,8 @@ const ComposeFieldsBlock = {
         domain: Type.Optional(Type.String({ maxLength: 255 })),
         customDomain: Type.Optional(Type.String({ maxLength: 255 })),
         domainType: Type.Optional(Type.Union([Type.Literal("free"), Type.Literal("custom")])),
+        redirectTo: PublicEndpointInput.properties.redirectTo,
+        redirectStatus: PublicEndpointInput.properties.redirectStatus,
       }),
       { maxItems: 20 },
     ),
@@ -432,6 +473,8 @@ export const SyncServicesBody = Type.Object({
                 customDomain: Type.Optional(Type.String()),
                 domainType: Type.Optional(Type.String()),
                 targetPath: Type.Optional(Type.String()),
+                redirectTo: PublicEndpointInput.properties.redirectTo,
+                redirectStatus: PublicEndpointInput.properties.redirectStatus,
               },
               { additionalProperties: true },
             ),

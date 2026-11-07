@@ -16,6 +16,8 @@ openship backup destination [options] [command]
 
 | Subcommand | Purpose |
 | --- | --- |
+| [`history [options]`](/docs/cli/reference/backup/destination#openship-backup-destination-history) | Read backup history across destinations with a continuation cursor |
+| [`runs [options] <id>`](/docs/cli/reference/backup/destination#openship-backup-destination-runs) | Read a destination's backup runs and next cursor |
 | [`list`](/docs/cli/reference/backup/destination#openship-backup-destination-list) | List backup destinations |
 | [`create [options]`](/docs/cli/reference/backup/destination#openship-backup-destination-create) | Create a backup destination |
 | [`preflight <destinationId>`](/docs/cli/reference/backup/destination#openship-backup-destination-preflight) | Verify a destination (write + read + delete a probe object) |
@@ -65,6 +67,19 @@ openship backup destination get [options] <id>
 | --- | --- |
 | `id` | Destination ID |
 
+## openship backup destination history
+
+Read backup history across destinations with a continuation cursor
+
+```text
+openship backup destination history [options]
+```
+
+| Option | Meaning |
+| --- | --- |
+| `--limit <number>` | Maximum results |
+| `--before <cursor>` | Continuation cursor |
+
 ## openship backup destination list
 
 List backup destinations
@@ -108,6 +123,23 @@ openship backup destination remove|rm [options] <id>
 | Argument | Meaning |
 | --- | --- |
 | `id` | Destination ID |
+
+## openship backup destination runs
+
+Read a destination's backup runs and next cursor
+
+```text
+openship backup destination runs [options] <id>
+```
+
+| Argument | Meaning |
+| --- | --- |
+| `id` | Destination ID |
+
+| Option | Meaning |
+| --- | --- |
+| `--limit <number>` | Maximum results |
+| `--before <cursor>` | Continuation cursor |
 
 ## openship backup destination update
 

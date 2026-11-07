@@ -6,7 +6,10 @@ const mocks = vi.hoisted(() => ({
   session: vi.fn(),
   row: vi.fn(),
   live: vi.fn(),
+  queue: vi.fn(),
 }));
+
+vi.mock("@repo/platform/engine/modules/deployments/cloud-build-queue-status", () => ({ getCloudBuildQueueStatus: mocks.queue }));
 
 vi.mock("@repo/db", () => ({
   repos: {
@@ -32,6 +35,7 @@ vi.mock("@repo/platform/engine/modules/domains/project-route.service", () => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.queue.mockResolvedValue(null);
   mocks.load.mockResolvedValue({
     dep: { id: "dep-1", organizationId: "org-1", status: "cancelled" },
     project: { id: "project-1" },
@@ -67,9 +71,11 @@ describe("build status uses the durable outcome (#919)", () => {
         status: expected,
         deploymentStatus: status,
         is_active: false,
+        completionPending: true,
         cancellationPending: status === "cancelled",
         buildDurationMs: null,
       });
+      expect(mocks.live).toHaveBeenCalledExactlyOnceWith("dep-1", "project-1");
     },
   );
 
@@ -82,8 +88,29 @@ describe("build status uses the durable outcome (#919)", () => {
     expect(await getBuildSessionStatus("dep-1")).toMatchObject({
       status: "deploying",
       is_active: true,
+      completionPending: false,
     });
+    expect(mocks.live).not.toHaveBeenCalled();
   });
+
+  it.each(["ready", "failed", "cancelled"])(
+    "keeps %s cleanup pending when the lease cannot be read, then observes its release",
+    async (status) => {
+      mocks.load.mockResolvedValue({
+        dep: { id: "dep-1", organizationId: "org-1", status },
+        project: { id: "project-1" },
+      });
+      mocks.live.mockRejectedValueOnce(new Error("database unavailable")).mockResolvedValue(false);
+      expect(await getBuildSessionStatus("dep-1")).toMatchObject({
+        deploymentStatus: status, is_active: false, completionPending: true,
+        cancellationPending: status === "cancelled",
+      });
+      expect(await getBuildSessionStatus("dep-1")).toMatchObject({
+        deploymentStatus: status, is_active: false, completionPending: false, cancellationPending: false,
+      });
+      expect(mocks.live).toHaveBeenCalledTimes(2);
+    },
+  );
 
   it("observes cancellation committed between the deployment and session reads", async () => {
     mocks.load.mockResolvedValue({
@@ -94,6 +121,7 @@ describe("build status uses the durable outcome (#919)", () => {
     expect(await getBuildSessionStatus("dep-1")).toMatchObject({
       status: "cancelled",
       is_active: false,
+      completionPending: true,
       cancellationPending: true,
       buildDurationMs: 15_000,
     });
@@ -122,8 +150,19 @@ describe("build status uses the durable outcome (#919)", () => {
     expect(await getBuildSessionStatus("dep-1")).toMatchObject({
       status: "cancelled",
       is_active: false,
+      completionPending: false,
       cancellationPending: false,
       buildDurationMs: 3500,
     });
   });
+});
+
+
+it("projects a queued Cloud build without an in-memory session as waiting", async () => {
+  const queue = { position: 2, reason: "concurrency", simultaneousBuilds: 1, activeBuilds: 1, workspaceId: "ws" };
+  mocks.load.mockResolvedValue({ dep: { id: "dep-1", organizationId: "org-1", status: "queued" }, project: { id: "project-1" } });
+  mocks.row.mockResolvedValue({ status: "pending", startedAt: null, logs: [] });
+  mocks.session.mockReturnValue(null);
+  mocks.queue.mockResolvedValue(queue);
+  expect(await getBuildSessionStatus("dep-1")).toMatchObject({ status: "queued", queue, is_active: false, buildStartedAt: null, progress: 0, completionPending: false });
 });

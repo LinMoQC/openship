@@ -1,5 +1,7 @@
 export * from "./releases";
 import { createReleaseOperations, type ReleaseDependencies, type PlatformReleaseOperations } from "./releases";
+export * from "./actions";
+import { createActionOperations, type ActionDependencies, type PlatformActionOperations } from "./actions";
 export * from "./context";
 export * from "./authorization";
 export * from "./instance-authorization";
@@ -37,6 +39,7 @@ export * from "./state/prompt-registry";
 export * from "./state/encryption";
 
 import { createDeploymentOperations, type DeploymentDependencies, type PlatformDeploymentOperations } from "./deployments";
+import { observePlatformOperations } from "./diagnostics";
 import type { Authorization } from "./authorization";
 import { createProjectOperations, type PlatformProjectOperations, type ProjectDependencies } from "./projects";
 import { createSourceOperations, type PlatformSourceOperations, type SourceDependencies } from "./sources";
@@ -75,6 +78,7 @@ import { createGitHubOperations, type PlatformGitHubOperations, type GitHubDepen
 import { createNoticeOperations, type PlatformNoticeOperations, type NoticeDependencies } from "./notices";
 
 import { createBillingOperations, type PlatformBillingOperations, type BillingDependencies } from "./billing";
+import { createAffiliateOperations, type PlatformAffiliateOperations, type AffiliateDependencies } from "./affiliates";
 
 export interface PlatformKernel {
   readonly resolveScope: Authorization["resolveScope"];
@@ -92,6 +96,7 @@ export interface PlatformKernel {
   readonly backupDestinations: PlatformBackupDestinationOperations;
   readonly backups: PlatformBackupOperations;
   readonly billing: PlatformBillingOperations;
+  readonly affiliates: PlatformAffiliateOperations;
   readonly notices: PlatformNoticeOperations;
   readonly github: PlatformGitHubOperations;
   readonly permissions: PlatformPermissionOperations;
@@ -104,11 +109,12 @@ export interface PlatformKernel {
   readonly issues: PlatformIssueOperations;
   readonly analytics: PlatformAnalyticsOperations;
   readonly jobs: PlatformJobOperations;
+  readonly actions: PlatformActionOperations;
 }
 
 /** Composition boundary. It acquires no resources and owns no implicit global state. */
-export function createPlatform(deps: DeploymentDependencies & { projects?: ProjectDependencies; sources?: SourceDependencies; services?: ServiceDependencies; domains?: DomainDependencies; dns?: DnsDependencies; credentials?: CredentialDependencies; servers?: ServerDependencies; system?: SystemDependencies; apps?: AppDependencies; backupDestinations?: BackupDestinationDependencies; backups?: BackupDependencies; billing?: BillingDependencies; notices?: NoticeDependencies; github?: GitHubDependencies; permissions?: PermissionDependencies; tokens?: TokenDependencies; webhooks?: WebhookDependencies; updates?: UpdateDependencies; audit?: AuditDependencies; settings?: UserSettingsDependencies; notifications?: NotificationDependencies; issues?: IssueDependencies; analytics?: AnalyticsDependencies; jobs?: JobDependencies; releases?: ReleaseDependencies }): PlatformKernel {
-  return Object.freeze({
+export function createPlatform(deps: DeploymentDependencies & { projects?: ProjectDependencies; sources?: SourceDependencies; services?: ServiceDependencies; domains?: DomainDependencies; dns?: DnsDependencies; credentials?: CredentialDependencies; servers?: ServerDependencies; system?: SystemDependencies; apps?: AppDependencies; backupDestinations?: BackupDestinationDependencies; backups?: BackupDependencies; billing?: BillingDependencies; affiliates?: AffiliateDependencies; notices?: NoticeDependencies; github?: GitHubDependencies; permissions?: PermissionDependencies; tokens?: TokenDependencies; webhooks?: WebhookDependencies; updates?: UpdateDependencies; audit?: AuditDependencies; settings?: UserSettingsDependencies; notifications?: NotificationDependencies; issues?: IssueDependencies; analytics?: AnalyticsDependencies; jobs?: JobDependencies; actions?: ActionDependencies; releases?: ReleaseDependencies }): PlatformKernel {
+  const kernel = {
     resolveScope: deps.authorization.resolveScope,
     releases: createReleaseOperations(deps.authorization, deps.releases),
     deployments: createDeploymentOperations(deps),
@@ -124,6 +130,7 @@ export function createPlatform(deps: DeploymentDependencies & { projects?: Proje
     backupDestinations: createBackupDestinationOperations(deps.authorization, deps.backupDestinations),
     backups: createBackupOperations(deps.authorization, deps.backups),
     billing: createBillingOperations(deps.authorization, deps.billing),
+    affiliates: createAffiliateOperations(deps.authorization, deps.affiliates),
     notices: createNoticeOperations(deps.authorization, deps.notices),
     github: createGitHubOperations(deps.authorization, deps.github),
     permissions: createPermissionOperations(deps.authorization, deps.permissions),
@@ -136,5 +143,9 @@ export function createPlatform(deps: DeploymentDependencies & { projects?: Proje
     issues: createIssueOperations(deps.authorization, deps.issues),
     analytics: createAnalyticsOperations(deps.authorization, deps.analytics),
     jobs: createJobOperations(deps.authorization, deps.jobs),
-  });
+    actions: createActionOperations(deps.authorization, deps.actions),
+  };
+  return Object.freeze(Object.fromEntries(Object.entries(kernel).map(([name, value]) =>
+    [name, typeof value === "object" ? observePlatformOperations(name, value) : value],
+  ))) as unknown as PlatformKernel;
 }

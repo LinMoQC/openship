@@ -5,9 +5,10 @@
  * keeping this module focused on data transformation and business rules.
  */
 
+import { reportCaughtError as observeCaughtError, diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import { randomBytes } from "crypto";
 import { githubFetch, getGitHubAuthMode } from "./github.auth";
-import { ghFetch, ghSend } from "./github.http";
+import { ghFetch } from "./github.http";
 import { mapRepositories } from "./sources/mappers";
 import { isIgnoredRepoPath } from "../../lib/project-root-detector";
 import { cacheStore, type CacheStore } from "../../lib/cache-store/index";
@@ -33,7 +34,10 @@ import { env } from "../../config/env";
 import { resolveApiPublicUrl, sharedWebhookUrl, domainWebhookUrl } from "../../lib/public-url";
 import { hasActiveGitHubSource } from "./github-source.service";
 
-export const GITHUB_DEPLOY_WEBHOOK_EVENTS = ["push"] as const;
+/** Repository read identity. Credentials remain inside the shared dispatcher. */
+export interface GitHubReadOptions { serverId?: string }
+
+export const GITHUB_DEPLOY_WEBHOOK_EVENTS = ["push", "pull_request"] as const;
 const MAX_FALLBACK_TREE_ENTRIES = 5000;
 const MAX_COMPARE_FILES_PER_RESPONSE = 300;
 const COMPARE_CACHE_TTL_SECONDS = 6 * 60 * 60;
@@ -54,127 +58,21 @@ export interface CompareCommitsResult {
  */
 export const WEBHOOK_SECRET_BYTES = 32;
 
-/**
- * OAuth scopes that strictly exceed Openship's needs and should warn a
- * user when present on a saved PAT. These are the broad, account- or
- * org-administrative scopes; possessing them does not break Openship,
- * but the dashboard's PAT save handler should surface a clear warning
- * so the user understands they handed us more access than necessary.
- *
- * Source: https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps
- */
-export const PAT_SCOPE_WARN_PATTERNS: readonly RegExp[] = [
-  /^admin:/i, // admin:org, admin:repo_hook, admin:public_key, …
-  /^delete_repo$/i,
-  /^write:packages$/i,
-  /^write:org$/i,
-];
-
-/**
- * Scopes that are REQUIRED — at least one of these MUST be present on a
- * saved PAT. `repo` grants full private-repo read/write; `public_repo`
- * is the public-only subset. Without either we cannot clone or list any
- * non-public repo, so the dashboard's PAT save handler should hard-fail.
- */
-export const PAT_SCOPE_REQUIRED: readonly string[] = ["repo", "public_repo"];
-
-/**
- * Result of `inspectPatScope`.
- *
- *   - `scopes` is the validated list of OAuth scopes returned by GitHub
- *     (from the `x-oauth-scopes` response header). Empty when the token
- *     is a fine-grained PAT that doesn't expose classic scopes.
- *   - `user` is the GitHub login the token belongs to — useful for
- *     attribution and downstream "this PAT belongs to @x" UX.
- */
-export interface PatScopeReport {
-  scopes: string[];
-  user: string;
-}
-
-/**
- * HIGH #10 — inspect a PAT before we accept and store it. Calls
- * `GET /user` with the proposed token and reads `x-oauth-scopes` from
- * the response header (the canonical place GitHub publishes the scope
- * set of a classic OAuth/PAT token; absent or empty for fine-grained
- * PATs, where scope is set via the repo permission model instead).
- *
- * Throws on any non-2xx — callers should map that to a clean "invalid
- * token" response. The returned `scopes` array is whitespace-split and
- * lowercased; the controller decides whether to:
- *   - REJECT outright (missing every PAT_SCOPE_REQUIRED entry),
- *   - WARN (any PAT_SCOPE_WARN_PATTERNS match), or
- *   - persist alongside `user_settings.patScope` for later re-validation.
- *
- * Lives in github.service.ts (not in lib/) because PAT inspection is
- * GitHub-specific and the constants above belong with it.
- */
-export async function inspectPatScope(token: string): Promise<PatScopeReport> {
-  const res = await ghSend(token, { url: "https://api.github.com/user" });
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(
-      `Could not validate PAT (GitHub returned ${res.status}). ${body.slice(0, 200)}`,
-    );
-  }
-  const scopeHeader = res.headers.get("x-oauth-scopes") ?? "";
-  const scopes = scopeHeader
-    .split(",")
-    .map((s) => s.trim().toLowerCase())
-    .filter(Boolean);
-  const json = (await res.json()) as { login?: string };
-  return { scopes, user: json.login ?? "" };
-}
-
-/**
- * Convenience classifier for the inspectPatScope report. Centralizes
- * the policy so callers don't reimplement the rules independently.
- *
- * Returns:
- *   - `{ ok: false, reason }`  — token lacks every required scope; the
- *     caller MUST refuse to save it.
- *   - `{ ok: true, warning }`  — token includes a broader-than-needed
- *     scope; the caller SHOULD surface this back in the response body.
- *   - `{ ok: true }`           — token is fine.
- */
-export function classifyPatScope(
-  report: PatScopeReport,
-): { ok: false; reason: string } | { ok: true; warning?: string } {
-  const scopeSet = new Set(report.scopes);
-
-  // Fine-grained PATs report no classic scopes — pass without warning.
-  // The GitHub API still gates each request by the repo permission grid,
-  // so the token can't escalate beyond what the user explicitly granted.
-  if (report.scopes.length === 0) return { ok: true };
-
-  if (!PAT_SCOPE_REQUIRED.some((s) => scopeSet.has(s))) {
-    return {
-      ok: false,
-      reason: `PAT is missing required scope (need one of: ${PAT_SCOPE_REQUIRED.join(", ")}). Got: ${report.scopes.join(", ") || "none"}.`,
-    };
-  }
-
-  const broad = report.scopes.filter((s) => PAT_SCOPE_WARN_PATTERNS.some((re) => re.test(s)));
-  if (broad.length > 0) {
-    return {
-      ok: true,
-      warning: `PAT has broader scope than needed: ${broad.join(", ")}. Consider regenerating with only \`repo\` (or \`public_repo\`).`,
-    };
-  }
-  return { ok: true };
-}
+export { inspectPatScope, classifyPatScope, PAT_SCOPE_REQUIRED, PAT_SCOPE_WARN_PATTERNS } from "./github.pat";
+export type { PatScopeReport } from "./github.pat";
 
 async function listRepositoryTreeViaContents(
   ctx: RequestContext,
   owner: string,
   repo: string,
-  opts: { branch?: string } = {},
+  opts: GitHubReadOptions & { branch?: string; signal?: AbortSignal } = {},
 ): Promise<Array<{ path: string; type: "file" | "dir" }>> {
   const tree: Array<{ path: string; type: "file" | "dir" }> = [];
   const visited = new Set<string>();
   const queue = [""];
 
   while (queue.length > 0) {
+    opts.signal?.throwIfAborted();
     const currentPath = queue.shift() ?? "";
     if (visited.has(currentPath) || isIgnoredRepoPath(currentPath)) {
       continue;
@@ -184,7 +82,7 @@ async function listRepositoryTreeViaContents(
     const entries = await listFiles(ctx, owner, repo, {
       ...opts,
       ...(currentPath ? { path: currentPath } : {}),
-    }).catch(() => [] as GitHubFileContent[]);
+    }).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github.service"); return [] as GitHubFileContent[]; });
 
     for (const entry of entries) {
       const entryType: "file" | "dir" = entry.type === "dir" ? "dir" : "file";
@@ -218,34 +116,43 @@ export { mapRepositories };
 // ─── Repository operations ───────────────────────────────────────────────────
 
 /**
- * Fetch repos for a user/org via personal OAuth token (desktop/self-hosted mode).
- * Works without a GitHub App installation.
+ * List repositories accessible to a user credential, including organizations
+ * and collaborator-owned repositories. Keep one paginated implementation for
+ * personal-token and legacy OAuth browsing.
  */
+export async function listUserRepositories(
+  ctx: RequestContext,
+  /** Already resolved by tokenFor; pins every page to the same identity. */
+  token?: string,
+): Promise<GitHubRepository[]> {
+  const collected = new Map<number | string, GitHubRepository>();
+  const perPage = 100;
+  for (let page = 1; page <= 50; page++) {
+    const request = {
+      url: "https://api.github.com/user/repos",
+      params: {
+        per_page: perPage,
+        page,
+        sort: "updated",
+        affiliation: "owner,collaborator,organization_member",
+      },
+    };
+    const data = token
+      ? await ghFetch<GitHubRepository[]>(token, request)
+      : await githubFetch<GitHubRepository[]>({ ctx, ...request, credential: ["user-oauth"] });
+    const batch = Array.isArray(data) ? data : [];
+    for (const repo of batch) collected.set(repo.id ?? repo.full_name.toLowerCase(), repo);
+    if (batch.length < perPage) break;
+  }
+  return [...collected.values()];
+}
+
 export async function listUserOwnedRepos(
   ctx: RequestContext,
   owner?: string,
 ): Promise<MappedRepository[]> {
-  if (!owner) {
-    // User's own repos
-    const data = await githubFetch<GitHubRepository[]>({
-      ctx,
-      url: "https://api.github.com/user/repos",
-      params: {
-        per_page: 100,
-        sort: "updated",
-        affiliation: "owner,collaborator,organization_member",
-      },
-    });
-    return mapRepositories(Array.isArray(data) ? data : []);
-  }
-
-  // Org repos
-  const data = await githubFetch<GitHubRepository[]>({
-    ctx,
-    url: `https://api.github.com/orgs/${encodeURIComponent(owner)}/repos`,
-    params: { type: "all", per_page: 100 },
-  });
-  return mapRepositories(Array.isArray(data) ? data : []);
+  const repos = mapRepositories(await listUserRepositories(ctx));
+  return owner ? repos.filter((r) => r.owner.toLowerCase() === owner.toLowerCase()) : repos;
 }
 
 /**
@@ -282,10 +189,11 @@ export async function getRepository(
   ctx: RequestContext,
   owner: string,
   repo: string,
-  opts: { withBranches?: boolean } = {},
+  opts: GitHubReadOptions & { withBranches?: boolean } = {},
 ): Promise<RepositoryDetail> {
   const data = await githubFetch<GitHubRepository>({
     ctx,
+    serverId: opts.serverId,
     owner,
     repo,
     url: `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,
@@ -294,7 +202,7 @@ export async function getRepository(
   let branches: GitHubBranch[] | undefined;
   let branchesHasMore: boolean | undefined;
   if (opts.withBranches) {
-    const branchPage = await listBranches(ctx, owner, repo);
+    const branchPage = await listBranches(ctx, owner, repo, opts);
     branches = branchPage.branches;
     branchesHasMore = branchPage.hasMore;
   }
@@ -446,12 +354,13 @@ export async function listBranches(
   ctx: RequestContext,
   owner: string,
   repo: string,
-  opts: { page?: number } = {},
+  opts: GitHubReadOptions & { page?: number } = {},
 ): Promise<GitHubBranchPage> {
   const requestedPage = opts.page ?? 1;
   const page = Number.isInteger(requestedPage) && requestedPage > 0 ? requestedPage : 1;
   const branches = await githubFetch<GitHubBranch[]>({
     ctx,
+    serverId: opts.serverId,
     owner,
     repo,
     url: `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/branches`,
@@ -499,16 +408,19 @@ export async function getCommitByRef(
   owner: string,
   repo: string,
   ref: string,
+  opts: GitHubReadOptions = {},
 ): Promise<{ sha: string; message: string } | null> {
   try {
     const data = await githubFetch<{ sha: string; commit: { message: string } }>({
       ctx,
+      serverId: opts.serverId,
       owner,
       repo,
       url: `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/${encodeURIComponent(ref)}`,
     });
     return { sha: data.sha, message: data.commit.message };
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github.service");
     return null;
   }
 }
@@ -522,8 +434,9 @@ export async function getLatestCommit(
   owner: string,
   repo: string,
   branch: string,
+  opts: GitHubReadOptions = {},
 ): Promise<{ sha: string; message: string } | null> {
-  return getCommitByRef(ctx, owner, repo, branch);
+  return getCommitByRef(ctx, owner, repo, branch, opts);
 }
 
 /**
@@ -572,7 +485,8 @@ export async function getRecentCommits(
       date: c.commit.author?.date ?? "",
       url: c.html_url,
     }));
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github.service");
     return [];
   }
 }
@@ -617,8 +531,8 @@ export async function compareCommits(
   if (cacheable) {
     store = await cacheStore<CompareCommitsResult>("github-commit-comparisons", {
       maxSize: 5_000,
-    }).catch(() => null);
-    const cached = await store?.get(key).catch(() => null);
+    }).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github.service"); return null; });
+    const cached = await store?.get(key).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github.service"); return null; });
     if (cached) return cached;
   }
 
@@ -647,9 +561,12 @@ export async function compareCommits(
         // suppressing a real update whose matching file was omitted by GitHub.
         truncated: returnedFiles.length >= MAX_COMPARE_FILES_PER_RESPONSE,
       };
-      if (store) await store.set(key, result, COMPARE_CACHE_TTL_SECONDS).catch(() => {});
+      if (store) await store.set(key, result, COMPARE_CACHE_TTL_SECONDS).catch((diagnosticFailure) => {
+        observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github.service");
+      });
       return result;
-    } catch {
+    } catch (diagnosticFailure) {
+      observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github.service");
       return null;
     }
   })();
@@ -671,11 +588,13 @@ export async function listFiles(
   ctx: RequestContext,
   owner: string,
   repo: string,
-  opts: { branch?: string; path?: string } = {},
+  opts: GitHubReadOptions & { branch?: string; path?: string; signal?: AbortSignal } = {},
 ): Promise<GitHubFileContent[]> {
   const filePath = opts.path ?? "";
   return githubFetch<GitHubFileContent[]>({
     ctx,
+    serverId: opts.serverId,
+    signal: opts.signal,
     owner,
     repo,
     url: `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodeRepoPath(filePath)}`,
@@ -690,11 +609,13 @@ export async function listRepositoryTree(
   ctx: RequestContext,
   owner: string,
   repo: string,
-  opts: { branch?: string } = {},
+  opts: GitHubReadOptions & { branch?: string; requireComplete?: boolean; signal?: AbortSignal } = {},
 ): Promise<Array<{ path: string; type: "file" | "dir" }>> {
   const ref = opts.branch?.trim() || "HEAD";
   const data = await githubFetch<GitHubTreeResponse>({
     ctx,
+    serverId: opts.serverId,
+    signal: opts.signal,
     owner,
     repo,
     url: `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/git/trees/${encodeURIComponent(ref)}`,
@@ -712,8 +633,10 @@ export async function listRepositoryTree(
     return tree;
   }
 
+  if (opts.requireComplete) throw new Error("GitHub returned an incomplete repository tree");
+
   const fallbackTree = await listRepositoryTreeViaContents(ctx, owner, repo, opts).catch(
-    () => tree,
+    (diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github.service"); return tree; },
   );
   return fallbackTree.length > 0 ? fallbackTree : tree;
 }
@@ -726,7 +649,7 @@ export async function getFileContent(
   owner: string,
   repo: string,
   file: string,
-  opts: { branch?: string; json?: boolean } = {},
+  opts: GitHubReadOptions & { branch?: string; json?: boolean; signal?: AbortSignal } = {},
 ): Promise<{
   sha: string;
   size: number;
@@ -735,6 +658,8 @@ export async function getFileContent(
 }> {
   const data = await githubFetch<GitHubFileContent>({
     ctx,
+    serverId: opts.serverId,
+    signal: opts.signal,
     owner,
     repo,
     url: `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/contents/${encodeRepoPath(file)}`,
@@ -864,113 +789,6 @@ export async function deleteWebhook(
   });
 }
 
-// ─── Check runs ──────────────────────────────────────────────────────────────
-
-/**
- * Create a GitHub check run (used to report deployment status).
- */
-export async function createCheckRun(
-  ctx: RequestContext,
-  owner: string,
-  repo: string,
-  opts: {
-    name: string;
-    headSha: string;
-    status: "queued" | "in_progress" | "completed";
-    /** Conclusion is only valid when status === "completed". */
-    conclusion?: "success" | "failure" | "cancelled" | "neutral" | "skipped";
-    detailsUrl?: string;
-    output?: { title: string; summary: string; text?: string };
-  },
-): Promise<{ id: number; htmlUrl?: string } | null> {
-  try {
-    const data = await githubFetch<{ id: number; html_url?: string }>({
-      ctx,
-      owner,
-      repo,
-      url: `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/check-runs`,
-      method: "POST",
-      // READ tier: a check run REPORTS the status of a build we were already
-      // authorized to run. It is deploy-tier status reporting, not repo
-      // administration, so a read grant is the right authority.
-      authorizeAs: "read",
-      // ...but only the App CAN post it. Unpinned, the self-hosted chain returns
-      // the operator's gh-CLI token first and every check 403s — silently, even
-      // with a working installation one step later in the chain.
-      credential: ["app-installation"],
-      params: {
-        name: opts.name,
-        head_sha: opts.headSha,
-        status: opts.status,
-        started_at: new Date().toISOString(),
-        ...(opts.status === "completed"
-          ? { completed_at: new Date().toISOString(), conclusion: opts.conclusion }
-          : {}),
-        details_url: opts.detailsUrl,
-        output: opts.output,
-      },
-    });
-    return { id: data.id, htmlUrl: data.html_url };
-  } catch (err) {
-    // Best-effort, but never silent. "No checks appeared on my PR" was
-    // indistinguishable from "no checks were attempted": every caller swallows
-    // again with `.catch(() => {})`, and this function never throws, so the
-    // reason died here. The thrown error carries GitHub's own status + message.
-    //
-    // The App hint is appended because the pin above makes the no-credential
-    // case report the generic "connect your GitHub account" — misleading on a
-    // self-host that HAS a working gh CLI or PAT, since neither can ever post a
-    // check run. The App is the requirement, not a GitHub connection per se.
-    console.warn(
-      `[GitHub Checks] create failed for ${owner}/${repo} ${opts.name}@${opts.headSha.slice(0, 7)}: ${safeErrorMessage(err)} ` +
-        `(check runs require a GitHub App installation — a gh-CLI/PAT credential cannot post one)`,
-    );
-    return null;
-  }
-}
-
-/**
- * Update an existing check run (e.g. mark as completed).
- */
-export async function updateCheckRun(
-  ctx: RequestContext,
-  owner: string,
-  repo: string,
-  checkRunId: number,
-  opts: {
-    status: "completed";
-    conclusion: "success" | "failure" | "cancelled" | "neutral" | "skipped";
-    output?: { title: string; summary: string; text?: string };
-  },
-): Promise<void> {
-  try {
-    await githubFetch({
-      ctx,
-      owner,
-      repo,
-      url: `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/check-runs/${checkRunId}`,
-      method: "PATCH",
-      // Same tier as createCheckRun — status reporting on a build already authorized.
-      authorizeAs: "read",
-      // Same pin as createCheckRun — the Checks API is App-only.
-      credential: ["app-installation"],
-      params: {
-        status: opts.status,
-        completed_at: new Date().toISOString(),
-        conclusion: opts.conclusion,
-        ...(opts.output ? { output: opts.output } : {}),
-      },
-    });
-  } catch (err) {
-    // Best-effort — never fails the deployment, never silent either (see create).
-    console.warn(
-      `[GitHub Checks] update failed for ${owner}/${repo} check ${checkRunId}: ${safeErrorMessage(err)}`,
-    );
-  }
-}
-
-// ─── User organisations ──────────────────────────────────────────────────────
-
 // The library "home" view (getUserHome), the Settings connection-status data
 // (getConnectionStatus), and the "Local only" badge rule all MOVED into the
 // GitHubSource adapter (./sources): GhCliSource / GitHubAppSource own the
@@ -1015,7 +833,7 @@ export async function resolveWebhookStrategy(
   organizationId?: string,
 ): Promise<WebhookStrategy> {
   const orgId = organizationId ?? project?.organizationId ?? undefined;
-  if (orgId && (await hasActiveGitHubSource(orgId).catch(() => false))) return "app";
+  if (orgId && (await hasActiveGitHubSource(orgId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github.service"); return false; }))) return "app";
   const base = getWebhookStrategy();
   if (base === "app") return "app";
 
@@ -1156,7 +974,7 @@ export function resolveProjectWebhookSecret(
     } catch {
       // Encryption key rotation / corrupted row — fall through to env
       // rather than silently rejecting every webhook for this project.
-      console.warn(
+      errorDiagnostics.warn("platform/engine/modules/github/github.service",
         "[GitHub Webhook] project.webhookSecret failed to decrypt; falling back to env.GITHUB_WEBHOOK_SECRET",
       );
     }
@@ -1174,13 +992,13 @@ export function resolveProjectWebhookSecret(
  * (legacy) global env var and one project's leak can't verify another's.
  */
 async function ensureProjectWebhookSecret(projectId: string): Promise<string> {
-  const proj = await dbRepos.project.findById(projectId).catch(() => null);
+  const proj = await dbRepos.project.findById(projectId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github.service"); return null; });
   if (proj?.webhookSecret) {
     try {
       return decrypt(proj.webhookSecret);
     } catch {
       // Corrupted row / key rotation — mint a fresh one below and overwrite.
-      console.warn(
+      errorDiagnostics.warn("platform/engine/modules/github/github.service",
         "[GitHub Webhook] existing project.webhookSecret failed to decrypt; minting a fresh secret",
       );
     }
@@ -1271,11 +1089,11 @@ export async function registerWebhook(
  */
 export async function backfillWebhookSecrets(): Promise<void> {
   if (env.CLOUD_MODE) return;
-  const projects = await dbRepos.project.listNeedingWebhookBackfill().catch(() => []);
+  const projects = await dbRepos.project.listNeedingWebhookBackfill().catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github.service"); return []; });
   for (const p of projects) {
     if (!p.gitOwner || !p.gitRepo) continue;
     try {
-      const owner = await resolveOrgOwner(p.organizationId).catch(() => null);
+      const owner = await resolveOrgOwner(p.organizationId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github.service"); return null; });
       if (!owner?.userId) continue;
       const ctx = buildBackgroundContext({
         userId: owner.userId,
@@ -1288,8 +1106,8 @@ export async function backfillWebhookSecrets(): Promise<void> {
         `[GitHub Webhook] backfilled per-project secret for ${p.gitOwner}/${p.gitRepo} (project ${p.id})`,
       );
     } catch (err) {
-      console.warn(
-        `[GitHub Webhook] webhook-secret backfill failed for project ${p.id}: ${safeErrorMessage(err)}`,
+      errorDiagnostics.warn("platform/engine/modules/github/github.service",
+        `[GitHub Webhook] webhook-secret backfill failed for project ${p.id}: ${safeErrorMessage(err)}`, err,
       );
     }
   }

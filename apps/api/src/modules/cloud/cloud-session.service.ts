@@ -6,7 +6,9 @@
  * testable independent of the HTTP layer.
  */
 
-import { db, schema, repos, eq } from "@repo/db";
+import { diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
+import { repos } from "@repo/db";
+import { auth } from "@repo/platform/engine/lib/auth";
 import { safeErrorMessage } from "@repo/core";
 
 export async function revokeCloudSession(input: {
@@ -22,11 +24,12 @@ export async function revokeCloudSession(input: {
   }
 
   try {
-    await db.delete(schema.session).where(eq(schema.session.id, sessionId));
+    const session = await repos.session.findById(sessionId);
+    if (session) await (await auth.$context).internalAdapter.deleteSession(session.token);
   } catch (err) {
-    console.error(
+    errorDiagnostics.error("api/modules/cloud/cloud-session.service",
       "[cloud disconnect] failed to delete session row:",
-      safeErrorMessage(err),
+      safeErrorMessage(err), err,
     );
     return { ok: false, error: "Failed to revoke session" };
   }
@@ -49,9 +52,9 @@ export async function revokeCloudSession(input: {
         after: null,
       })
       .catch((err) =>
-        console.warn(
+        errorDiagnostics.warn("api/modules/cloud/cloud-session.service",
           "[cloud disconnect] audit emit failed:",
-          safeErrorMessage(err),
+          safeErrorMessage(err), err,
         ),
       );
   }

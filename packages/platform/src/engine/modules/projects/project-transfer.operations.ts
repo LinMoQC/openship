@@ -1,4 +1,6 @@
 import { requireGitopsRelease } from "../releases/release-gate";
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
+import { assertCloudProxyScope } from "../../lib/cloud/scope";
 import { AppError, NotFoundError, safeErrorMessage } from "@repo/core";
 import { OperationError, ProjectTransferSchemas } from "@repo/contracts";
 import type { ResourceServices } from "../../../resource-operations";
@@ -8,9 +10,7 @@ import { env } from "../../config/index";
 
 function assertTransferScope(ctx: ExecutionContext) {
   if (env.CLOUD_MODE) throw new NotFoundError("Transfer");
-  // Owner-account sessions do not prove a mapping to the SDK's fixed tenant.
-  if (ctx.scopeMode === "fixed")
-    throw new AppError("This cloud link has no tenant mapping. Connect directly with the cloud organizationId.", 409, "CLOUD_SCOPE_UNAVAILABLE");
+  assertCloudProxyScope(ctx);
 }
 
 async function transferFailure(error: unknown, fallback: string): Promise<never> {
@@ -47,17 +47,19 @@ export function createProjectTransferOperations(recordAudit: ProjectDependencies
               ...(result.unrecoverableSteps > 0 && { warning: "Promoted to cloud; some local resources need manual cleanup." }) };
         record(ctx, id, "cloud", data);
         return data;
-      } catch (error) { return transferFailure(error, "Project transfer to cloud failed"); }
+      } catch (error) {
+        observeCaughtError(error, "platform/engine/modules/projects/project-transfer.operations"); return transferFailure(error, "Project transfer to cloud failed"); }
     },
     async transferToSelfHosted(ctx, id) {
       await requireGitopsRelease(id);
       assertTransferScope(ctx);
       try {
         const result = await (await import("./transfer.service")).transferProjectToSelfHosted({ projectId: id, organizationId: ctx.organizationId });
-        const data = { ok: true, projectId: result.projectId, cloudWorkspaceId: null, imported: result.imported };
+        const data = { ok: true, projectId: result.projectId, workspaceId: null, imported: result.imported };
         record(ctx, id, "self-hosted", data);
         return data;
-      } catch (error) { return transferFailure(error, "Project transfer to self-hosted failed"); }
+      } catch (error) {
+        observeCaughtError(error, "platform/engine/modules/projects/project-transfer.operations"); return transferFailure(error, "Project transfer to self-hosted failed"); }
     },
   };
 }

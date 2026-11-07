@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, readFileSync, statSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ContextCaps } from "../../src/lib/config";
 const h = vi.hoisted(() => ({ caps: undefined as ContextCaps | undefined }));
 vi.mock("../../src/lib/config", () => ({
@@ -12,10 +15,27 @@ import { setJsonMode } from "../../src/lib/output";
 import { runCommand, stubFetch, type FetchStub } from "../helpers/harness";
 
 let fetchStub: FetchStub;
-beforeEach(() => { h.caps = undefined; });
-afterEach(() => { fetchStub?.restore(); setJsonMode(false); });
+let directory: string;
+beforeEach(() => { h.caps = undefined; directory = mkdtempSync(join(tmpdir(), "openship-instance-cli-")); });
+afterEach(() => { fetchStub?.restore(); setJsonMode(false); rmSync(directory, { recursive: true, force: true }); });
 
 describe("system commands through the SDK", () => {
+  it("writes private exports, preserves secrets, and refuses to overwrite another file", async () => {
+    setJsonMode(true);
+    const file = join(directory, "export.json");
+    const archive = { kind: "openship-instance-export", envelopeVersion: 4, createdAt: "2026-10-07", sourceDriver: "pglite", dump: { tables: {} }, secrets: { encoding: "plaintext", version: 1, entries: [{ value: "fixture-secret" }] } };
+    fetchStub = stubFetch(req => ({ json: req.url.endsWith("/health/env") ? systemInfoFixture() : archive }));
+    const result = await runCommand(systemCommand, ["data-transfer", "export", "--out", file]);
+    expect(result.code, result.err).toBe(0);
+    expect(JSON.parse(readFileSync(file, "utf8"))).toEqual(archive);
+    if (process.platform !== "win32") expect(statSync(file).mode & 0o777).toBe(0o600);
+    expect(result.out + result.err).not.toContain("fixture-secret");
+    writeFileSync(file, "keep this file");
+    const calls = fetchStub.calls.length;
+    expect((await runCommand(systemCommand, ["data-transfer", "export", "--out", file])).code).toBe(1);
+    expect(readFileSync(file, "utf8")).toBe("keep this file");
+    expect(fetchStub.calls).toHaveLength(calls);
+  });
   it("discovers capabilities and returns typed settings in JSON mode", async () => {
     setJsonMode(true);
     fetchStub = stubFetch(req => ({ json: req.url.endsWith("/health/env") ? systemInfoFixture() : instanceSettingsFixture() }));

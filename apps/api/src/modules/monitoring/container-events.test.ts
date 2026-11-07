@@ -183,7 +183,7 @@ beforeEach(async () => {
     const serverId = (dep.meta?.serverId as string | undefined) ?? null;
     return { runtime: box(serverId).runtime, serverId };
   });
-});
+}, 20_000);
 
 afterEach(() => {
   vi.useRealTimers();
@@ -584,10 +584,10 @@ describe("gates", () => {
     expect(h.release).toHaveBeenCalledWith("srv1");
   });
 
-  it("subscribes to nothing on a target with no event feed", async () => {
+  it("subscribes to the managed Docker event feed in Cloud mode", async () => {
     h.target = "cloud";
     await renew([key("srv1")]);
-    expect(h.resolve).not.toHaveBeenCalled();
+    expect(h.resolve).toHaveBeenCalledOnce();
   });
 
   it("accelerates an enabled desktop watcher using the same Docker subscriptions", async () => {

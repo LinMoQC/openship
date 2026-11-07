@@ -1,3 +1,4 @@
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { exitCommand, rethrowCommandExit } from "../lib/command-exit";
 /**
  * `openship service` — manage the services inside a compose stack.
@@ -8,21 +9,23 @@ import { exitCommand, rethrowCommandExit } from "../lib/command-exit";
  * by name or id within it.
  */
 
-import { Command } from "commander";
+import { Command, Option } from "commander";
+import { openTerminal } from "../lib/terminal";
 import chalk from "chalk";
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { readFileSync } from "node:fs";
-import { createInterface } from "node:readline/promises";
-import { stdin as input, stdout as output } from "node:process";
 import {
   normalizeComposeServices,
   OperationError,
   type TCreateServiceBody,
 } from "@repo/sdk/client";
-import { parseOptionalEnvironmentScope, ValidationError } from "@repo/sdk/client";
+import { parseOptionalEnvironmentScope } from "@repo/sdk/client";
+import { UpdateServiceBody, parseInput } from "@repo/contracts";
 import { getShipClient, ApiError, hasShipCredentials } from "../lib/ship-client";
 import { isJsonMode, printJson, printTable, ok, err, info } from "../lib/output";
+import { collect, parsePairs, readJsonInput } from "../lib/command-input";
+import { fail, confirmOrExit, reportResult, reportExecResult } from "../lib/cmd-helpers";
 
 // ─── Shared helpers ──────────────────────────────────────────────────────────
 
@@ -33,20 +36,6 @@ function requireAuth(): void {
   }
 }
 
-function fail(e: unknown): never {
-  rethrowCommandExit(e);
-  if (e instanceof ApiError) {
-    err(`  ${e.message}` + (e.status ? chalk.dim(` (HTTP ${e.status})`) : ""));
-  } else {
-    err(`  ${e instanceof Error ? e.message : String(e)}`);
-    if (e instanceof ValidationError && e.details) {
-      for (const messages of Object.values(e.details))
-        for (const message of messages) err(`  ${message}`);
-    }
-  }
-  exitCommand(1);
-}
-
 /** Every service subcommand needs a target stack. */
 function stackCommand(name: string): Command {
   return new Command(name).requiredOption(
@@ -54,11 +43,6 @@ function stackCommand(name: string): Command {
     "Stack (project) id, slug, or name",
   );
 }
-
-const collect = (val: string, acc: string[]): string[] => {
-  acc.push(val);
-  return acc;
-};
 
 interface ProjectRow {
   id: string;
@@ -118,35 +102,6 @@ async function resolveService(projectId: string, ref: string): Promise<ServiceRo
   exitCommand(1);
 }
 
-function parsePairs(pairs: string[]): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const p of pairs) {
-    const i = p.indexOf("=");
-    if (i <= 0) {
-      err(`  Invalid KEY=VALUE pair: "${p}"`);
-      exitCommand(1);
-    }
-    out[p.slice(0, i)] = p.slice(i + 1);
-  }
-  return out;
-}
-
-/** Gate a destructive action. --yes skips; non-interactive without --yes aborts. */
-async function confirmOrExit(yes: boolean | undefined, question: string): Promise<void> {
-  if (yes) return;
-  if (isJsonMode() || !process.stdin.isTTY) {
-    err("  Refusing to proceed without confirmation. Re-run with --yes.");
-    exitCommand(1);
-  }
-  const rl = createInterface({ input, output });
-  const answer = (await rl.question(`  ${question} [y/N] `)).trim().toLowerCase();
-  rl.close();
-  if (answer !== "y" && answer !== "yes") {
-    info("  Aborted.");
-    exitCommand(0);
-  }
-}
-
 // ─── list / get ───────────────────────────────────────────────────────────────
 
 const listCmd = stackCommand("list")
@@ -172,6 +127,7 @@ const listCmd = stackCommand("list")
         ["name", "kind", "image", "enabled", "exposed", "drift"],
       );
     } catch (e) {
+      observeCaughtError(e, "cli/commands/service");
       rethrowCommandExit(e);
       fail(e);
     }
@@ -187,6 +143,7 @@ const getCmd = stackCommand("get")
       const svc = await resolveService(projectId, service);
       printJson(await getShipClient().services.get(projectId, svc.id));
     } catch (e) {
+      observeCaughtError(e, "cli/commands/service");
       rethrowCommandExit(e);
       fail(e);
     }
@@ -236,6 +193,7 @@ const createCmd = stackCommand("create")
       }
       ok(`  Created service "${created.name}" (${created.id}).`);
     } catch (e) {
+      observeCaughtError(e, "cli/commands/service");
       rethrowCommandExit(e);
       fail(e);
     }
@@ -252,9 +210,10 @@ const deleteCmd = stackCommand("delete")
       const projectId = await resolveProject(opts.project);
       const svc = await resolveService(projectId, service);
       await confirmOrExit(opts.yes, `Delete service "${svc.name}"? This tears down its container.`);
-      await getShipClient().services.remove(projectId, svc.id);
-      ok(`  Deleted service "${svc.name}".`);
+      const result = await getShipClient().services.remove(projectId, svc.id);
+      reportResult(result, `Deleted service "${svc.name}".`);
     } catch (e) {
+      observeCaughtError(e, "cli/commands/service");
       rethrowCommandExit(e);
       fail(e);
     }
@@ -333,6 +292,7 @@ const syncCmd = stackCommand("sync")
       }
       ok(`  Synced ${synced.length} service(s).`);
     } catch (e) {
+      observeCaughtError(e, "cli/commands/service");
       rethrowCommandExit(e);
       fail(e);
     }
@@ -344,7 +304,7 @@ function containerActionCommand(action: "start" | "stop" | "restart"): Command {
   const cmd = stackCommand(action)
     .description(
       action === "restart"
-        ? "Bounce a service's container (does NOT apply changed env — use `deploy --refresh` for that)"
+        ? "Restart a service's container (use service env apply for pending environment changes)"
         : `${action[0].toUpperCase()}${action.slice(1)} a service's container`,
     )
     .argument("<service>", "Service name or id");
@@ -360,10 +320,10 @@ function containerActionCommand(action: "start" | "stop" | "restart"): Command {
       const projectId = await resolveProject(opts.project);
       const svc = await resolveService(projectId, service);
       serviceId = svc.id;
-      if (action === "restart")
-        await getShipClient().services.restart(projectId, svc.id, { force: !!opts.force });
-      else await getShipClient().services[action](projectId, svc.id);
-      ok(`  ${action}ed "${svc.name}".`);
+      const result = action === "restart"
+        ? await getShipClient().services.restart(projectId, svc.id, { force: !!opts.force })
+        : await getShipClient().services[action](projectId, svc.id);
+      reportResult(result, `${action}: "${svc.name}".`);
     } catch (e) {
       rethrowCommandExit(e);
       // The API refuses a restart that would silently drop pending env changes.
@@ -375,7 +335,7 @@ function containerActionCommand(action: "start" | "stop" | "restart"): Command {
         err(`  Restart refused: "${body.serviceName ?? service}" has pending environment changes.`);
         if (keys.length > 0) info(`  Pending: ${keys.join(", ")}`);
         info(
-          `  Apply them:  openship deploy --refresh --service-ids ${serviceId} -p ${opts.project}`,
+          `  Apply them:  openship service env apply ${serviceId} --project ${opts.project}`,
         );
         info(`  Bounce anyway (changes NOT applied):  add --force`);
         exitCommand(1);
@@ -409,6 +369,7 @@ const containersCmd = stackCommand("containers")
         ["service", "status", "container", "ip", "port"],
       );
     } catch (e) {
+      observeCaughtError(e, "cli/commands/service");
       rethrowCommandExit(e);
       fail(e);
     }
@@ -446,6 +407,7 @@ function driftActionCommand(action: "accept" | "keep"): Command {
             : `  Kept your edits for "${svc.name}".`,
         );
       } catch (e) {
+        observeCaughtError(e, "cli/commands/service");
       rethrowCommandExit(e);
         fail(e);
       }
@@ -457,7 +419,7 @@ driftCmd.addCommand(driftActionCommand("keep"));
 
 // ─── env (get / set) ──────────────────────────────────────────────────────────
 
-const envCmd = new Command("env").description("Read and write a service's environment variables");
+const envCmd = new Command("env").description("Inspect, edit, and apply a service's environment variables");
 
 const envGetCmd = stackCommand("get")
   .description("List a service's environment variables (secrets masked)")
@@ -485,6 +447,7 @@ const envGetCmd = stackCommand("get")
         ["key", "value", "environment", "secret"],
       );
     } catch (e) {
+      observeCaughtError(e, "cli/commands/service");
       rethrowCommandExit(e);
       fail(e);
     }
@@ -508,37 +471,32 @@ const envSetCmd = stackCommand("set")
       const svc = await resolveService(projectId, service);
       const environment = parseOptionalEnvironmentScope(opts.env) ?? "production";
       const desired = parsePairs(pairs);
-      const isSecret = Boolean(opts.secret);
-
-      // The service env endpoint is a full replace (delete-then-insert for this
-      // environment scope), so a partial set must first read the current vars
-      // and merge — otherwise unspecified vars would be wiped.
-      let vars: { key: string; value: string; isSecret: boolean }[];
+      let result: unknown;
       if (opts.replace) {
-        vars = Object.entries(desired).map(([key, value]) => ({ key, value, isSecret }));
+        result = await getShipClient().services.setEnvVars(projectId, svc.id, {
+          environment,
+          vars: Object.entries(desired).map(([key, value]) => ({ key, value, isSecret: !!opts.secret })),
+        });
       } else {
+        // Source IDs let the engine reject a stale edit. Send only requested
+        // keys: never copy masked secrets or replace an earlier read snapshot.
         const existing = await getShipClient().services.listEnvVars(projectId, svc.id, {
           environment,
         });
-        // The shared replacement preserves masked ciphertext by source id.
-        const merged = new Map<
-          string,
-          { sourceId?: string; key: string; value: string; isSecret: boolean }
-        >();
-        for (const v of existing)
-          merged.set(v.key, { sourceId: v.id, key: v.key, value: v.value, isSecret: v.isSecret });
-        for (const [key, value] of Object.entries(desired)) {
-          merged.set(key, { key, value, isSecret });
-        }
-        vars = [...merged.values()];
+        const ids = new Map(existing.map(row => [row.key, row.id]));
+        result = await getShipClient().services.mergeEnvVars(projectId, svc.id, {
+          environment,
+          upserts: Object.entries(desired).map(([key, value]) => ({
+            key, value, sourceId: ids.get(key) ?? null,
+            // Omitting this flag preserves the engine's secret classification.
+            ...(opts.secret ? { isSecret: true } : {}),
+          })),
+          deletes: [],
+        });
       }
-
-      await getShipClient().services.setEnvVars(projectId, svc.id, { environment, vars });
-      ok(
-        `  Set ${Object.keys(desired).length} variable(s) on "${svc.name}" (${environment}); ` +
-          `${vars.length} total now stored.`,
-      );
+      reportResult(result, `Saved ${Object.keys(desired).length} variable(s) on "${svc.name}" (${environment}). Apply to the running service with openship service env apply ${svc.id} --project ${projectId}.`);
     } catch (e) {
+      observeCaughtError(e, "cli/commands/service");
       rethrowCommandExit(e);
       fail(e);
     }
@@ -546,6 +504,81 @@ const envSetCmd = stackCommand("set")
 
 envCmd.addCommand(envGetCmd);
 envCmd.addCommand(envSetCmd);
+
+envCmd.addCommand(stackCommand("inspect")
+  .description("Show effective variables, their sources, and pending runtime changes (secrets masked)")
+  .argument("<service>", "Service name or id")
+  .option("-e, --env <environment>", "Environment: production | preview | development")
+  .option("--runtime", "Inspect the running container to check whether saved values are applied")
+  .action(async (service: string, opts) => {
+    requireAuth();
+    try {
+      const projectId = await resolveProject(opts.project);
+      const svc = await resolveService(projectId, service);
+      printJson(await getShipClient().services.getEnvironment(projectId, svc.id, {
+        environment: parseOptionalEnvironmentScope(opts.env), inspectRuntime: !!opts.runtime,
+      }));
+    } catch (error) {
+      observeCaughtError(error, "cli/commands/service");
+ fail(error); }
+  }));
+
+envCmd.addCommand(stackCommand("reveal")
+  .description("Print explicitly selected secret values; requires service write access")
+  .argument("<service>", "Service name or id")
+  .argument("<keys...>", "Variable keys to reveal")
+  .option("-e, --env <environment>", "Environment: production | preview | development")
+  .addOption(new Option("--source <source>", "Read saved effective values or the live container").choices(["effective", "runtime"]).default("effective"))
+  .option("--container <id>", "Expected container ID when reading runtime values")
+  .action(async (service: string, keys: string[], opts) => {
+    requireAuth();
+    try {
+      const projectId = await resolveProject(opts.project);
+      const svc = await resolveService(projectId, service);
+      printJson(await getShipClient().services.revealEnv(projectId, svc.id, {
+        keys, environment: parseOptionalEnvironmentScope(opts.env), source: opts.source, containerId: opts.container,
+      }));
+    } catch (error) {
+      observeCaughtError(error, "cli/commands/service");
+ fail(error); }
+  }));
+
+envCmd.addCommand(stackCommand("delete").alias("unset")
+  .description("Remove selected service overrides; inherited values become effective again")
+  .argument("<service>", "Service name or id")
+  .argument("<keys...>", "Override keys to remove")
+  .option("-e, --env <environment>", "Environment: production | preview | development", "production")
+  .action(async (service: string, keys: string[], opts) => {
+    requireAuth();
+    try {
+      const projectId = await resolveProject(opts.project);
+      const svc = await resolveService(projectId, service);
+      const environment = parseOptionalEnvironmentScope(opts.env) ?? "production";
+      const existing = await getShipClient().services.listEnvVars(projectId, svc.id, { environment });
+      const selected = new Set(keys);
+      const deletes = existing.filter(row => selected.has(row.key)).map(row => ({ key: row.key, sourceId: row.id }));
+      const result = await getShipClient().services.mergeEnvVars(projectId, svc.id, { environment, upserts: [], deletes });
+      reportResult(result, `Removed ${deletes.length} override(s). Apply saved changes with openship service env apply ${svc.id} --project ${projectId}.`);
+    } catch (error) {
+      observeCaughtError(error, "cli/commands/service");
+ fail(error); }
+  }));
+
+envCmd.addCommand(stackCommand("apply")
+  .description("Apply the saved environment to the active container through the engine's replacement and rollback workflow")
+  .argument("<service>", "Service name or id")
+  .action(async (service: string, opts) => {
+    requireAuth();
+    try {
+      const projectId = await resolveProject(opts.project);
+      const svc = await resolveService(projectId, service);
+      const result = await getShipClient().services.applyEnvironment(projectId, svc.id);
+      reportResult(result, `Applied the saved environment to "${svc.name}" (container ${result.containerId}).`);
+      if (result.warning && !isJsonMode()) err(result.warning);
+    } catch (error) {
+      observeCaughtError(error, "cli/commands/service");
+ fail(error); }
+  }));
 
 // ─── logs (--follow via SSE) ──────────────────────────────────────────────────
 
@@ -595,6 +628,7 @@ const logsCmd = stackCommand("logs")
         }
       }
     } catch (e) {
+      observeCaughtError(e, "cli/commands/service");
       rethrowCommandExit(e);
       fail(e);
     }
@@ -626,14 +660,9 @@ const execCmd = stackCommand("exec")
         cwd: opts.cwd,
         timeoutMs: Number(opts.timeout),
       });
-      if (isJsonMode()) printJson(result);
-      else {
-        process.stdout.write(result.output);
-        if (result.truncated) info("  Output truncated.");
-        if (result.timedOut) err("  Command timed out.");
-      }
-      process.exitCode = result.timedOut ? 124 : result.exitCode;
+      reportExecResult(result);
     } catch (error) {
+      observeCaughtError(error, "cli/commands/service");
       rethrowCommandExit(error);
       fail(error);
     }
@@ -645,8 +674,49 @@ export const serviceCommand = new Command("service")
   .alias("services")
   .description("Manage the services in a compose stack (a multi-service project)");
 
+serviceCommand.addCommand(stackCommand("terminal").argument("<service>", "Service name or ID")
+  .description("Open a shell in a running service on Cloud or a self-hosted server")
+  .option("--origin <url>", "Trusted dashboard origin (defaults to the saved context dashboard)")
+  .action(async (service: string, opts) => {
+    try {
+      const projectId = await resolveProject(opts.project);
+      const svc = await resolveService(projectId, service);
+      await openTerminal({ kind: "service", id: svc.id }, opts);
+    } catch (error) {
+      observeCaughtError(error, "cli/commands/service");
+ fail(error); }
+  }));
+
+serviceCommand.addCommand(stackCommand("volumes").argument("<service>", "Service name or ID")
+  .description("Read measured service volume sizes")
+  .action(async (service: string, opts) => {
+    try {
+      const projectId = await resolveProject(opts.project);
+      const svc = await resolveService(projectId, service);
+      printJson(await getShipClient().services.volumeSizes(projectId, svc.id));
+    } catch (error) {
+      observeCaughtError(error, "cli/commands/service");
+ fail(error); }
+  }));
+
 serviceCommand.addCommand(listCmd);
 serviceCommand.addCommand(getCmd);
+serviceCommand.addCommand(stackCommand("update")
+  .description("Patch service configuration from a JSON file using the shared service contract")
+  .argument("<service>", "Service name or id")
+  .argument("<file>", "JSON patch (image, command, ports, routing, build settings, enabled, etc.)")
+  .action(async (service: string, file: string, opts) => {
+    requireAuth();
+    try {
+      const patch = parseInput(UpdateServiceBody, readJsonInput(file));
+      if (!Object.keys(patch).length) throw new Error("The service patch is empty.");
+      const projectId = await resolveProject(opts.project);
+      const svc = await resolveService(projectId, service);
+      printJson(await getShipClient().services.update(projectId, svc.id, patch));
+    } catch (error) {
+      observeCaughtError(error, "cli/commands/service");
+ fail(error); }
+  }));
 serviceCommand.addCommand(createCmd);
 serviceCommand.addCommand(deleteCmd);
 serviceCommand.addCommand(syncCmd);

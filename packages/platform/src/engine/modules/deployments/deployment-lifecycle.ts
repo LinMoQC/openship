@@ -13,16 +13,18 @@
  * while all side-effects on completion live here.
  */
 
+import { reportError, reportCaughtError as observeCaughtError, diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import {
   repos,
   type Project,
   type Deployment,
   type NewDeployment,
   type ServiceDeployment,
+  type Service,
 } from "@repo/db";
 import { DockerRuntime, isEdgeDownMessage, type BuildLogger, type LogEntry } from "@repo/adapters";
 import type { RuntimeAdapter } from "@repo/adapters";
-import { SYSTEM, safeErrorMessage } from "@repo/core";
+import { SYSTEM, redactUrlCredentials, safeErrorMessage } from "@repo/core";
 import { env } from "../../config/index";
 import { isArtifactRef } from "../../lib/container-ref";
 import type { DeploymentMeta } from "../../lib/deployment-runtime";
@@ -31,11 +33,17 @@ import { audit } from "../../lib/audit-emitter";
 import * as sessionManager from "./session-manager";
 import type { BuildSessionState } from "./session-manager";
 import { failureStatusFor } from "./blocking-errors";
-import { sanitizeStorableStrings, sliceWithoutSplittingPair } from "./build-log-sanitize";
+import {
+  sanitizeDeploymentMeta,
+  sanitizeStorableStrings,
+  sliceWithoutSplittingPair,
+} from "./build-log-sanitize";
 import { detectAndStoreFavicon } from "../../lib/favicon-detector";
 import { trackBackgroundWork } from "../../lib/background-work";
 import { onWebmailDeployed } from "../mail/webmail/webmail-install.service";
 import { computeCleanupKeepSet } from "../projects/cleanup-keep-set";
+import { deploymentResourceFailure, type DeploymentFailureMeta } from "./resource-failure";
+import { deploymentArtifacts } from "./deployment-artifacts";
 
 /**
  * Shared routing/TLS advisory for a deploy whose workloads succeeded. Connection
@@ -80,6 +88,8 @@ export interface LifecycleContext {
   /** The deployment's single logger. Optional for startup/recovery callers that
    * have no live log stream; normal build pipelines always provide it. */
   logger?: Pick<BuildLogger, "log">;
+  /** Trusted runtime facts kept independently of bounded/collapsed build logs. */
+  resourceEvidence?: readonly LogEntry[];
   /** Provisioned resources - set by the orchestrator as phases progress. */
   provisioned: { imageRef?: string };
   /**
@@ -90,16 +100,76 @@ export interface LifecycleContext {
    * containers.
    */
   settled?: "ready" | "failed" | "cancelled" | "reconciling" | "no_changes";
+  /** Actual build work only; frozen before deployment, failure cleanup or relay disposal. */
+  buildTiming?: { startedAtMs?: number; durationMs: number | null };
+}
+
+/** Begin the existing build phase, excluding admission, deploy and cleanup work. */
+export function beginBuildTiming(ctx: LifecycleContext): void {
+  ctx.buildTiming ??= { startedAtMs: performance.now(), durationMs: null };
+}
+
+function validBuildDuration(durationMs: number | null | undefined): number | null {
+  return typeof durationMs === "number" && Number.isFinite(durationMs) && durationMs >= 0
+    ? Math.min(2147483647, Math.round(durationMs))
+    : null;
+}
+
+/** Freeze a returned adapter measurement, including an explicit zero. A thrown
+ * adapter has no result, so use its actual elapsed build time. Never substitute
+ * the deployment/session lifetime: it includes admission and cutover work. */
+export function completeBuildTiming(
+  ctx: LifecycleContext,
+  durationMs?: number | null,
+): number | null {
+  if (ctx.buildTiming?.durationMs != null) return ctx.buildTiming.durationMs;
+  const measured = validBuildDuration(durationMs) ??
+    (ctx.buildTiming?.startedAtMs !== undefined
+      ? validBuildDuration(Math.max(0, performance.now() - ctx.buildTiming.startedAtMs))
+      : null);
+  if (measured !== null) ctx.buildTiming = { ...ctx.buildTiming, durationMs: measured };
+  return measured;
+}
+
+/** A recovery/outer-error caller may hold a stale deployment snapshot. Prefer
+ * the completed build measurement already recorded in storage over missing
+ * timing, and retain null when this attempt never obtained a measurement. */
+async function resolveBuildDuration(
+  ctx: LifecycleContext,
+  durationMs?: number | null,
+): Promise<number | null> {
+  const measured = completeBuildTiming(ctx, durationMs);
+  if (measured !== null) return measured;
+  try {
+    const current = await repos.deployment.findById(ctx.dep.id);
+    return completeBuildTiming(ctx, current?.buildDurationMs ?? ctx.dep.buildDurationMs);
+  } catch (error) {
+    observeCaughtError(error, "platform/engine/modules/deployments/deployment-lifecycle");
+    return completeBuildTiming(ctx, ctx.dep.buildDurationMs);
+  }
+}
+
+/** Freeze only measured service attempts before abort cleanup. The write is
+ * observability: failures cannot replace the original deployment outcome. */
+export async function finishServiceDeploymentTimings(
+  ctx: Pick<LifecycleContext, "dep">,
+  finishedAt = new Date(),
+): Promise<void> {
+  try {
+    await repos.service.finishStartedServiceDeploymentTimings(ctx.dep.id, finishedAt);
+  } catch (error) {
+    observeCaughtError(error, "platform/engine/modules/deployments/deployment-lifecycle");
+  }
 }
 
 /** Build the persistable log array. Collapsing/sanitizing it is observability
  *  work, so a crash in it degrades to a one-line explanation, never a failure. */
-function collectLogs(ctx: LifecycleContext): LogEntry[] {
+export function collectLogs(ctx: LifecycleContext): LogEntry[] {
   try {
     return ctx.persistLogs();
   } catch (err) {
     const detail = safeErrorMessage(err);
-    console.error(`[deployment-lifecycle] persistLogs crashed for ${ctx.dep.id}: ${detail}`);
+    errorDiagnostics.error("platform/engine/modules/deployments/deployment-lifecycle", `[deployment-lifecycle] persistLogs crashed for ${ctx.dep.id}: ${detail}`, err);
     return [
       {
         timestamp: new Date().toISOString(),
@@ -108,6 +178,17 @@ function collectLogs(ctx: LifecycleContext): LogEntry[] {
       },
     ];
   }
+}
+
+/** Only canonical project service rows can match a worker-derived keep list. */
+async function attachedInfrastructureIds(dep: Deployment, services?: Service[]): Promise<Set<string>> {
+  const declared = (dep.meta as { attachedInfrastructureServiceIds?: unknown } | null)?.attachedInfrastructureServiceIds;
+  if (!Array.isArray(declared) || declared.length === 0) return new Set();
+  const rows = services ?? await repos.service.listByProject(dep.projectId);
+  return new Set(rows.filter(service =>
+    declared.includes(service.id) && service.projectId === dep.projectId &&
+    service.kind === "compose" && service.image && !service.build,
+  ).map(service => service.id));
 }
 
 /**
@@ -124,7 +205,7 @@ async function cleanupOwnedServiceContainers(
   ctx: LifecycleContext,
   outcome: "failure" | "cancel",
 ): Promise<ServiceDeployment[]> {
-  const serviceDeps = await repos.service.listByDeployment(ctx.dep.id).catch(() => []);
+  const serviceDeps = await repos.service.listByDeployment(ctx.dep.id).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/deployments/deployment-lifecycle"); return []; });
   if (!ctx.runtime || serviceDeps.length === 0) return serviceDeps;
 
   let protectedContainers: Set<string>;
@@ -133,25 +214,36 @@ async function cleanupOwnedServiceContainers(
       await computeCleanupKeepSet(ctx.project, { excludeDeploymentId: ctx.dep.id })
     ).containers;
   } catch (err) {
-    console.error(
+    errorDiagnostics.error("platform/engine/modules/deployments/deployment-lifecycle",
       `[DEPLOY] ${ctx.dep.id}: couldn't resolve the live-container keep set during ${outcome}; ` +
-        `protecting every service container: ${safeErrorMessage(err)}`,
+        `protecting every service container: ${safeErrorMessage(err)}`, err,
     );
     return serviceDeps;
   }
 
+  // This policy is durable: crash recovery reconstructs ctx from the deployment
+  // row, so a process-local keep list would lose a ready database on restart.
+  let retainedInfrastructure: Set<string>;
+  try {
+    retainedInfrastructure = await attachedInfrastructureIds(ctx.dep);
+  } catch (error) {
+    errorDiagnostics.error("platform/engine/modules/deployments/deployment-lifecycle",
+      "Could not verify independent infrastructure ownership; automatic container cleanup deferred.", error);
+    return serviceDeps;
+  }
   for (const serviceDep of serviceDeps) {
     const containerId = serviceDep.containerId;
     if (!containerId) continue;
-    if (protectedContainers.has(containerId)) {
+    if (protectedContainers.has(containerId) ||
+      serviceDep.status === "success" && retainedInfrastructure.has(serviceDep.serviceId)) {
       console.log(
         `[DEPLOY] ${ctx.dep.id}: keeping service container ${containerId.slice(0, 12)} — ` +
-          `it belongs to the live release`,
+          `it belongs to a live release or independently managed infrastructure`,
       );
       continue;
     }
     await ctx.runtime.destroy(containerId).catch((err) => {
-      console.error(
+      errorDiagnostics.error("platform/engine/modules/deployments/deployment-lifecycle",
         `[DEPLOY] Failed to destroy service container ${containerId} on ${outcome}:`,
         err,
       );
@@ -171,15 +263,15 @@ async function cleanupOwnedServiceContainers(
 async function finishSession(
   buildSessionId: string,
   status: string,
-  durationMs: number,
+  durationMs: number | null,
   logs?: LogEntry[],
 ): Promise<void> {
   await repos.deployment
     .finishBuildSession(buildSessionId, status, durationMs, logs)
     .catch((err) =>
-      console.error(
+      errorDiagnostics.error("platform/engine/modules/deployments/deployment-lifecycle",
         `[deployment-lifecycle] finishBuildSession(${buildSessionId}, ${status}) failed — ` +
-          `deployment outcome unchanged: ${safeErrorMessage(err)}`,
+          `deployment outcome unchanged: ${safeErrorMessage(err)}`, err,
       ),
     );
 }
@@ -196,13 +288,37 @@ async function finishSession(
  * Lives here rather than inline in build-pipeline so the decision is exercisable
  * without standing up the whole build platform.
  */
+/** Commit intent follows publication and may already have retired predecessors.
+ * A later exception/cancellation must never tear the published candidate down.
+ * The journal reconciler owns completion; this only closes the current stream. */
+export async function protectRoleHandoverOutcome(ctx: LifecycleContext): Promise<void> {
+  if (ctx.settled || ctx.dep.roleHandover?.phase !== "committing") return;
+  // Set before any read: loss of the DB connection is not permission to unwind.
+  ctx.settled = "reconciling";
+  try {
+    const current = await repos.deployment.findById(ctx.dep.id);
+    if (current?.status === "ready") {
+      ctx.settled = "ready";
+      await finishSession(ctx.buildSessionId, "ready", current.buildDurationMs, collectLogs(ctx));
+      sessionManager.updateStatus(ctx.dep.id, "ready");
+    } else {
+      await onReconciling(ctx, {
+        warningMessage: "Role handover completion is pending. Openship will retry when the server is reachable.",
+      });
+    }
+  } catch (error) {
+    observeCaughtError(error, "platform/engine/modules/deployments/deployment-lifecycle");
+  }
+}
+
 export async function reportPipelineError(
   ctx: LifecycleContext,
   message: string,
   logger: Pick<BuildLogger, "log">,
+  errorMeta?: { errorCode?: string; errorDetails?: Record<string, unknown> },
 ): Promise<void> {
   if (ctx.settled) {
-    console.warn(
+    errorDiagnostics.warn("platform/engine/modules/deployments/deployment-lifecycle",
       `[build] post-settlement error for ${ctx.dep.id} (outcome ${ctx.settled} kept): ${message}`,
     );
     logger.log(
@@ -214,7 +330,7 @@ export async function reportPipelineError(
   // onFailure owns the one canonical terminal error line. Give it this logger
   // for recovery/test contexts that did not construct the normal pipeline ctx.
   ctx.logger ??= logger;
-  await onFailure(ctx, message);
+  await onFailure(ctx, message, undefined, errorMeta);
 }
 
 function truncateError(msg: string): string {
@@ -239,7 +355,8 @@ function ensureTerminalFailureLog(ctx: LifecycleContext, error?: string): void {
     alreadyPresent = ctx
       .persistLogs()
       .some((entry) => entry.level === "error" && entry.message.trim() === terminalMessage.trim());
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "platform/engine/modules/deployments/deployment-lifecycle");
     // collectLogs below owns the observable fallback for a broken persistence
     // callback. The live terminal line is still worth emitting here.
   }
@@ -283,7 +400,7 @@ async function recordOutcome(
     try {
       const applied = await repos.deployment.updateStatus(depId, status, attempt.extra);
       if (index > 0) {
-        console.error(
+        errorDiagnostics.error("platform/engine/modules/deployments/deployment-lifecycle",
           `[deployment-lifecycle] ${depId}: recorded "${status}" ${attempt.label} — ` +
             `the rejected payload was dropped: ${lastError}`,
         );
@@ -294,10 +411,11 @@ async function recordOutcome(
       // nothing. "refused" suppresses the success; "failed" must not.
       return { state: applied === false ? "refused" : "applied", error: null };
     } catch (err) {
+      observeCaughtError(err, "platform/engine/modules/deployments/deployment-lifecycle");
       lastError = safeErrorMessage(err);
     }
   }
-  console.error(
+  errorDiagnostics.error("platform/engine/modules/deployments/deployment-lifecycle",
     `[deployment-lifecycle] ${depId}: could not record outcome "${status}": ${lastError}`,
   );
   // The write failed outright. The deploy still SUCCEEDED, so the caller reports
@@ -366,17 +484,18 @@ export async function setDeploymentStatus(
       };
     };
   },
-): Promise<void> {
+): Promise<boolean> {
   const applied = await repos.deployment.updateStatus(deploymentId, dbStatus, opts?.extra);
   // An explicit `false` means the row is already cancelled and stayed that way.
   // Broadcasting anyway would tell the UI the deploy the user stopped is still
   // moving. Any other return counts as applied — see recordOutcome.
-  if (applied === false) return;
+  if (applied === false) return false;
   sessionManager.updateStatus(
     deploymentId,
     opts?.sse?.status ?? (dbStatus as BuildSessionState["status"]),
     opts?.sse?.meta,
   );
+  return true;
 }
 
 /**
@@ -392,24 +511,27 @@ export async function setDeploymentStatus(
  */
 export async function onReconciling(
   ctx: LifecycleContext,
-  result: { containerId?: string; warningMessage?: string; durationMs?: number },
+  result: { containerId?: string; warningMessage?: string; durationMs?: number | null },
 ): Promise<void> {
   const { dep, buildSessionId } = ctx;
+  result = { ...result, durationMs: await resolveBuildDuration(ctx, result.durationMs) };
 
   if (result.containerId) {
-    await repos.deployment.setContainerId(dep.id, result.containerId).catch(() => {});
+    await repos.deployment.setContainerId(dep.id, result.containerId).catch((diagnosticFailure) => {
+      observeCaughtError(diagnosticFailure, "platform/engine/modules/deployments/deployment-lifecycle");
+    });
   }
 
   const collapsed = collectLogs(ctx);
   await recordOutcome(dep.id, "reconciling", {
     errorMessage: null,
-    buildDurationMs: result.durationMs ?? 0,
+    buildDurationMs: result.durationMs ?? null,
   });
   ctx.settled = "reconciling";
   // The build stream is finished; the SSE layer has no "reconciling", so close
   // it as "ready" with a warning. The dashboard reads the DB row's `reconciling`
   // status for the actual state (same split as partial_failure).
-  await finishSession(buildSessionId, "ready", result.durationMs ?? 0, collapsed);
+  await finishSession(buildSessionId, "ready", result.durationMs ?? null, collapsed);
   sessionManager.updateStatus(dep.id, "ready", {
     warningMessage:
       result.warningMessage ?? "Connection lost during deploy — verifying remote state.",
@@ -431,9 +553,10 @@ export async function onReconciling(
  */
 export async function onNoChanges(
   ctx: LifecycleContext,
-  result: { warningMessage?: string; durationMs?: number },
+  result: { warningMessage?: string; durationMs?: number | null },
 ): Promise<void> {
   const { project, buildSessionId, dep } = ctx;
+  result = { ...result, durationMs: await resolveBuildDuration(ctx, result.durationMs) };
 
   const collapsed = collectLogs(ctx);
   const reason =
@@ -443,20 +566,20 @@ export async function onNoChanges(
   // refresh path reads a persisted deploy note from. Sanitized like onSuccess's
   // meta — a NUL in the reason must not fail the write.
   const previousMeta = (dep.meta as DeploymentMeta | null) ?? {};
-  const mergedMeta = sanitizeStorableStrings({
+  const mergedMeta = sanitizeDeploymentMeta({
     ...previousMeta,
     composeDeployment: { ...(previousMeta.composeDeployment ?? {}), warningMessage: reason },
   });
   await recordOutcome(
     dep.id,
     "no_changes",
-    { errorMessage: null, meta: mergedMeta, buildDurationMs: result.durationMs ?? 0 },
+    { errorMessage: null, meta: mergedMeta, buildDurationMs: result.durationMs ?? null },
     ["meta"],
   );
   ctx.settled = "no_changes";
   // The SSE layer has no third terminal state, so the stream closes "ready" and
   // the dashboard reads `no_changes` off the row (same split as onReconciling).
-  await finishSession(buildSessionId, "ready", result.durationMs ?? 0, collapsed);
+  await finishSession(buildSessionId, "ready", result.durationMs ?? null, collapsed);
   sessionManager.updateStatus(dep.id, "ready", { warningMessage: reason });
 
   notification.emit({
@@ -494,32 +617,58 @@ export async function onNoChanges(
 export async function onFailure(
   ctx: LifecycleContext,
   error?: string,
-  durationMs?: number,
+  durationMs?: number | null,
   errorMeta?: { errorCode?: string; errorDetails?: Record<string, unknown>; errorMessage?: string },
+  opts: { keepProvisioned?: boolean } = {},
 ): Promise<void> {
   const { runtime, project, dep, buildSessionId, provisioned } = ctx;
+  if (dep.roleHandover?.phase === "committing") {
+    await protectRoleHandoverOutcome(ctx);
+    return;
+  }
+  // Redact before ANY sink (error reporter, SSE, notification payloads, the row):
+  // a clone failure can quote the credentialed clone URL.
+  if (error) error = redactUrlCredentials(error);
+  durationMs = await resolveBuildDuration(ctx, durationMs);
+  // Only settle clocks that were actually started; retained/untouched rows keep
+  // their existing outcome and timing. Capture the endpoint before cleanup.
+  await finishServiceDeploymentTimings(ctx);
+  if (project.workspaceId) {
+    errorMeta = {
+      ...errorMeta,
+      ...deploymentResourceFailure({
+        project, message: error ?? "", meta: errorMeta,
+        logs: ctx.resourceEvidence ?? collectLogs(ctx),
+      }),
+    };
+  }
+  reportError(error ?? "Deployment failed", { kind: "deployment", component: "deployment-lifecycle",
+    operation: "deployment.failed", organizationId: dep.organizationId, projectId: project.id,
+    deploymentId: dep.id, serverId: project.serverId ?? undefined, durationMs: durationMs ?? undefined, code: errorMeta?.errorCode, handled: true });
 
   // Do this at the lifecycle choke point, before cleanup can add secondary
   // diagnostics, so both SSE and the persisted build session end with the real
   // failure reason even for direct compose-pipeline failures (#751).
   ensureTerminalFailureLog(ctx, error);
 
-  // Always delete the workspace/container on failure so the user doesn't
-  // have to manually clean up.
-  if (runtime && provisioned.imageRef) {
+  // Routing recovery can leave either release serving traffic. Preserve both
+  // until the operator resolves it; an ordinary failed attempt still cleans up.
+  if (!opts.keepProvisioned && runtime && provisioned.imageRef) {
     try {
-      await cleanupBuildArtifact(runtime, provisioned.imageRef);
+      // A verified completed Docker image survives for bounded deployment-only
+      // retry; incomplete artifacts and failed containers retain normal cleanup.
+      if (!deploymentArtifacts(dep.meta)) await cleanupBuildArtifact(runtime, provisioned.imageRef);
     } catch (destroyErr) {
-      console.error(`[DEPLOY] Failed to destroy ${provisioned.imageRef} on failure:`, destroyErr);
+      errorDiagnostics.error("platform/engine/modules/deployments/deployment-lifecycle", `[DEPLOY] Failed to destroy ${provisioned.imageRef} on failure:`, destroyErr);
       // Retry once after a short delay
       await new Promise((r) => setTimeout(r, 2000));
       await cleanupBuildArtifact(runtime, provisioned.imageRef).catch((retryErr) => {
-        console.error(`[DEPLOY] Retry destroy also failed for ${provisioned.imageRef}:`, retryErr);
+        errorDiagnostics.error("platform/engine/modules/deployments/deployment-lifecycle", `[DEPLOY] Retry destroy also failed for ${provisioned.imageRef}:`, retryErr);
       });
     }
   }
 
-  await cleanupOwnedServiceContainers(ctx, "failure");
+  if (!opts.keepProvisioned) await cleanupOwnedServiceContainers(ctx, "failure");
 
   // INVARIANT: failure writes the DEPLOYMENT row only — NEVER the project row.
   // The project's live-release pointer (activeDeploymentId) advances solely on
@@ -543,7 +692,7 @@ export async function onFailure(
     {
       // The outcome and its measurement survive together even if the later
       // build-session/log write fails. Status readers can use this record.
-      buildDurationMs: durationMs ?? 0,
+      buildDurationMs: durationMs ?? null,
       errorMessage,
       errorCode: errorMeta?.errorCode ?? null,
       errorDetails: sanitizeStorableStrings(errorMeta?.errorDetails) ?? null,
@@ -563,17 +712,17 @@ export async function onFailure(
   // further: no second terminal event, and no `deployment.failed` notification
   // for a deploy the user ended on purpose. Mirrors the guard in onSuccess.
   if (outcome.state === "refused") {
-    console.warn(
+    errorDiagnostics.warn("platform/engine/modules/deployments/deployment-lifecycle",
       `[deployment-lifecycle] ${dep.id}: deploy failed after the user cancelled it; ` +
         `leaving the row cancelled and reporting the cancel rather than a failure`,
     );
     ctx.settled = "cancelled";
-    await finishSession(buildSessionId, "cancelled", durationMs ?? 0, collapsed);
+    await finishSession(buildSessionId, "cancelled", durationMs ?? null, collapsed);
     return;
   }
 
   ctx.settled = "failed";
-  await finishSession(buildSessionId, "failed", durationMs ?? 0, collapsed);
+  await finishSession(buildSessionId, "failed", durationMs ?? null, collapsed);
   sessionManager.updateStatus(dep.id, "failed", {
     ...errorMeta,
     errorMessage,
@@ -632,18 +781,26 @@ export async function onFailure(
 
 export async function onCancelled(
   ctx: LifecycleContext,
-  durationMs?: number,
+  durationMs?: number | null,
   opts: { keepProvisioned?: boolean } = {},
 ): Promise<void> {
   const { runtime, dep, buildSessionId, provisioned } = ctx;
+  if (dep.roleHandover?.phase === "committing") {
+    await protectRoleHandoverOutcome(ctx);
+    return;
+  }
+  durationMs = await resolveBuildDuration(ctx, durationMs);
+  await finishServiceDeploymentTimings(ctx);
 
   if (!opts.keepProvisioned && runtime && provisioned.imageRef) {
     try {
       await cleanupBuildArtifact(runtime, provisioned.imageRef);
     } catch (destroyErr) {
-      console.error(`[DEPLOY] Failed to destroy ${provisioned.imageRef} on cancel:`, destroyErr);
+      errorDiagnostics.error("platform/engine/modules/deployments/deployment-lifecycle", `[DEPLOY] Failed to destroy ${provisioned.imageRef} on cancel:`, destroyErr);
       await new Promise((r) => setTimeout(r, 2000));
-      await cleanupBuildArtifact(runtime, provisioned.imageRef).catch(() => {});
+      await cleanupBuildArtifact(runtime, provisioned.imageRef).catch((diagnosticFailure) => {
+        observeCaughtError(diagnosticFailure, "platform/engine/modules/deployments/deployment-lifecycle");
+      });
     }
   }
 
@@ -651,27 +808,29 @@ export async function onCancelled(
   // containers carried from the active release. Then close every service's UI
   // status for this cancelled attempt.
   const serviceDeps = opts.keepProvisioned
-    ? await repos.service.listByDeployment(dep.id).catch(() => [])
+    ? await repos.service.listByDeployment(dep.id).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/deployments/deployment-lifecycle"); return []; })
     : await cleanupOwnedServiceContainers(ctx, "cancel");
   const services =
-    serviceDeps.length > 0 ? await repos.service.listByProject(dep.projectId).catch(() => []) : [];
+    serviceDeps.length > 0 ? await repos.service.listByProject(dep.projectId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/deployments/deployment-lifecycle"); return []; }) : [];
   const serviceNameMap = new Map(services.map((s) => [s.id, s.name]));
 
+  const retainedInfrastructure = await attachedInfrastructureIds(dep, services);
   for (const serviceDep of serviceDeps) {
+    const retained = serviceDep.status === "success" && retainedInfrastructure.has(serviceDep.serviceId);
     sessionManager.broadcastServiceStatus(dep.id, {
       serviceName: serviceNameMap.get(serviceDep.serviceId) ?? serviceDep.serviceId,
       serviceId: serviceDep.serviceId,
-      status: "failed",
-      error: "Deployment cancelled",
+      status: retained ? "running" : "failed",
+      ...(retained ? { containerId: serviceDep.containerId ?? undefined } : { error: "Deployment cancelled" }),
     });
   }
 
   // INVARIANT: cancel writes the DEPLOYMENT row only — NEVER the project row.
   // A cancelled redeploy leaves activeDeploymentId (the last successful release)
   // exactly as it was. Do not add a setActiveDeployment call here.
-  await recordOutcome(dep.id, "cancelled", {});
+  await recordOutcome(dep.id, "cancelled", { buildDurationMs: durationMs });
   ctx.settled = "cancelled";
-  await finishSession(buildSessionId, "cancelled", durationMs ?? 0, collectLogs(ctx));
+  await finishSession(buildSessionId, "cancelled", durationMs ?? null, collectLogs(ctx));
   sessionManager.updateStatus(dep.id, "cancelled");
 
   notification.emit({
@@ -689,7 +848,7 @@ export async function onCancelled(
 }
 
 /** Release numbering is cosmetic — see the call site's ordering invariant. */
-async function readReleaseVersion(
+export async function readReleaseVersion(
   projectId: string,
   commitSha: string | null | undefined,
 ): Promise<number | undefined> {
@@ -699,8 +858,8 @@ async function readReleaseVersion(
       (await repos.deployment.getNextReadyVersion(projectId))
     );
   } catch (err) {
-    console.error(
-      `[deployment-lifecycle] release version lookup failed project=${projectId}: ${safeErrorMessage(err)} — release left unnumbered`,
+    errorDiagnostics.error("platform/engine/modules/deployments/deployment-lifecycle",
+      `[deployment-lifecycle] release version lookup failed project=${projectId}: ${safeErrorMessage(err)} — release left unnumbered`, err,
     );
     return undefined;
   }
@@ -711,13 +870,16 @@ export async function onSuccess(
   result: {
     containerId: string;
     url?: string;
-    durationMs: number;
+    durationMs?: number | null;
     warningMessage?: string;
     decisionPending?: boolean;
     metaPatch?: Record<string, unknown>;
+    /** Evidence for failed services in an otherwise published partial rollout. */
+    failureMeta?: DeploymentFailureMeta;
   },
 ): Promise<void> {
   const { project, dep, buildSessionId } = ctx;
+  result = { ...result, durationMs: await resolveBuildDuration(ctx, result.durationMs) };
 
   // ORDERING INVARIANT: the workload is already up, so NOTHING between here and
   // `ctx.settled = "ready"` below may throw. The pipeline's outer catch reads an
@@ -728,15 +890,19 @@ export async function onSuccess(
   await repos.deployment
     .setContainerId(dep.id, result.containerId, result.url)
     .catch((err) =>
-      console.error(
-        `[deployment-lifecycle] setContainerId failed deployment=${dep.id} container=${result.containerId}: ${safeErrorMessage(err)}`,
+      errorDiagnostics.error("platform/engine/modules/deployments/deployment-lifecycle",
+        `[deployment-lifecycle] setContainerId failed deployment=${dep.id} container=${result.containerId}: ${safeErrorMessage(err)}`, err,
       ),
     );
 
   // Sanitized: metaPatch carries service/routing warnings built from raw process
   // output, and `meta` is jsonb written BEFORE the outcome — one NUL in a warning
   // string would fail the "ready" write and take the whole deploy down with it.
-  const mergedMeta = sanitizeStorableStrings(
+  // `sanitizeDeploymentMeta`, not the plain scrubber: meta carries
+  // `composeServices` (the frozen env a rollback replays), which is an encrypted
+  // operational record, not log text. Redacting it wrote `***` into a DSN and
+  // broke the restore — see `sanitizeDeploymentMeta`.
+  const mergedMeta = sanitizeDeploymentMeta(
     result.metaPatch
       ? { ...((dep.meta as DeploymentMeta | null) ?? {}), ...result.metaPatch }
       : ((dep.meta as DeploymentMeta | null) ?? null),
@@ -756,8 +922,14 @@ export async function onSuccess(
   const outcome = await recordOutcome(
     dep.id,
     "ready",
-    { errorMessage: null, meta: mergedMeta, version, buildDurationMs: result.durationMs },
-    ["meta"],
+    {
+      errorMessage: null, meta: mergedMeta, version, buildDurationMs: result.durationMs,
+      ...(result.failureMeta ? {
+        errorCode: result.failureMeta.errorCode,
+        errorDetails: sanitizeStorableStrings(result.failureMeta.errorDetails),
+      } : {}),
+    },
+    ["meta", "errorDetails"],
   );
   const outcomeError = outcome.error;
 
@@ -769,12 +941,12 @@ export async function onSuccess(
   // already broadcast `cancelled`, so this returns silently rather than emitting
   // a second terminal event.
   if (outcome.state === "refused") {
-    console.warn(
+    errorDiagnostics.warn("platform/engine/modules/deployments/deployment-lifecycle",
       `[deployment-lifecycle] ${dep.id}: deploy finished after the user cancelled it; ` +
         `leaving the row cancelled and NOT advancing the active release`,
     );
     ctx.settled = "cancelled";
-    await finishSession(buildSessionId, "cancelled", result.durationMs, collectLogs(ctx));
+    await finishSession(buildSessionId, "cancelled", result.durationMs ?? null, collectLogs(ctx));
     return;
   }
 
@@ -790,8 +962,8 @@ export async function onSuccess(
   await repos.project
     .setActiveDeployment(project.id, dep.id)
     .catch((err) =>
-      console.error(
-        `[deployment-lifecycle] setActiveDeployment failed project=${project.id} deployment=${dep.id}: ${safeErrorMessage(err)}`,
+      errorDiagnostics.error("platform/engine/modules/deployments/deployment-lifecycle",
+        `[deployment-lifecycle] setActiveDeployment failed project=${project.id} deployment=${dep.id}: ${safeErrorMessage(err)}`, err,
       ),
     );
 
@@ -800,36 +972,10 @@ export async function onSuccess(
   await repos.deployment
     .supersedePendingDecisions(project.id, dep.id)
     .catch((err) =>
-      console.warn(
-        `[deployment-lifecycle] supersedePendingDecisions failed project=${project.id}: ${safeErrorMessage(err)}`,
+      errorDiagnostics.warn("platform/engine/modules/deployments/deployment-lifecycle",
+        `[deployment-lifecycle] supersedePendingDecisions failed project=${project.id}: ${safeErrorMessage(err)}`, err,
       ),
     );
-
-  // deployment.meta is the per-deploy historical snapshot; the
-  // project column is the CURRENT cloud binding. Drift detection
-  // reads the project column.
-  //
-  // EXCEPT for a local-orchestrated cloud deploy (self-hosted instance,
-  // deployTarget=cloud + buildStrategy=local): the project MUST stay
-  // local-canonical. `cloud_workspace_id` is the "this project lives on
-  // the SaaS — proxy everything to it" primitive; setting it here would
-  // flip the project to a SaaS proxy and break the next local build. The
-  // workspace is still tracked per-deploy via `deployment.containerId`
-  // (used for retirement of the previous workspace on redeploy), so
-  // skipping the project column here loses nothing for this mode.
-  const isLocalOrchestratedCloud =
-    !env.CLOUD_MODE &&
-    mergedMeta?.deployTarget === "cloud" &&
-    mergedMeta?.buildStrategy === "local";
-  if (mergedMeta?.workspaceId && !isLocalOrchestratedCloud) {
-    await repos.project
-      .setCloudWorkspaceId(project.id, mergedMeta.workspaceId)
-      .catch((err) =>
-        console.warn(
-          `[deployment-lifecycle] setCloudWorkspaceId failed project=${project.id} workspace=${mergedMeta.workspaceId}: ${safeErrorMessage(err)}`,
-        ),
-      );
-  }
 
   // Persist the DURABLE server binding (self-hosted). deployment.meta.serverId is
   // the per-deploy snapshot; project.server_id is the current owner that
@@ -845,8 +991,8 @@ export async function onSuccess(
     await repos.project
       .update(project.id, { serverId: mergedMeta.serverId })
       .catch((err) =>
-        console.warn(
-          `[deployment-lifecycle] persist server binding failed project=${project.id} server=${mergedMeta.serverId}: ${safeErrorMessage(err)}`,
+        errorDiagnostics.warn("platform/engine/modules/deployments/deployment-lifecycle",
+          `[deployment-lifecycle] persist server binding failed project=${project.id} server=${mergedMeta.serverId}: ${safeErrorMessage(err)}`, err,
         ),
       );
   }
@@ -856,11 +1002,13 @@ export async function onSuccess(
   // against a stale pre-deploy cache entry.
   try {
     await repos.updateStatus.deleteByProject(project.id);
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "platform/engine/modules/deployments/deployment-lifecycle");
     // Cache invalidation is best-effort bookkeeping after a successful deploy.
   }
-  await finishSession(buildSessionId, "ready", result.durationMs, collectLogs(ctx));
+  await finishSession(buildSessionId, "ready", result.durationMs ?? null, collectLogs(ctx));
   sessionManager.updateStatus(dep.id, "ready", {
+    ...result.failureMeta,
     // The deploy WORKED whether or not the row took the write, and the terminal
     // event has to go out either way — but say so, because the row the dashboard
     // re-reads on refresh may still say "deploying".

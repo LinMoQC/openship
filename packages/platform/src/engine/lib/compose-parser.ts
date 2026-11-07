@@ -12,10 +12,26 @@ import {
   composeMountIssues,
   composeMountToSpec,
   composePortToSpec,
+  parseComposeDurationNs,
   parseComposeNamespace,
-  parseEnvFile,
+  parseContainerHosts,
+  parseComposeEnvFile,
+  interpolateComposeString,
+  resolveComposeInterpolation,
+  hasComposeInterpolation,
+  resolveComposeValue,
+  resolveBareEnvironmentKey,
+  createComposeInterpolationDiagnostics,
+  readComposeGpuConfig,
+  readComposeShmConfig,
 } from "@repo/core";
-import type { ComposeAdvanced, ComposeHealthcheck, ComposeNamespaceField } from "@repo/core";
+import type {
+  ComposeAdvanced,
+  ComposeHealthcheck,
+  ComposeNamespaceField,
+  ComposeMissingVariable,
+  ComposeEnvironmentMeta,
+} from "@repo/core";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -109,26 +125,17 @@ export interface ComposeUnsupportedField {
   blocking?: boolean;
 }
 
-/** A mandatory compose variable with no value yet. */
-export interface ComposeMissingVariable {
-  variable: string;
-  /** The author's own word after `:?`, VERBATIM — never interpolated, so a
-   *  nested `${SECRET}` in the message can't ride out through a scan response. */
-  message?: string;
-}
-
-export interface ComposeEnvironmentMeta {
-  source: "env-file" | "default" | "missing" | "interpolated";
-  variable?: string;
-  defaultValue?: string;
-  resolvedValue: string;
-  expression?: string;
-  /** The file declares this one mandatory (`:?` / `?`). Only set when it also
-   *  came back unresolved, i.e. alongside `source: "missing"`. */
-  required?: boolean;
-  /** Unresolved variable names inside an embedded expression. Names only. */
-  unresolvedVariables?: string[];
-}
+export type {
+  ComposeMissingVariable,
+  ComposeEnvironmentMeta,
+  ComposeInterpolationResolution,
+  ComposeEnvironmentResolution,
+} from "@repo/core";
+export {
+  parseComposeEnvFile,
+  resolveComposeInterpolation,
+  resolveComposeEnvironmentTemplates,
+} from "@repo/core";
 
 export interface ComposeParseOptions {
   /** Contents of project .env files used for Docker Compose interpolation. */
@@ -175,8 +182,7 @@ export function parseComposeFile(
     envFileContent: options.envFileContent,
   });
   const interpolationEnv = { ...sourceInterpolationEnv, ...(options.env ?? {}) };
-  const missingRequired = new Map<string, string | undefined>();
-  missingRequiredSinks.set(interpolationEnv, missingRequired);
+  const missingRequired = createComposeInterpolationDiagnostics(interpolationEnv);
   const rawServices = doc.services ?? {};
   const resolvedVolumeNames = parseResolvedVolumeNames(doc.volumes, interpolationEnv);
   const resolvedExternalNetworkNames = parseResolvedExternalNetworkNames(
@@ -312,33 +318,6 @@ export function describeBlockingComposeFields(
   blocking: readonly ComposeUnsupportedField[],
 ): string {
   return blocking.map((b) => `Service "${b.service}": ${b.reason}`).join("\n");
-}
-
-/**
- * Where {@link resolveInterpolationExpression} reports unsatisfied mandatory
- * variables. Keyed by the interpolation env object of the parse that's running,
- * so a sink is scoped to one `parseComposeFile` call and there is no global state
- * to reset — a resolver reached with any other env record (`.env` self-expansion
- * in `parseComposeEnvFile`) simply has nowhere to report, which is fine.
- */
-const missingRequiredSinks = new WeakMap<Record<string, string>, Map<string, string | undefined>>();
-const unresolvedVariableSinks = new WeakMap<Record<string, string>, Set<string>>();
-
-function reportUnresolvedVariable(key: string, env: Record<string, string>): void {
-  unresolvedVariableSinks.get(env)?.add(key);
-}
-
-function reportMissingRequired(
-  key: string,
-  rawWord: string,
-  env: Record<string, string>,
-): { value: string; source: "missing"; variable: string; required: true } {
-  reportUnresolvedVariable(key, env);
-  const sink = missingRequiredSinks.get(env);
-  // First mention wins: the same variable is often required in several services
-  // and the first message is as good as the last.
-  if (sink && !sink.has(key)) sink.set(key, rawWord.trim() || undefined);
-  return { value: "", source: "missing", variable: key, required: true };
 }
 
 // ─── Field parsers ───────────────────────────────────────────────────────────
@@ -711,6 +690,13 @@ function parseAdvanced(
   const resources = parseServiceResources(svc, env);
   if (resources) advanced.resources = resources;
 
+  const gpu = readComposeGpuConfig(svc, (value) => interpolateComposeString(value, env));
+  Object.assign(advanced, gpu.config);
+  unsupported.push(...gpu.issues.map((issue) => ({ service: serviceName, ...issue })));
+  const shm = readComposeShmConfig(svc.shm_size, (value) => interpolateComposeString(value, env));
+  Object.assign(advanced, shm.config);
+  unsupported.push(...shm.issues.map((issue) => ({ service: serviceName, ...issue })));
+
   const networkMode = parseNamespaceField(
     svc.network_mode,
     "network_mode",
@@ -722,6 +708,8 @@ function parseAdvanced(
 
   const pidMode = parseNamespaceField(svc.pid, "pid", env, serviceName, unsupported);
   if (pidMode) advanced.pidMode = pidMode;
+  const extraHosts = parseContainerHosts(svc.extra_hosts, (value) => interpolateComposeString(value, env));
+  if (extraHosts !== undefined) advanced.extraHosts = extraHosts;
 
   // Entrypoint (#575), on exactly the terms `parseCommand` uses for `command`:
   // list → argv verbatim, string → shell-word-split (no implicit `sh -c`).
@@ -750,6 +738,26 @@ function parseAdvanced(
         ? String(rawGrace)
         : undefined;
   if (grace) advanced.stopGracePeriod = grace;
+
+  // The runtime applies a duration it can't read as unset, so Docker's default
+  // takes over: 10 seconds for a grace period meant to be longer. Say so at
+  // parse time instead of letting the first stop discover it.
+  const durations = [
+    ["stop_grace_period", advanced.stopGracePeriod],
+    ["healthcheck.interval", advanced.healthcheck?.interval],
+    ["healthcheck.timeout", advanced.healthcheck?.timeout],
+    ["healthcheck.start_period", advanced.healthcheck?.startPeriod],
+  ] as const;
+  for (const [field, value] of durations) {
+    if (value === undefined || parseComposeDurationNs(value) !== undefined) continue;
+    unsupported.push({
+      service: serviceName,
+      field,
+      reason:
+        `${field} is not a duration like "90s" or "1m30s", so it is ignored and ` +
+        `Docker's default applies.`,
+    });
+  }
 
   return Object.keys(advanced).length > 0 ? advanced : undefined;
 }
@@ -800,7 +808,6 @@ const UNSUPPORTED_SERVICE_KEYS: Record<string, string> = {
   security_opt: "security_opt is not modeled — default seccomp/AppArmor apply.",
   sysctls: "sysctls is not modeled — kernel parameters stay at their defaults.",
   ulimits: "ulimits is not modeled — daemon defaults apply.",
-  shm_size: "shm_size is not modeled — /dev/shm stays at Docker's 64MB default.",
   ipc: "ipc is not modeled — the container gets its own IPC namespace.",
   userns_mode: "userns_mode is not modeled.",
   uts: "uts is not modeled.",
@@ -859,6 +866,11 @@ function requestsSomething(value: unknown): boolean {
   return true;
 }
 
+function isNvidiaRuntime(value: unknown, env: Record<string, string>): boolean {
+  if (typeof value !== "string") return false;
+  return interpolateComposeString(value, env).trim().toLowerCase() === "nvidia";
+}
+
 function collectUnsupported(
   serviceName: string,
   svc: Record<string, unknown>,
@@ -868,6 +880,10 @@ function collectUnsupported(
 ): void {
   for (const [key, reason] of Object.entries(UNSUPPORTED_SERVICE_KEYS)) {
     if (!requestsSomething(svc[key])) continue;
+    // `runtime: nvidia` is retained as HostConfig.Runtime. Any other runtime
+    // (`runsc`, `kata`, ...) still falls back to the daemon default and is reported.
+    if (key === "runtime" && isNvidiaRuntime(svc[key], env)) continue;
+    // `gpus` is modeled (readComposeGpuConfig) and is not in this table; nothing to skip here.
     unsupported.push({ service: serviceName, field: key, reason });
   }
 
@@ -884,7 +900,7 @@ function collectUnsupported(
         field: "deploy",
         reason:
           `deploy.${rest.join("/")} is not modeled — Openship runs one container per ` +
-          `service (only deploy.resources.limits is honored).`,
+          `service (only deploy.resources.limits and the GPU in deploy.resources.reservations.devices are honored).`,
       });
     }
   }
@@ -1076,339 +1092,4 @@ function buildInterpolationEnv(options: ComposeParseOptions): Record<string, str
   }
 
   return { ...env, ...(options.env ?? {}) };
-}
-
-export function parseComposeEnvFile(content: string): Record<string, string> {
-  const entries = parseEnvFile(content);
-  const result = Object.fromEntries(entries.map(({ key, value }) => [key, value]));
-  const expressions = new Map<string, string>();
-  for (const { key, interpolation } of entries) {
-    if (interpolation === undefined) expressions.delete(key);
-    else expressions.set(key, interpolation);
-  }
-  for (const key of Object.keys(result)) {
-    const expression = expressions.get(key);
-    if (expression !== undefined) result[key] = interpolateComposeString(expression, result);
-  }
-  return result;
-}
-
-const BARE_VARIABLE_RE = /^[A-Za-z_][A-Za-z0-9_]*/;
-
-/**
- * Reads the `${...}` expression opening at `start`, counting nested `${` so the
- * matching close brace is found. Returns null when the expression is never closed.
- */
-function readBracedExpression(
-  input: string,
-  start: number,
-): { expression: string; end: number } | null {
-  let depth = 1;
-  for (let i = start + 2; i < input.length; i++) {
-    if (input[i] === "$" && input[i + 1] === "{") {
-      depth++;
-      i++;
-    } else if (input[i] === "}" && --depth === 0) {
-      return { expression: input.slice(start + 2, i), end: i + 1 };
-    }
-  }
-  return null;
-}
-
-function interpolateComposeString(input: string, env: Record<string, string>): string {
-  const escapedDollar = "\0COMPOSE_ESCAPED_DOLLAR\0";
-  const protectedInput = input.replace(/\$\$/g, escapedDollar);
-
-  let out = "";
-  let cursor = 0;
-  while (cursor < protectedInput.length) {
-    const dollar = protectedInput.indexOf("$", cursor);
-    if (dollar < 0) break;
-    out += protectedInput.slice(cursor, dollar);
-    cursor = dollar + 1;
-
-    if (protectedInput[dollar + 1] === "{") {
-      const braced = readBracedExpression(protectedInput, dollar);
-      if (braced && braced.expression) {
-        out += resolveInterpolationExpression(braced.expression, env).value;
-        cursor = braced.end;
-        continue;
-      }
-    } else {
-      const bare = protectedInput.slice(dollar + 1).match(BARE_VARIABLE_RE);
-      if (bare) {
-        if (!Object.hasOwn(env, bare[0])) reportUnresolvedVariable(bare[0], env);
-        out += env[bare[0]] ?? "";
-        cursor = dollar + 1 + bare[0].length;
-        continue;
-      }
-    }
-
-    out += "$";
-  }
-
-  return (out + protectedInput.slice(cursor)).replaceAll(escapedDollar, "$");
-}
-
-export interface ComposeInterpolationResolution {
-  value: string;
-  /** Variables whose selected Compose branch had no value in this scope. */
-  unresolvedVariables: string[];
-  /** The unresolved subset declared mandatory with `:?` / `?`. */
-  missingRequired: ComposeMissingVariable[];
-}
-
-/**
- * Resolve one Compose scalar while retaining enough diagnostics for a later
- * deployment stage to fail closed. Unlike the environment-map helper below,
- * this also reports ordinary `${VAR}` / `$VAR` misses: an empty runtime env is
- * legal, but an empty image tag must never be handed to a registry client that
- * silently rewrites it to `latest`.
- */
-export function resolveComposeInterpolation(
-  input: string,
-  env: Record<string, string>,
-): ComposeInterpolationResolution {
-  const parentRequired = missingRequiredSinks.get(env);
-  const parentUnresolved = unresolvedVariableSinks.get(env);
-  const missingRequired = new Map<string, string | undefined>();
-  const unresolved = new Set<string>();
-  missingRequiredSinks.set(env, missingRequired);
-  unresolvedVariableSinks.set(env, unresolved);
-
-  try {
-    return {
-      value: interpolateComposeString(input, env),
-      unresolvedVariables: [...unresolved],
-      missingRequired: [...missingRequired].map(([variable, message]) => ({
-        variable,
-        ...(message && { message }),
-      })),
-    };
-  } finally {
-    if (parentRequired) {
-      missingRequiredSinks.set(env, parentRequired);
-      for (const [key, message] of missingRequired) {
-        if (!parentRequired.has(key)) parentRequired.set(key, message);
-      }
-    } else {
-      missingRequiredSinks.delete(env);
-    }
-    if (parentUnresolved) {
-      unresolvedVariableSinks.set(env, parentUnresolved);
-      for (const key of unresolved) parentUnresolved.add(key);
-    } else {
-      unresolvedVariableSinks.delete(env);
-    }
-  }
-}
-
-function hasComposeInterpolation(input: string): boolean {
-  return /\$\$|\$\{|\$[A-Za-z_]/.test(input);
-}
-
-function interpolateComposeStringWithMissing(
-  input: string,
-  env: Record<string, string>,
-): { value: string; missing: Map<string, string | undefined> } {
-  const resolution = resolveComposeInterpolation(input, env);
-  const missing = new Map<string, string | undefined>();
-  for (const { variable, message } of resolution.missingRequired) {
-    missing.set(variable, message);
-  }
-  return { value: resolution.value, missing };
-}
-
-export interface ComposeEnvironmentResolution {
-  env: Record<string, string>;
-  missingRequired: ComposeMissingVariable[];
-}
-
-/**
- * Resolve persisted Compose environment expressions against the env that will
- * actually reach a service. Expressions may refer to another templated key, so
- * iterate to a fixed point instead of depending on YAML key order. Required
- * variables are reported only after convergence; callers can fail the service
- * without ever logging a value.
- */
-export function resolveComposeEnvironmentTemplates(
-  env: Record<string, string>,
-  templates: Record<string, string>,
-): ComposeEnvironmentResolution {
-  const resolved = { ...env };
-  const entries = Object.entries(templates);
-  const evaluate = (key: string, expression: string) => {
-    // A self-reference reads the lower-layer value, not the result we produced
-    // on the previous fixed-point pass (`A=${A}x` must not grow x forever).
-    const scope = { ...resolved };
-    if (Object.hasOwn(env, key)) scope[key] = env[key]!;
-    else delete scope[key];
-    return interpolateComposeString(expression, scope);
-  };
-
-  for (let pass = 0; pass <= entries.length; pass++) {
-    let changed = false;
-    for (const [key, expression] of entries) {
-      const value = evaluate(key, expression);
-      if (resolved[key] !== value) {
-        resolved[key] = value;
-        changed = true;
-      }
-    }
-    if (!changed) break;
-  }
-
-  const missing = new Map<string, string | undefined>();
-  // One final stable pass records only requirements that remain unresolved.
-  for (const [key, expression] of entries) {
-    const scope = { ...resolved };
-    if (Object.hasOwn(env, key)) scope[key] = env[key]!;
-    else delete scope[key];
-    const final = interpolateComposeStringWithMissing(expression, scope);
-    resolved[key] = final.value;
-    for (const [variable, message] of final.missing) {
-      if (!missing.has(variable)) missing.set(variable, message);
-    }
-  }
-
-  return {
-    env: resolved,
-    missingRequired: [...missing].map(([variable, message]) => ({
-      variable,
-      ...(message && { message }),
-    })),
-  };
-}
-
-function resolveComposeValue(
-  input: string,
-  env: Record<string, string>,
-): { value: string; meta?: ComposeEnvironmentMeta } {
-  const trimmed = input.trim();
-  const directBraced = trimmed.startsWith("${") ? readBracedExpression(trimmed, 0) : null;
-  if (directBraced?.expression && directBraced.end === trimmed.length) {
-    const resolved = resolveInterpolationExpression(directBraced.expression, env);
-    return {
-      value: resolved.value,
-      meta: {
-        source: resolved.source,
-        variable: resolved.variable,
-        defaultValue: resolved.defaultValue,
-        resolvedValue: resolved.value,
-        expression: trimmed,
-        ...(resolved.required && { required: true }),
-      },
-    };
-  }
-
-  const directPlain = trimmed.match(/^\$([A-Za-z_][A-Za-z0-9_]*)$/);
-  if (directPlain) {
-    const key = directPlain[1]!;
-    const resolved = resolveBareEnvironmentKey(key, env);
-    return {
-      value: resolved.value,
-      meta: {
-        source: resolved.meta?.source ?? "missing",
-        variable: key,
-        resolvedValue: resolved.value,
-        expression: trimmed,
-      },
-    };
-  }
-
-  const { value, missing } = interpolateComposeStringWithMissing(input, env);
-  if (!input.includes("$")) return { value };
-
-  return {
-    value,
-    meta: {
-      source: "interpolated",
-      resolvedValue: value,
-      expression: input,
-      ...(missing.size > 0 && {
-        required: true,
-        unresolvedVariables: [...missing.keys()],
-      }),
-    },
-  };
-}
-
-function resolveBareEnvironmentKey(
-  key: string,
-  env: Record<string, string>,
-): { value: string; meta: ComposeEnvironmentMeta } {
-  const hasValue = Object.prototype.hasOwnProperty.call(env, key);
-  const value = env[key] ?? "";
-  return {
-    value,
-    meta: {
-      source: hasValue ? "env-file" : "missing",
-      variable: key,
-      resolvedValue: value,
-      expression: key,
-    },
-  };
-}
-
-function resolveInterpolationExpression(
-  expression: string,
-  env: Record<string, string>,
-): {
-  value: string;
-  source: ComposeEnvironmentMeta["source"];
-  variable?: string;
-  defaultValue?: string;
-  required?: boolean;
-} {
-  const match = expression.match(/^([A-Za-z_][A-Za-z0-9_]*)(?:(:?[-+?])(.*))?$/s);
-  if (!match) return { value: "", source: "missing" };
-
-  const [, key, operator, rawWord = ""] = match;
-  const hasValue = Object.prototype.hasOwnProperty.call(env, key);
-  const value = env[key] ?? "";
-  const isNonEmpty = hasValue && value !== "";
-  const word = () => interpolateComposeString(rawWord, env);
-
-  switch (operator) {
-    case undefined:
-      if (!hasValue) reportUnresolvedVariable(key, env);
-      return {
-        value: hasValue ? value : "",
-        source: hasValue ? "env-file" : "missing",
-        variable: key,
-      };
-    case ":-":
-      if (isNonEmpty) return { value, source: "env-file", variable: key };
-      {
-        const fallback = word();
-        return { value: fallback, source: "default", variable: key, defaultValue: fallback };
-      }
-    case "-":
-      if (hasValue) return { value, source: "env-file", variable: key };
-      {
-        const fallback = word();
-        return { value: fallback, source: "default", variable: key, defaultValue: fallback };
-      }
-    case ":?":
-      if (isNonEmpty) return { value, source: "env-file", variable: key };
-      return reportMissingRequired(key, rawWord, env);
-    case "?":
-      if (hasValue) return { value, source: "env-file", variable: key };
-      return reportMissingRequired(key, rawWord, env);
-    case ":+":
-      if (!isNonEmpty) return { value: "", source: "missing", variable: key };
-      {
-        const replacement = word();
-        return { value: replacement, source: "default", variable: key, defaultValue: replacement };
-      }
-    case "+":
-      if (!hasValue) return { value: "", source: "missing", variable: key };
-      {
-        const replacement = word();
-        return { value: replacement, source: "default", variable: key, defaultValue: replacement };
-      }
-    default:
-      reportUnresolvedVariable(key, env);
-      return { value: "", source: "missing", variable: key };
-  }
 }

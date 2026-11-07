@@ -38,6 +38,7 @@
  *     one scrape rather than two.
  */
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { repos } from "@repo/db";
 import { env } from "@repo/platform/engine/config/index";
 import { cacheStore } from "@repo/platform/engine/lib/cache-store/index";
@@ -210,13 +211,10 @@ const inflightScrape = new Map<string, Promise<void>>();
  * `SCRAPE_STALE_SECONDS` or a scrape is already in flight. Safe to call
  * fire-and-forget on every analytics read; it self-throttles and never throws.
  *
- * Self-hosted only: the SaaS has no managed servers / OpenResty to scrape, so
- * this hard-stops in cloud mode — a shared analytics read must never reach out
- * to a server from the SaaS.
+ * Customer-operated edges only. Hosted connections use the same SSH ownership,
+ * paid-access and public-destination checks as every other server operation.
  */
 export function scrapeServerIfStale(serverId: string): Promise<void> {
-  if (env.CLOUD_MODE) return Promise.resolve();
-
   const existing = inflightScrape.get(serverId);
   if (existing) return existing;
 
@@ -231,6 +229,10 @@ export function scrapeServerIfStale(serverId: string): Promise<void> {
     // read permanently disabled scraping for that server until the API restarted.
     // Silent, and it presented as "analytics stopped updating hours ago".
     try {
+      if (env.CLOUD_MODE) {
+        const server = await repos.server.get(serverId);
+        if (!server || server.workspaceId || server.isLocal || server.purpose === "migration_source") return;
+      }
       const store = await cacheStore<number>(SCRAPE_NS, { maxSize: 5_000 });
       const key = `lastAt:${serverId}`;
       // Presence of the key = scraped within the window → throttled, skip.
@@ -238,15 +240,19 @@ export function scrapeServerIfStale(serverId: string): Promise<void> {
       try {
         await scrapeServer(serverId);
       } catch (err) {
+        observeCaughtError(err, "platform/engine/modules/system/analytics-scraper");
         debug(`scrape-on-demand:error server=${serverId} ${safeErrorMessage(err)}`);
       } finally {
         // TTL-throttle the next scrape; the key expiring makes the server
         // eligible again without any manual timestamp bookkeeping.
         await store
           .set(key, Date.now(), SCRAPE_STALE_SECONDS)
-          .catch(() => {});
+          .catch((diagnosticFailure) => {
+            observeCaughtError(diagnosticFailure, "platform/engine/modules/system/analytics-scraper");
+          });
       }
     } catch (err) {
+      observeCaughtError(err, "platform/engine/modules/system/analytics-scraper");
       // Restores the "never throws" contract this function documents and that
       // `runAnalyticsScrapeSweep` relies on. The inner catch only covers
       // `scrapeServer`; `cacheStore()` and `store.get()` sit ABOVE it, so a cache
@@ -290,12 +296,8 @@ export async function runAnalyticsScrapeSweep(): Promise<{
   servers: number;
   skipped: number;
 }> {
-  // Redundant with the job's `available` gate on purpose: this is the hard stop, so
-  // a future caller can't make the multi-tenant SaaS dial a tenant's box.
-  if (env.CLOUD_MODE) return { servers: 0, skipped: 0 };
-
   const startedAt = Date.now();
-  const servers = await repos.server.list();
+  const servers = (await repos.server.list()).filter(server => !server.workspaceId && server.purpose !== "migration_source" && (!env.CLOUD_MODE || !server.isLocal));
   let swept = 0;
 
   for (const server of servers) {
@@ -311,6 +313,7 @@ export async function runAnalyticsScrapeSweep(): Promise<{
   // to 30 minutes instead of to the project's next route apply, which for a stable project
   // can be weeks. One round trip per server; the write is idempotent.
   const cfg = await reconcileAnalyticsConfig().catch((err) => {
+    observeCaughtError(err, "platform/engine/modules/system/analytics-scraper");
     debug(`sweep:config-reconcile failed ${safeErrorMessage(err)}`);
     return { servers: 0, hosts: 0 };
   });

@@ -11,6 +11,8 @@
  * instance flows from build.service.ts → adapter → pipeline → deploy.
  */
 
+import { buildEnvironmentPreflight } from "./build-env-preflight";
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import type { BuildConfig, BuildStep, LogEntry, LogCallback } from "../types";
 import { safeErrorMessage, packageManagerEnsureCommand, nodeBinPathExport } from "@repo/core";
 import {
@@ -18,6 +20,7 @@ import {
   injectGitToken,
   assembleGitClone,
   gitShellCommand,
+  exactCommitFetchArgs,
   GIT_SUBMODULE_UPDATE_ARGS,
 } from "./git-clone";
 import { materializeGitSsh, shellGitSshWriter, type GitSshMaterial } from "./git-ssh-material";
@@ -42,28 +45,49 @@ export {
  * build / deploy) and plain log lines. Every runtime emits through this
  * instead of constructing raw LogEntry objects.
  */
-export class BuildLogger {
+export class BuildLogger<Step extends string = BuildStep> {
+  private cacheLines = new Map<string, string>();
+  private cacheSteps = new Set<string>();
+  private cacheHits = new Set<string>();
+  private cacheFinished = new Set<string>();
   constructor(
-    private readonly onLog?: LogCallback,
+    private readonly onLog?: LogCallback<Step>,
     private readonly onBuildOutput?: (data: string, streamId: string) => void,
   ) {}
 
   /** Observe command output before rendering, without emitting another log entry. */
   observeBuildOutput(data: string, streamId = "default"): void {
+    const lines = ((this.cacheLines.get(streamId) ?? "") + data).split(/\r?\n/);
+    this.cacheLines.set(streamId, (lines.pop() ?? "").slice(-8192));
+    for (const line of lines) {
+      const step = line.match(/^#(\d+)\s/);
+      if (!step) continue;
+      const id = `${streamId}:${step[1]}`;
+      if (/\]\s+(RUN|COPY|ADD)\s/.test(line)) this.cacheSteps.add(id);
+      if (/^#\d+ CACHED/.test(line)) this.cacheHits.add(id);
+      if (/^#\d+ DONE/.test(line)) this.cacheFinished.add(id);
+    }
     this.onBuildOutput?.(data, streamId);
+  }
+
+  cacheSummary(): string | undefined {
+    const steps = [...this.cacheSteps].filter(id => this.cacheHits.has(id) || this.cacheFinished.has(id));
+    if (!steps.length) return;
+    const hits = steps.filter(id => this.cacheHits.has(id)).length;
+    return `Docker layer cache: ${hits} hit(s), ${steps.length - hits} miss(es).`;
   }
 
   /** Emit a plain log line. */
   log(
     message: string,
     level: LogEntry["level"] = "info",
-    meta?: Pick<LogEntry, "serviceName" | "serviceId">,
+    meta?: Pick<LogEntry, "serviceName" | "serviceId" | "resourceIssue">,
   ): void {
     this.onLog?.({ timestamp: new Date().toISOString(), message, level, ...meta });
   }
 
   /** Emit a step lifecycle event (running / completed / failed / skipped). */
-  step(step: BuildStep, status: NonNullable<LogEntry["stepStatus"]>, message: string): void {
+  step(step: Step, status: NonNullable<LogEntry["stepStatus"]>, message: string): void {
     this.onLog?.({
       timestamp: new Date().toISOString(),
       message,
@@ -77,7 +101,7 @@ export class BuildLogger {
    * Run a step: emit running → execute → emit completed/failed.
    * Throws on failure so the caller can handle it.
    */
-  async runStep(step: BuildStep, label: string, fn: () => Promise<void>): Promise<void> {
+  async runStep(step: Step, label: string, fn: () => Promise<void>): Promise<void> {
     this.step(step, "running", label);
     try {
       await fn();
@@ -90,7 +114,7 @@ export class BuildLogger {
   }
 
   /** Get the underlying callback for passing to exec / stream functions. */
-  get callback(): LogCallback {
+  get callback(): LogCallback<Step> {
     return (entry) => this.onLog?.(entry);
   }
 }
@@ -124,7 +148,7 @@ export interface BuildEnvironment {
    * transfers source files into the build environment:
    *   - BareRuntime (local):  cp -a (same filesystem)
    *   - BareRuntime (SSH):    tar + pipe over SSH
-   *   - CloudRuntime:         tar.gz → Oblien transfer.upload API
+   *   - Managed Cloud:        tar.gz → the provider command/file transport
    *
    * Receives the logger so output streams to the terminal in real-time.
    * Throw to abort the build with a descriptive error.
@@ -199,7 +223,9 @@ export async function killProcessesUnderDir(
   const scan = (sig: string) =>
     `for p in /proc/[0-9]*; do c=$(readlink "$p/cwd" 2>/dev/null); ` +
     `case "$c" in ${patterns.join("|")}) kill -${sig} "\${p##*/}" 2>/dev/null || true;; esac; done`;
-  await executor.exec(`${scan("TERM")}; sleep 2; ${scan("KILL")}`).catch(() => {});
+  await executor.exec(`${scan("TERM")}; sleep 2; ${scan("KILL")}`).catch((diagnosticFailure) => {
+    observeCaughtError(diagnosticFailure, "adapters/runtime/build-pipeline");
+  });
 }
 
 export interface BuildPipelineResult {
@@ -310,6 +336,7 @@ export async function runBuildPipeline(
           const gitInvocation = assembleGitClone({
             repoUrl: config.repoUrl,
             gitToken: config.gitToken,
+            gitTokenRepositories: config.gitTokenRepositories,
             gitCredentialHelperPath: config.gitCredentialHelperPath,
             ssh: sshMaterial,
             ambient: config.gitAmbient,
@@ -320,8 +347,8 @@ export async function runBuildPipeline(
             if (config.commitSha) {
               // Depth 50 strikes a balance: deep enough to reach the
               // commit for the vast majority of rollbacks, but still
-              // far cheaper than a full history fetch. Older rollback
-              // targets fall through to the unshallow fallback below.
+              // far cheaper than a full history fetch. Other commits are
+              // fetched by ID, with the unshallow fallback below.
               await exec(
                 gitShellCommand(
                   gitInvocation,
@@ -332,16 +359,27 @@ export async function runBuildPipeline(
                 `cd ${sq(env.projectDir)} && git ${CRED} cat-file -e ${sq(`${config.commitSha}^{commit}`)}`,
               ).then(
                 () => true,
-                () => false,
+                () => { /* diagnostics-ignore: A nonzero file/commit presence probe selects the existing fetch fallback; actual fetch failures are reported. */ return false; },
               );
               if (!commitPresent) {
-                logger.log(
-                  `Commit ${config.commitSha} is not in the depth-50 clone; fetching full history before checkout.`,
-                  "warn",
-                );
-                await exec(
-                  `cd ${sq(env.projectDir)} && ${gitShellCommand(gitInvocation, "fetch --progress --unshallow")}`,
-                );
+                const fetchArgs = exactCommitFetchArgs(config.commitSha);
+                const fetched =
+                  !!fetchArgs &&
+                  (await exec(
+                    `cd ${sq(env.projectDir)} && ${gitShellCommand(gitInvocation, fetchArgs.join(" "))}`,
+                  ).then(
+                    () => true,
+                    () => { /* diagnostics-ignore: Not every Git host serves a commit by ID; full history is the existing fallback and reports its own failure. */ return false; },
+                  ));
+                if (!fetched) {
+                  logger.log(
+                    `Commit ${config.commitSha} is not in the depth-50 clone; fetching full history before checkout.`,
+                    "warn",
+                  );
+                  await exec(
+                    `cd ${sq(env.projectDir)} && ${gitShellCommand(gitInvocation, "fetch --progress --unshallow")}`,
+                  );
+                }
               }
               await exec(
                 `cd ${sq(env.projectDir)} && ${gitShellCommand(
@@ -368,6 +406,8 @@ export async function runBuildPipeline(
       );
     }
 
+    if (config.rootDirectory) await exec(`test -d ${sq(buildDir)} || { echo 'Configured root directory does not exist in this revision. Select the application directory and retry.' >&2; exit 1; }`);
+
     // Env prefix for install & build commands - skip when env vars are set natively
     const envPrefix = env.hasNativeEnv
       ? ""
@@ -390,6 +430,8 @@ export async function runBuildPipeline(
       const prefix = [envPrefix, binPathExport].filter(Boolean).join(" && ");
       return prefix ? `${prefix} && ${full}` : full;
     };
+
+    await exec(inDir(buildEnvironmentPreflight(config.envVars)));
 
     // Ensure the detected package manager is on PATH before the first pnpm/yarn
     // invocation (corepack for pnpm/yarn; no-op for npm/bun/non-node) — fixes
@@ -433,6 +475,7 @@ export async function runBuildPipeline(
 
     return { status: "deploying", durationMs };
   } catch (err) {
+    observeCaughtError(err, "adapters/runtime/build-pipeline");
     const durationMs = Date.now() - startTime;
     // A cancel is not a failure — report it distinctly so the caller marks the
     // deployment "cancelled" (not "failed") and doesn't roll it into onFailure.

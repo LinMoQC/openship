@@ -9,6 +9,7 @@
  * adapter's own client for destinations (keeping heavy transfers off the shared
  * connection — the #34 isolation).
  */
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import {
   createExecutor,
   isSshAuthError,
@@ -20,6 +21,7 @@ import {
 import { classifyConnectivityError, connFail, connOk, type ConnectivityResult } from "@repo/core";
 import { registerConnectivityCheck } from "./connectivity";
 import { sshManager } from "@repo/platform/engine/lib/ssh-manager";
+import { env } from "../config/env";
 
 const ECHO_TIMEOUT_MS = 15_000;
 
@@ -43,6 +45,7 @@ registerConnectivityCheck<SshConfig>("ssh", async (config) => {
   try {
     return await sshEcho(executor);
   } catch (err) {
+    observeCaughtError(err, "platform/engine/lib/connectivity-checks");
     return sshError(err);
   } finally {
     await executor.dispose();
@@ -51,11 +54,12 @@ registerConnectivityCheck<SshConfig>("ssh", async (config) => {
 
 /** A saved server by id — cheap TCP probe first, then an authenticated echo. */
 registerConnectivityCheck<string>("ssh-server", async (serverId) => {
-  const reachable = await sshManager.probeReachable(serverId).catch(() => false);
+  const reachable = await sshManager.probeReachable(serverId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/lib/connectivity-checks"); return false; });
   if (!reachable) return connFail("unreachable", "Host is not reachable");
   try {
     return await sshManager.withExecutor(serverId, (e) => sshEcho(e));
   } catch (err) {
+    observeCaughtError(err, "platform/engine/lib/connectivity-checks");
     return sshError(err);
   }
 });
@@ -64,7 +68,7 @@ registerConnectivityCheck<string>("ssh-server", async (serverId) => {
  *  own preflight (writes + deletes a probe), staying on its own connection. */
 registerConnectivityCheck<BackupDestinationRow>("backup-destination", async (row) => {
   const startedAt = Date.now();
-  const result = await resolveDestination(row).preflight();
+  const result = await resolveDestination({ ...row, publicNetworkOnly: env.CLOUD_MODE }).preflight();
   if (result.ok) return connOk(Date.now() - startedAt);
   const { code, message } = classifyConnectivityError(result.reason);
   return connFail(code, message);

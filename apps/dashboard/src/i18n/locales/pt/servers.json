@@ -1,4 +1,31 @@
 {
+  "resources": {
+    "notFound": "Recursos não encontrados",
+    "notFoundDescription": "Estes recursos não estão disponíveis no espaço de trabalho atual. Podem ter sido removidos ou pertencer a outra conta.",
+    "description": "Apps, builds e dados compartilham a capacidade do seu espaço Cloud.",
+    "selectPool": "Escolha um espaço Cloud",
+    "capacity": "Host atual",
+    "capacityHint": "Seus apps, builds e dados salvos compartilham estes recursos.",
+    "addCapacity": "Adicionar espaço Cloud",
+    "managePlan": "Gerenciar plano",
+    "projects": "Projetos",
+    "emptyTitle": "Seus aplicativos começam aqui",
+    "emptyDescription": "Escolha a capacidade e implante aplicativos e projetos no Openship Cloud.",
+    "usageHint": "Uso atual de CPU, memória e armazenamento.",
+    "noProjects": "Ainda não há projetos aqui.",
+    "spaces": "Espaços Cloud",
+    "spacesHint": "Capacidade independente para seus apps e projetos.",
+    "space": "Espaço Cloud",
+    "customPlan": "Plano personalizado",
+    "projectCount": "Projetos: {count}",
+    "live": "Ao vivo",
+    "paused": "Pausado",
+    "lastReading": "Última leitura",
+    "connecting": "Conectando…",
+    "streamUnavailable": "As atualizações ao vivo estão indisponíveis. Exibindo a última medição.",
+    "usageTitle": "Uso de recursos",
+    "setupPending": "O uso aparecerá quando seu espaço Cloud estiver configurado."
+  },
   "github": {
     "title": "Acesso ao GitHub",
     "desc": "Como este servidor se autentica no GitHub para clonar repositórios privados.",
@@ -43,8 +70,6 @@
     "emptyDescription": "Conecte um servidor via SSH e o Openship trata do resto — Docker, OpenResty, SSL e implantações, tudo configurado automaticamente.",
     "addFirstServer": "Adicionar o Seu Primeiro Servidor",
     "whatGetsConfigured": "O que é configurado",
-    "dockerDesc": "Runtime de contêineres",
-    "openRestyDesc": "Proxy reverso e SSL",
     "monitoring": "Monitoramento",
     "monitoringDesc": "Verificações de saúde",
     "gitDesc": "Implantações a partir do código-fonte",
@@ -109,7 +134,12 @@
       "skippedMany": "{n} precisam de atenção na própria página",
       "nothingToDo": "Nada a aplicar",
       "applyFailed": "Não foi possível iniciar as atualizações"
-    }
+    },
+    "featContainer": "Runtime de contêineres",
+    "featContainerDesc": "Executa cada aplicação de forma isolada",
+    "featProxy": "Proxy reverso",
+    "featProxyDesc": "Roteamento e SSL",
+    "seeDocs": "Ver documentação"
   },
   "containers": {
     "subtitle": "Contêineres de edge e e-mail neste servidor",
@@ -191,7 +221,18 @@
     "toastKeyPathTestRequired": "O caminho da chave é obrigatório para testar a conexão",
     "toastConnectionSuccess": "Conexão bem-sucedida",
     "toastConnectionFailed": "Falha na conexão",
-    "toastConnectionTestFailed": "Falha no teste de conexão"
+    "toastConnectionTestFailed": "Falha no teste de conexão",
+    "keyModePaste": "Colar / Enviar",
+    "keyModePath": "Caminho do host",
+    "keyPathBrowse": "Procurar…",
+    "keyPathHelp": "Caminho absoluto para a chave privada na máquina que executa o Openship.",
+    "keyPaste": "Chave privada",
+    "keyPastePlaceholder": "-----BEGIN OPENSSH PRIVATE KEY-----\n…",
+    "keyPasteHelp": "As chaves coladas são criptografadas em repouso e nunca saem do servidor.",
+    "keyStoredKeep": "Uma chave está armazenada — cole uma nova para substituí-la ou deixe em branco para mantê-la.",
+    "keyUploadFile": "Enviar arquivo de chave",
+    "keyPasteInvalid": "Esse arquivo não parece ser uma chave privada válida.",
+    "toastKeyRequired": "Uma chave privada é obrigatória"
   },
   "detail": {
     "tabs": {
@@ -201,7 +242,13 @@
       "github": "Git",
       "security": "Segurança",
       "ports": "Encaminhamento de portas",
-      "terminal": "Terminal"
+      "terminal": "Terminal",
+      "activity": "Atividade",
+      "ssh": "Acesso SSH",
+      "runtimeApi": "API de execução",
+      "workloads": "Cargas de trabalho",
+      "settings": "Configurações",
+      "runs": "Execuções"
     },
     "healthy": "Saudável",
     "issues": "Problemas",
@@ -275,7 +322,11 @@
       "toastRemovedKeptOther": "Servidor removido. {count} cargas de trabalho saíram do Openship e continuam rodando.",
       "toastRemovedDestroyedOne": "Servidor removido. 1 carga de trabalho foi apagada da máquina.",
       "toastRemovedDestroyedOther": "Servidor removido. {count} cargas de trabalho foram apagadas da máquina."
-    }
+    },
+    "sshPort": "Porta SSH: {port}",
+    "port": "Porta",
+    "reinstallDockerTitle": "Reinstalar o Docker neste servidor?",
+    "reinstallDockerMessage": "Isso executa o instalador oficial do Docker, que baixa a versão atual do motor — em um servidor atualizado isso representa uma grande atualização. Instalar ou atualizar o Docker reinicia o daemon, o que reinicia todos os contêineres neste servidor, incluindo qualquer coisa que o Openship esteja executando aqui. Nenhuma outra etapa instalará o Docker para você: as outras etapas o ignoram enquanto ele estiver funcionando."
   },
   "banner": {
     "unreachableTitle": "Não foi possível acessar {host}",
@@ -293,7 +344,18 @@
     "retry": "Tentar novamente",
     "editCredentials": "Editar credenciais",
     "editServer": "Editar servidor",
-    "showRawError": "Mostrar erro bruto"
+    "showRawError": "Mostrar erro bruto",
+    "hostChannelTitle": "O Openship não consegue alcançar o host desta máquina",
+    "hostChannelBody": "O Openship é executado em um contêiner aqui e se comunica com o host via SSH em {target}. Nada respondeu lá, então ele não pode executar operações em nível de host nesta máquina.",
+    "hostChannelImpact": "Deploys normais nesta máquina ainda funcionam — eles passam pelo socket do Docker. Bloqueado até que o canal funcione: o terminal do host, as informações do sistema do host e o escaneamento de portas do host; assumir o controle das portas :80/:443 de um proxy que não foi iniciado pelo Openship; instalar ou atualizar o motor de e-mail; fazer deploy de um aplicativo do catálogo que precise de um arquivo de configuração gerado no host (como o kong.yml do Supabase). Esta máquina também será exibida como \"Offline\" na lista de servidores do painel enquanto o canal estiver inativo.",
+    "hostChannelFix": "Execute isto no host e tente novamente:",
+    "hostChannelMissingTitle": "O Openship não possui um canal para o host desta máquina",
+    "hostChannelMissingBody": "O Openship é executado em um contêiner aqui, e o canal SSH usado para alcançar o host nunca foi provisionado. Não havia endereço para contato, então nada aqui está fora do ar — as operações em nível de host simplesmente não têm onde rodar.",
+    "hostChannelWouldUse": "Uma vez provisionado, o canal alcançará o host em {target}. Nada contatou esse endereço ainda.",
+    "hostChannelProvisionFix": "Execute isto no host para provisionar o canal e tente novamente:",
+    "hostChannelAuthTitle": "O host recusou a chave do Openship",
+    "hostChannelAuthBody": "O Openship é executado em um contêiner aqui e alcança o host via SSH em {target}. O host respondeu e depois rejeitou a chave, portanto operações em nível de host não podem ser executadas. Ou a chave não está mais autorizada para essa conta, ou o sshd não permite o login dessa conta. As credenciais SSH armazenadas neste servidor não são usadas para esta conexão — o canal possui sua própria chave.",
+    "hostChannelReauthorizeFix": "Execute isto no host para autorizar novamente a chave do canal e tente de novo:"
   },
   "overview": {
     "cpu": "CPU",
@@ -342,7 +404,12 @@
     "statusInstalled": "Instalado",
     "statusRemoved": "Removido",
     "statusFailed": "Falhou",
-    "statusWaiting": "Aguardando"
+    "statusWaiting": "Aguardando",
+    "roleDocker": "Runtime de contêineres",
+    "roleGit": "Controle de versão",
+    "roleOpenresty": "Proxy reverso",
+    "roleCertbot": "Certificados SSL",
+    "roleRsync": "Transferência de arquivos"
   },
   "ports": {
     "title": "Encaminhamento de Portas",
@@ -436,12 +503,19 @@
       "sensitiveHint": "Não deveria estar exposto à internet",
       "sensitiveReachable": "Serviço sensível acessível pela internet",
       "reachableLegend": "«Acessível» foi confirmado conectando-se à porta de fora do servidor; «Bloqueado pelo firewall» está vinculado mas bloqueado (p. ex. por um firewall na nuvem).",
-      "summaryReachable": "{total} portas em escuta · {reachable} acessíveis pela internet · {firewalled} bloqueadas pelo firewall"
+      "summaryReachable": "{total} portas em escuta · {reachable} acessíveis pela internet · {firewalled} bloqueadas pelo firewall",
+      "managedTitle": "Portas em escuta",
+      "managedSubtitle": "Processos em escuta neste servidor",
+      "managedHint": "Essas portas estão em escuta dentro do seu servidor gerenciado. O acesso público é controlado pela Rede e pelos domínios de cada projeto.",
+      "managedSummary": "{total} portas em escuta · {exposed} vinculadas a interfaces de rede",
+      "managedLoopbackSummary": "{total} portas em escuta · somente localhost",
+      "managedListener": "Escuta de rede",
+      "managedInconclusiveHint": "Não foi possível ler a tabela de sockets. Tente novamente ou verifique a conexão do servidor no Terminal."
     }
   },
   "terminal": {
     "title": "Terminal",
-    "description": "Shells SSH ao vivo via WebSocket. Até 3 simultâneos — copia ao selecionar."
+    "description": "Terminal do servidor ao vivo. Limite de sessões: {count} — copia ao selecionar."
   },
   "setup": {
     "editServer": "Editar Servidor",
@@ -954,5 +1028,229 @@
     "hostname": "Nome do host do Access",
     "help": "Use o nome do host do Cloudflare Access e as credenciais SSH do servidor. Entre no Cloudflare na máquina que executa o OpenShip. O aplicativo Windows inclui o cliente necessário; outras instalações precisam do cloudflared.",
     "openAccess": "Abrir Cloudflare Access"
+  },
+  "acquire": {
+    "connected": {
+      "label": "Conectar seu servidor",
+      "description": "Use um servidor que você já possui via SSH."
+    },
+    "managed": {
+      "label": "Obter um servidor gerenciado",
+      "description": "O Openship Cloud cuida da configuração, das rotas e do HTTPS."
+    },
+    "signInHint": "Conecte sua conta Cloud para usar um servidor gerenciado existente ou obter um novo.",
+    "chooseExisting": "Escolher um servidor Cloud existente",
+    "useServer": "Usar este servidor"
+  },
+  "managedControls": {
+    "retry": "Atualizar status",
+    "unavailable": "Indisponível",
+    "enabled": "Ativado",
+    "disabled": "Desativado",
+    "save": "Salvar alterações",
+    "saved": "Alterações confirmadas.",
+    "cancel": "Cancelar",
+    "close": "Fechar",
+    "copy": "Copiar",
+    "copied": "Copiado.",
+    "copyFailed": "Não foi possível acessar a área de transferência. Selecione e copie o valor manualmente.",
+    "secretHint": "Esta credencial dá acesso completo a este servidor. Mantenha-a em segredo. Ela é removida da tela após um minuto ou ao sair da aba.",
+    "hideSecrets": "Ocultar credenciais",
+    "expires": "Expira em",
+    "noLogs": "Nenhuma saída de log recebida.",
+    "logsTruncated": "Exibindo apenas as últimas linhas solicitadas, até 64 KiB.",
+    "ssh": {
+      "title": "Acesso SSH",
+      "description": "Conecte-se pelo seu terminal ou cliente SFTP. Os administradores gerenciam o acesso a todo o servidor.",
+      "enable": "Ativar SSH",
+      "disable": "Desativar SSH",
+      "confirmDisable": "Confirmar desativação",
+      "disableHint": "Desativar SSH para todos os usuários deste servidor. Novas conexões serão recusadas; a assinatura não será cancelada.",
+      "command": "Comando SSH",
+      "temporary": "Obter conexão temporária",
+      "temporaryHint": "Emitir uma conexão de curta duração pelo gateway SSH do provedor. O SSH deve estar ativado primeiro.",
+      "identityHint": "Este servidor exige uma conexão SSH temporária autenticada. Os aliases de conexão estáticos estão desativados.",
+      "initialPassword": "Senha SSH inicial",
+      "password": "Senha SSH",
+      "fingerprint": "Impressão digital da chave do host do gateway",
+      "publicKey": "Chave pública autorizada",
+      "keyHint": "Cole uma única chave pública OpenSSH. Ela substitui a chave autorizada de root neste servidor. Nunca cole uma chave privada.",
+      "keyConfigured": "Uma chave pública está configurada.",
+      "keyMissing": "Nenhuma chave pública foi confirmada.",
+      "saveKey": "Substituir chave pública",
+      "keySaved": "Chave pública confirmada.",
+      "passwordTitle": "Autenticação por senha",
+      "passwordHint": "Escolha pelo menos 12 caracteres. Alterar esta senha afeta o login por senha de root em todo o servidor.",
+      "savePassword": "Definir senha SSH",
+      "passwordSaved": "Senha SSH atualizada."
+    },
+    "runtime": {
+      "title": "API de execução",
+      "description": "Automatize comandos, arquivos e operações de execução neste servidor gerenciado usando suas próprias ferramentas.",
+      "requiredHint": "O Openship usa esta API para implantações, monitoramento e terminais, por isso ela permanece ativada enquanto o servidor é gerenciado.",
+      "stoppedHint": "Retome o servidor no painel do plano antes de abrir uma conexão de execução.",
+      "enable": "Ativar Runtime API",
+      "credentialHint": "Administradores podem revelar uma credencial exclusiva deste servidor. Ela concede acesso completo ao ambiente de execução, incluindo todos os projetos do servidor.",
+      "reveal": "Revelar token da Runtime API",
+      "endpoint": "Endpoint de execução",
+      "token": "Token de execução",
+      "rotate": "Rotacionar token",
+      "confirmRotate": "Confirmar rotação",
+      "rotateHint": "Invalidar tokens e sessões atuais da Runtime API. Feche os terminais ativos e aguarde o fim das implantações. As aplicações continuam funcionando; clientes externos devem se reconectar com o novo token.",
+      "exampleTitle": "Usar Oblien Runtime SDK",
+      "exampleHint": "Instale o pacote oblien. Mantenha o endpoint e o token no ambiente secreto da ferramenta; nunca inclua o token no código do frontend."
+    },
+    "settings": {
+      "title": "Configurações do servidor gerenciado",
+      "description": "Consulte a imagem real do servidor, o ambiente persistente e a alocação de recursos.",
+      "image": "Imagem gerenciada",
+      "providerId": "ID do workspace no provedor",
+      "os": "Sistema operacional",
+      "lifecycle": "Ciclo de vida",
+      "persistent": "Servidor persistente",
+      "imageHint": "O Openship mantém a imagem Docker gerenciada. Escolha as imagens das aplicações nas configurações de implantação de cada projeto. Substituir a imagem do servidor afetaria todos os projetos e seus dados.",
+      "resources": "Recursos alocados ao servidor",
+      "resourceHint": "Os recursos vêm da assinatura deste servidor. Use a revisão existente de plano e redimensionamento para alterá-los; todos os projetos compartilham esta alocação.",
+      "terminal": "Abrir terminal",
+      "projects": "Projetos e utilização",
+      "bootLogs": "Ler logs de inicialização recentes"
+    },
+    "workloads": {
+      "title": "Cargas de trabalho nativas",
+      "description": "Consulte os processos supervisionados pelo ambiente do servidor e gerencie seus próprios processos em segundo plano.",
+      "scopeHint": "Contêineres Docker e versões de aplicações são gerenciados pelos respectivos projetos. Esta tela mostra processos nativos do host, incluindo serviços da plataforma. Ações diretas estão disponíveis apenas para processos manuais criados aqui.",
+      "create": "Adicionar carga de trabalho nativa",
+      "createHint": "Executa como root no servidor compartilhado, usando sua capacidade existente. Não cria projeto nem rota pública. Novas cargas são salvas paradas; inicie-as explicitamente após a revisão.",
+      "name": "Nome do processo",
+      "command": "Comando shell",
+      "directory": "Diretório de trabalho",
+      "environment": "Ambiente — um KEY=value por linha",
+      "restartPolicy": "Política de reinicialização",
+      "never": "Nunca",
+      "onFailure": "Em caso de falha",
+      "always": "Sempre",
+      "createStopped": "Salvar carga parada",
+      "retryHint": "Repita a mesma solicitação para recuperar o mesmo processo. Fechar o formulário não exclui um processo já salvo.",
+      "retryCreate": "Repetir a mesma solicitação",
+      "closeRequest": "Fechar e verificar inventário",
+      "start": "Iniciar",
+      "stop": "Parar",
+      "delete": "Excluir",
+      "logs": "Logs",
+      "openProject": "Abrir projeto",
+      "protected": "Gerenciado pelo serviço proprietário",
+      "confirmAction": "Confirmar: {action} “{name}”?",
+      "deleteHint": "Remover a configuração deste processo manual. Os arquivos gravados pelo processo permanecem no servidor.",
+      "empty": "Nenhuma carga de trabalho nativa está registrada neste servidor.",
+      "truncated": "Exibindo os primeiros 100 processos nativos. Use o terminal para consultar o inventário completo do host.",
+      "sources": {
+        "manual": "Carga de trabalho manual",
+        "project": "Aplicação Openship",
+        "system": "Processo da plataforma ou gerenciado externamente"
+      },
+      "states": {
+        "running": "Em execução",
+        "stopped": "Parado",
+        "deploying": "Iniciando",
+        "failed": "Falhou",
+        "missing": "Não está em execução",
+        "unknown": "Status indisponível"
+      }
+    },
+    "network": {
+      "egress": "Destinos de saída permitidos",
+      "egressHint": "Um nome de host, domínio com curinga ou IP por linha. Use * sozinho para permitir todos. Estas regras afetam APIs externas, downloads e builds de todos os projetos do servidor.",
+      "privateIp": "IP privado",
+      "outboundIp": "IP de saída atribuído",
+      "outboundMode": "Conexão de saída",
+      "allPorts": "Todas as portas",
+      "managed": "Saída gerenciada",
+      "custom": "Proxy personalizado",
+      "noPorts": "Nenhuma regra de porta explícita",
+      "rulesUnavailable": "As regras de saída estão indisponíveis. Atualize antes de editá-las.",
+      "invalidRules": "Informe de 1 a 50 destinos. Use * sozinho ou nomes de host/IPs sem URL, porta ou caminho.",
+      "confirm": "Aplicar estas regras de saída a todos os projetos do servidor? Desativar a internet limpa a lista de destinos permitidos. A reativação usa os destinos exibidos acima.",
+      "routingHint": "Domínios públicos, TLS e redes privadas usam os controles de projetos e redes do Openship. Este formulário não altera rotas, regras de entrada nem credenciais de proxy.",
+      "policyTitle": "Acesso à internet",
+      "policyHint": "Controle os destinos que aplicativos e builds podem acessar.",
+      "addresses": "Endereço privado e entrada"
+    },
+    "outbound": {
+      "title": "Conexão de saída",
+      "description": "Escolha como este servidor se conecta à internet.",
+      "currentIp": "IP de saída atual",
+      "managed": "Gerenciado pelo Openship",
+      "custom": "Proxy personalizado",
+      "unavailable": "Não foi possível verificar as configurações atuais. Atualize antes de alterá-las.",
+      "connection": "Tipo de conexão",
+      "address": "Endereço IP gerenciado",
+      "search": "Buscar IP ou país",
+      "optionsFailed": "Não foi possível carregar os endereços disponíveis.",
+      "managedHint": "Escolha um IP gerenciado. Automático mantém o endereço gerenciado atual ou atribui um ao sair de um proxy personalizado.",
+      "host": "Endereço IPv4 do proxy",
+      "port": "Porta",
+      "protocol": "Protocolo",
+      "proxyHint": "Use um proxy HTTP/HTTPS com IPv4 público. O provedor verifica antes de aplicar.",
+      "authentication": "Autenticação do proxy",
+      "username": "Usuário",
+      "password": "Senha",
+      "savedCredentials": "As credenciais estão salvas. Preencha ambos os campos novamente ao substituir este proxy.",
+      "credentialsHint": "Preencha os dois campos, até 256 caracteres visíveis cada, sem espaços ou : @ / ?.",
+      "impact": "As alterações afetam as conexões de saída de todos os projetos neste servidor.",
+      "applying": "Aplicando…",
+      "apply": "Aplicar conexão",
+      "current": "Atual",
+      "automatic": "Automático",
+      "invalid": "Verifique o endereço IPv4 e a porta (1–65535). Se a autenticação estiver ativa, informe ambas as credenciais."
+    },
+    "navigation": {
+      "connection": "Saída e acesso",
+      "listeners": "Portas de escuta",
+      "general": "Geral",
+      "ssh": "SSH"
+    },
+    "cloudConnection": {
+      "titles": {
+        "not_connected": "Entre no Openship Cloud",
+        "account_mismatch": "Conecte a conta Cloud do servidor",
+        "unavailable": "Status do Cloud indisponível"
+      },
+      "descriptions": {
+        "not_connected": "Este é um vínculo salvo com um servidor Cloud. Entre na conta e organização proprietárias para ver seu estado atual e gerenciá-lo.",
+        "account_mismatch": "Este servidor pertence a outra conta ou organização Cloud. Conecte a conta proprietária para continuar.",
+        "unavailable": "Não foi possível verificar o servidor pelo Cloud. Atualize seu status antes de usar os controles."
+      },
+      "labels": {
+        "not_connected": "Login no Cloud necessário",
+        "account_mismatch": "Outra conta Cloud",
+        "unavailable": "Cloud indisponível"
+      },
+      "signIn": "Entrar no Cloud",
+      "connecting": "Conectando…"
+    },
+    "controlUnavailable": {
+      "title": "Controle indisponível",
+      "description": "Este controle ainda não está disponível na versão da API Cloud conectada. O Openship Cloud precisa ser atualizado antes do uso."
+    }
+  },
+  "gpu": {
+    "title": "GPU",
+    "subtitle": "Disponibilidade de GPU para os contêineres deste servidor.",
+    "notDetected": "Nenhuma GPU detectada",
+    "notProbed": "Não foi possível verificar este servidor agora",
+    "countOne": "1 placa GPU",
+    "countMany": "{count} placas GPU",
+    "runtimeOnly": "Runtime NVIDIA encontrado, número de placas desconhecido",
+    "modeLabel": "Disponibilidade de GPU",
+    "modeAuto": "Automática",
+    "modeYes": "GPU disponível",
+    "modeNo": "Sem GPU",
+    "modeHint": "Altere apenas se a detecção automática estiver incorreta.",
+    "mismatchYes": "Marcado como \"GPU disponível\", mas nenhuma foi detectada. Os serviços GPU serão enviados para cá mesmo assim.",
+    "mismatchNo": "Marcado como \"Sem GPU\", mas uma GPU foi detectada. Haverá um aviso para serviços GPU neste servidor.",
+    "saving": "Salvando…",
+    "saved": "Configuração de GPU salva",
+    "saveFailed": "Não foi possível salvar a configuração de GPU",
+    "badge": "GPU"
   }
 }

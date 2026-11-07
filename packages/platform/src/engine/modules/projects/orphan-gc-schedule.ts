@@ -13,6 +13,7 @@
  * modules/jobs/job.registry.ts).
  */
 
+import { reportCaughtError as observeCaughtError, diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import { repos, tryAcquireAdvisoryLock, type OrphanedResource } from "@repo/db";
 import {
   DockerRuntime,
@@ -144,7 +145,6 @@ async function destroyOrphanResource(platform: Platform, o: OrphanedResource): P
   try {
     switch (o.resourceType) {
       case "container":
-      case "cloud_workspace":
       case "artifact":
         await runtime.destroy(o.ref);
         return;
@@ -201,7 +201,7 @@ async function assertOrphanTargetStillMatches(
   if (candidates.has(stored)) return;
   if (o.serverId) {
     const server = await repos.server.getInOrganization(o.serverId, o.organizationId);
-    if (server) {
+    if (server?.sshHost && !server.workspaceId) {
       candidates.add(
         server.isLocal
           ? "local"
@@ -231,38 +231,6 @@ async function reclaimOrphan(
   o: OrphanedResource,
   probe: ReturnType<typeof createReachabilityProbe>,
 ): Promise<boolean> {
-  // Cloud resource: no TCP notion — resolve the cloud runtime for the org.
-  // A null server id with docker/bare mode is the local self-hosted target, not
-  // cloud; older code conflated the two and silently "reclaimed" local orphans
-  // through a cloud adapter that never touched the host.
-  if (o.runtimeMode === "cloud" || (!o.serverId && !o.runtimeMode)) {
-    let cloudPlatform: Platform | null = null;
-    try {
-      const { platform } = await resolveDeploymentPlatform(
-        { deployTarget: "cloud", workspaceId: o.ref },
-        { organizationId: o.organizationId },
-      );
-      cloudPlatform = platform;
-      if (platform.runtime.name !== "cloud") return false;
-      await destroyOrphanResource(platform, o);
-      if (o.resourceType === "route") {
-        const { failures } = await releaseManagedHostnames([o.ref], {
-          organizationId: o.organizationId,
-        });
-        if (failures.length > 0) {
-          throw new Error(`Cloud edge route not released: ${failures.join(", ")}`);
-        }
-      }
-      return true;
-    } catch (err) {
-      // Cloud API unreachable → defer; anything else is a real failure.
-      if (isConnectionLoss(err)) return false;
-      throw err;
-    } finally {
-      disposePlatform(cloudPlatform);
-    }
-  }
-
   // Server-backed: fast-fail if the remote host still isn't answering. A local
   // orphan has no server row to probe and resolves through this process's host
   // target directly.
@@ -349,9 +317,7 @@ async function runOrphanSweepLocked(): Promise<{ reclaimed: number; deferred: nu
           orphan.targetKey ??
             (orphan.serverId
               ? `server:${orphan.serverId}`
-              : orphan.runtimeMode === "cloud" || !orphan.runtimeMode
-                ? "cloud"
-                : "local"),
+              : "local"),
         ].join("\0")
       : null;
   // A route disappearance proves only that the edge stopped dialling a port; it
@@ -410,9 +376,11 @@ async function runOrphanSweepLocked(): Promise<{ reclaimed: number; deferred: nu
         deferred++;
       }
     } catch (err) {
-      await repos.orphanedResource.bumpAttempt(o.id).catch(() => {});
+      await repos.orphanedResource.bumpAttempt(o.id).catch((diagnosticFailure) => {
+        observeCaughtError(diagnosticFailure, "platform/engine/modules/projects/orphan-gc-schedule");
+      });
       deferred++;
-      console.error(`[orphan-gc] ${o.resourceType} ${o.ref} failed:`, safeErrorMessage(err));
+      errorDiagnostics.error("platform/engine/modules/projects/orphan-gc-schedule", `[orphan-gc] ${o.resourceType} ${o.ref} failed:`, safeErrorMessage(err), err);
     }
   }
 

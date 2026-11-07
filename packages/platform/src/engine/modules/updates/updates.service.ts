@@ -37,8 +37,9 @@
  * instance whose scheduler is broken.
  */
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { findActiveDeployment } from "@repo/platform/engine/lib/active-deployment";
-import { ValidationError, withTimeout } from "@repo/core";
+import { AppError, ValidationError, digestSha, withTimeout } from "@repo/core";
 import { repos, type NewUpdateStatus, type Project, type UpdateStatus } from "@repo/db";
 import { buildBackgroundContext } from "@repo/platform/engine/lib/background-context";
 import type { ExecutionContext as RequestContext } from "@repo/platform";
@@ -46,6 +47,7 @@ import { resolveOrgOwner } from "@repo/platform/engine/lib/org-actor";
 import { assertResourceInOrg } from "@repo/platform/engine/lib/resource-access";
 import { mapWithLimit } from "@repo/platform/engine/lib/map-with-limit";
 import {
+  driftMode,
   evaluateDrift,
   hasDeployedSide,
   resolveUpstreamDrift,
@@ -54,9 +56,10 @@ import {
   type DriftStatus,
   type UpstreamDrift,
 } from "@repo/platform/engine/modules/projects/project-crud.service";
-import { redeployBuildSession } from "@repo/platform/engine/modules/deployments/build.service";
+import { redeployBuildSession, triggerDeployment } from "@repo/platform/engine/modules/deployments/build.service";
 import type { ProjectUpdate } from "@repo/contracts";
 import { releaseStore } from "../releases/release-store";
+import { gitopsReleaseAttention } from "./gitops-attention";
 import { listAuthorizedProjects } from "../../lib/authorized-projects";
 
 // ─── Display labels ──────────────────────────────────────────────────────────
@@ -73,8 +76,9 @@ function imageTag(ref: string): string | null {
 
 /** Short form of a `sha256:…` (or bare hex) content digest. */
 function shortDigest(digest?: string | null): string | null {
-  if (!digest) return null;
-  const hex = digest.includes(":") ? digest.slice(digest.indexOf(":") + 1) : digest;
+  const content = digestSha(digest ?? undefined);
+  if (!content) return null;
+  const hex = content.includes(":") ? content.slice(content.indexOf(":") + 1) : content;
   return hex.slice(0, 12) || null;
 }
 
@@ -95,13 +99,23 @@ function imageLabel(
     ref: string;
     deployedDigest?: string | null;
     latestDigest?: string | null;
+    behind?: boolean;
   }>,
   side: "deployed" | "latest",
+  distinguishMovedTags = false,
 ): string | null {
   const parts = [
     ...new Set(
       services
-        .map((s) => serviceVersion(s.ref, side === "deployed" ? s.deployedDigest : s.latestDigest))
+        .map((s) => {
+          const digest = side === "deployed" ? s.deployedDigest : s.latestDigest;
+          const version = serviceVersion(s.ref, digest);
+          // Mutable tags keep the same human version when their content moves.
+          // If that made the aggregate before/after copy identical, append the
+          // digest only for the services with proven drift.
+          const content = distinguishMovedTags && s.behind ? shortDigest(digest) : null;
+          return version && content ? `${version}@${content}` : version;
+        })
         .filter((v): v is string => !!v),
     ),
   ];
@@ -129,9 +143,15 @@ function presentation(status: DriftStatus) {
       detail: { pinned: status.pinned, customRuntime: status.customRuntime === true, adaptationRequired: status.adaptationRequired === true },
     };
   }
+  let currentLabel = imageLabel(status.services, "deployed");
+  let latestLabel = imageLabel(status.services, "latest");
+  if (status.behind && currentLabel === latestLabel) {
+    currentLabel = imageLabel(status.services, "deployed", true);
+    latestLabel = imageLabel(status.services, "latest", true);
+  }
   return {
-    currentLabel: imageLabel(status.services, "deployed"),
-    latestLabel: imageLabel(status.services, "latest"),
+    currentLabel,
+    latestLabel,
     detail: { services: status.services },
   };
 }
@@ -316,7 +336,8 @@ async function pollUpstream(
       resolveUpstreamDrift(actor, project),
       UPSTREAM_POLL_MS,
       "Upstream poll timed out",
-    ).catch(() => {
+    ).catch((diagnosticFailure) => {
+      observeCaughtError(diagnosticFailure, "platform/engine/modules/updates/updates.service");
       const unknown = unresolvedUpstreamDrift(project);
       rememberRetry(project, unknown);
       return unknown;
@@ -325,7 +346,7 @@ async function pollUpstream(
       persistUpstream(project, upstream, checkedAt),
       CACHE_WRITE_MS,
       "Update cache write timed out",
-    ).catch(() => rememberRetry(project, upstream));
+    ).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/updates/updates.service"); return rememberRetry(project, upstream); });
     return upstream;
   })();
   inFlight.set(project.id, run);
@@ -377,7 +398,7 @@ async function backgroundCtxFor(
 ): Promise<RequestContext | null> {
   const hit = cache.get(organizationId);
   if (hit !== undefined) return hit;
-  const owner = await resolveOrgOwner(organizationId).catch(() => null);
+  const owner = await resolveOrgOwner(organizationId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/updates/updates.service"); return null; });
   const ctx = owner
     ? buildBackgroundContext({ userId: owner.userId, organizationId, label: "updates:scan" })
     : null;
@@ -406,7 +427,8 @@ async function scanProjects(ctx: RequestContext | null, rows: Project[]): Promis
       }
       const upstream = await pollUpstream(actor, project);
       if (upstream.supported) supported += 1;
-    } catch {
+    } catch (diagnosticFailure) {
+      observeCaughtError(diagnosticFailure, "platform/engine/modules/updates/updates.service");
       /* best-effort: skip this project, keep scanning */
     }
   });
@@ -476,7 +498,7 @@ async function driftItem(
   const resolved = await upstreamFor(actor, project, row);
   if (!resolved) return null;
   const status: DriftStatus = await evaluateDrift(project, resolved.upstream, actor).catch(
-    () => ({ supported: false }) as DriftStatus,
+    (diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/updates/updates.service"); return ({ supported: false }) as DriftStatus; },
   );
   const view = presentation(status);
   if (!view || !status.supported) return null;
@@ -489,6 +511,7 @@ async function driftItem(
     kind: status.mode,
     behind: status.behind,
     latestInProgress: status.latestInProgress,
+    inProgressDeploymentId: status.inProgressDeploymentId,
     currentLabel: view.currentLabel,
     latestLabel: view.latestLabel,
     detail: view.detail,
@@ -518,7 +541,7 @@ export async function listOrganizationUpdates(
       repos.updateStatus.listByOrg(organizationId),
       CACHE_WRITE_MS,
       "Update cache read timed out",
-    ).catch(() => []),
+    ).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/updates/updates.service"); return []; }),
   ]);
   const rowByProject = new Map(cached.map((r) => [r.projectId, r]));
 
@@ -533,13 +556,13 @@ export async function listOrganizationUpdates(
       driftItem(ctx, project, rowByProject.get(project.id)),
       remaining,
       "Update feed timed out",
-    ).catch(() => null);
+    ).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/updates/updates.service"); return null; });
     if (item) items.push(item);
   });
 
   // Deterministic despite the concurrency: behind first, then by name.
   items.sort((a, b) => Number(b.behind) - Number(a.behind) || a.name.localeCompare(b.name));
-  return opts?.behindOnly ? items.filter((i) => i.behind) : items;
+  return opts?.behindOnly ? items.filter((i) => i.behind || i.latestInProgress || gitopsReleaseAttention(i)) : items;
 }
 
 /**
@@ -560,29 +583,24 @@ export async function getProjectDrift(
     pollUpstream(ctx, project).then((upstream) => evaluateDrift(project, upstream, ctx)),
     FEED_BUDGET_MS,
     "Project update check timed out",
-  ).catch(() => ({ supported: false }));
+  ).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/updates/updates.service"); return ({ supported: false }); });
 }
 
 // ─── Applying ────────────────────────────────────────────────────────────────
 
 /**
- * Apply the available update to a project (app / git / release / self-app). Runs
- * a redeploy with the `update` trigger — which force-pulls image tags and
- * recreates every image service, and (for release/git projects) rolls forward
- * to the latest version/commit. The existing rollback-orchestrator auto-archive
- * gives one-click revert. Returns the new deployment id so the UI can follow
- * build progress.
+ * Apply the available update. Image projects recheck drift and update only the
+ * services whose images changed; release/git projects roll forward to the latest
+ * version/commit. Both use the shared deployment and rollback machinery and
+ * return the new deployment id so the UI can follow progress.
  *
  * It no longer asks for a pre-deploy backup: every deploy fires the project's
  * `trigger_on_pre_deploy` policies once from the shared funnel (see
  * backups/triggers/pre-deploy.ts), so the opt-in this path used to pass enqueued
  * a SECOND run per policy for the same cutover.
  *
- * Deliberately does not touch `update_status`: the upstream hasn't moved, and the
- * nudge stops the moment the deployment row exists, because `latestInProgress` is
- * computed live. (The previous rescan here re-armed the banner it had just
- * cleared — `redeployBuildSession` returns while the build is still queued, so a
- * rescan at this instant recomputed drift against the version being replaced.)
+ * No post-deploy rescan: deployed state and progress are read live, while the
+ * upstream result remains valid until the next poll.
  */
 export async function applyProjectUpdate(ctx: RequestContext, projectId: string) {
   const project = await repos.project.findById(projectId);
@@ -590,6 +608,27 @@ export async function applyProjectUpdate(ctx: RequestContext, projectId: string)
   const active = await findActiveDeployment(project);
   if (!active) {
     throw new ValidationError("Deploy this project before updating it.");
+  }
+  if (driftMode(project) === "image") {
+    const status = await getProjectDrift(ctx, projectId);
+    const serviceIds = status.supported && status.mode === "image"
+      ? status.services.filter((service) => service.behind).map((service) => service.serviceId)
+      : [];
+    if (!serviceIds.length) {
+      throw new ValidationError("No newer service images could be confirmed. Check for updates and retry.");
+    }
+    // Reuse the exclusive-scope deploy path (including its live target checks
+    // and pre-pull-before-cutover). A moved sidecar tag must not force-pull a
+    // sibling's local image, restart an unchanged database or build an app.
+    const { deployment } = await triggerDeployment(ctx, {
+      projectId,
+      environment: active.environment,
+      trigger: "update",
+      serviceIds,
+      strictServiceScope: true,
+    });
+    if (!deployment) throw new AppError("Deployment is waiting for Actions", 409, "ACTIONS_CHECKS_PENDING");
+    return { success: true, deployment_id: deployment.id, project_id: projectId };
   }
   return redeployBuildSession(ctx, active.id, {
     trigger: "update",

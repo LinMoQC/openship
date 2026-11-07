@@ -9,12 +9,12 @@ import type { BuildConfig, CommandExecutor } from "../types";
 import { BuildLogger, runBuildPipeline } from "./build-pipeline";
 import { prepareSourceTree } from "./docker-build-context";
 import { DockerRuntime } from "./docker";
-import { CloudRuntime } from "./cloud";
 
 const exec = promisify(execFile);
 let fixture: string;
 let parent: string;
 let pinned: string;
+let mergeCommit: string;
 
 async function git(directory: string, ...args: string[]) {
   const { stdout } = await exec("git", ["-C", directory, ...args]);
@@ -73,6 +73,13 @@ beforeAll(async () => {
   await git(parent, "checkout", "-qb", "broken");
   await git(parent, "config", "-f", ".gitmodules", "submodule.lib/auth.url", "../missing");
   await commit(parent);
+  // Like a PR merge commit: only a pull ref reaches it, never the cloned branch.
+  await git(parent, "checkout", "-qb", "merge", "main");
+  await writeFile(join(parent, "merge.txt"), "tested merge\n");
+  mergeCommit = await commit(parent);
+  await git(parent, "update-ref", "refs/pull/1/merge", mergeCommit);
+  await git(parent, "checkout", "-q", "main");
+  await git(parent, "branch", "-qD", "merge");
 }, 30_000);
 
 afterAll(async () => {
@@ -161,48 +168,6 @@ describe.each([false, true])("Git submodule materialization (rollback=%s)", (rol
     expect(result.status).toBe("deploying");
     await assertSource(target, rollback, false);
   });
-
-  it("includes recursive dependencies in the cloud Dockerfile context", async () => {
-    const workspace = join(fixture, `cloud-${rollback}`);
-    const runtime = Object.create(CloudRuntime.prototype);
-    Object.assign(runtime, {
-      ensureWorkspaceGit: async () => {},
-      execAndStream: async (_runtime: unknown, command: string[]) =>
-        // Execute the product's workspace script locally, remapping only its
-        // isolated filesystem root. No cloud client or provisioned workspace.
-        shell(command[2].replaceAll("/openship", workspace)),
-    });
-    await runtime.cloneDockerfileContext(
-      config(rollback),
-      { kind: "remote", contextRelativePath: "" },
-      {},
-      new BuildLogger(),
-    );
-    await assertSource(join(workspace, "context"), rollback, true);
-  });
-
-  it("finds a Dockerfile inside a submodule during cloud source inspection", async () => {
-    const workspace = join(fixture, `cloud-inspect-${rollback}`);
-    const runtime = Object.create(CloudRuntime.prototype);
-    const run = (command: string) => shell(command.replaceAll("/openship", workspace));
-    Object.assign(runtime, {
-      provisionWorkspace: async () => ({ workspaceId: "test-workspace", runtime: {} }),
-      trackActiveBuildWorkspace: () => {},
-      untrackActiveBuildWorkspace: () => {},
-      ensureWorkspaceGit: async () => {},
-      workspaceExecutor: () => ({
-        exec: run,
-        streamExec: async (command: string) => ({ code: 0, output: await run(command) }),
-      }),
-      ws: () => ({ delete: async () => {} }),
-    });
-    const source = await runtime.resolveRemoteDockerfileBuildSource(
-      { ...config(rollback), buildContextDirectory: "lib/auth" },
-      new BuildLogger(),
-    );
-    expect(source.dockerfile).toBe("FROM scratch\nCOPY version.txt /version\n");
-    await source.cleanup();
-  });
 });
 
 it("fails the clone step for an unavailable submodule before executing a build", async () => {
@@ -217,4 +182,74 @@ it("fails the clone step for an unavailable submodule before executing a build",
   );
   expect(result).toMatchObject({ status: "failed", failedStep: "clone" });
   expect(build.mock.calls.every(([command]) => !command.includes("must-not-build"))).toBe(true);
+});
+
+describe("a pinned commit outside the cloned branch (#1544)", () => {
+  const pinnedTo = (commitSha: string) => ({ ...config(false), commitSha });
+  const serverRuntime = () => {
+    const runtime = Object.create(DockerRuntime.prototype);
+    Object.assign(runtime, {
+      connectionOptions: {
+        executor: {
+          exec: shell,
+          streamExec: async (command: string) => {
+            try {
+              return { code: 0, output: await shell(command) };
+            } catch {
+              return { code: 1, output: "" };
+            }
+          },
+        } as unknown as CommandExecutor,
+      },
+    });
+    return runtime;
+  };
+  const pipeline = (target: string, commitSha: string) =>
+    runBuildPipeline(
+      {
+        projectDir: target,
+        exec: async (command) => {
+          await shell(command);
+        },
+      },
+      pinnedTo(commitSha),
+      new BuildLogger(),
+    );
+
+  it("checks it out in the orchestrator source tree", async () => {
+    const tree = await prepareSourceTree(pinnedTo(mergeCommit));
+    try {
+      expect(await readFile(join(tree.contextDir, "merge.txt"), "utf8")).toBe("tested merge\n");
+    } finally {
+      await tree.cleanup();
+    }
+  });
+
+  it("checks it out in the server source tree", async () => {
+    const target = join(fixture, "merge-server");
+    await serverRuntime().cloneSourceOnRemote(pinnedTo(mergeCommit), target, new BuildLogger());
+    expect(await readFile(join(target, "merge.txt"), "utf8")).toBe("tested merge\n");
+  });
+
+  it("checks it out in the shared pipeline", async () => {
+    const target = join(fixture, "merge-pipeline");
+    expect((await pipeline(target, mergeCommit)).status).toBe("deploying");
+    expect(await readFile(join(target, "merge.txt"), "utf8")).toBe("tested merge\n");
+  });
+
+  it("fails rather than building branch HEAD when the commit does not exist", async () => {
+    const missing = "1".repeat(40);
+    await expect(prepareSourceTree(pinnedTo(missing))).rejects.toThrow();
+    await expect(
+      serverRuntime().cloneSourceOnRemote(
+        pinnedTo(missing),
+        join(fixture, "missing-server"),
+        new BuildLogger(),
+      ),
+    ).rejects.toThrow();
+    expect(await pipeline(join(fixture, "missing-pipeline"), missing)).toMatchObject({
+      status: "failed",
+      failedStep: "clone",
+    });
+  });
 });

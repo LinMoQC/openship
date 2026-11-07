@@ -1,4 +1,6 @@
-import { AppError, NotFoundError, ValidationError, safeErrorMessage } from "@repo/core";
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
+import { assertCloudProxyScope } from "../../lib/cloud/scope";
+import { NotFoundError, ValidationError, safeErrorMessage } from "@repo/core";
 import { repos } from "@repo/db";
 import type { DomainDependencies } from "../../../domains";
 import type { ExecutionContext } from "../../../context";
@@ -14,14 +16,14 @@ import { manageDomainSsl, needsDomainSslCheck } from "../../lib/domain-ssl";
 import { resolveManagedHostname } from "../../lib/routing-domains";
 import { domainExecution } from "./domain-execution";
 import { requireGitopsRelease } from "../releases/release-gate";
+import { isCustomerProject } from "../billing/management.service";
 export { domainExecution } from "./domain-execution";
 
 function record(ctx: ExecutionContext, id: string, eventType: string, after: unknown) {
   audit.recordAsync(operationAuditContext(ctx), { eventType, resourceType: "domain", resourceId: id, after });
 }
 async function projectAuthority(ctx: ExecutionContext, id: string) {
-  if (ctx.scopeMode === "fixed" && await resolveProjectAuthority(id, ctx.organizationId) === "cloud")
-    throw new AppError("This cloud link has no tenant mapping. Connect directly with the cloud organizationId.", 409, "CLOUD_SCOPE_UNAVAILABLE");
+  if (await resolveProjectAuthority(id, ctx.organizationId) === "cloud") assertCloudProxyScope(ctx);
 }
 async function targetServer(ctx: ExecutionContext, id?: string) {
   if (id) await authorization.authorize({ ...ctx, scopeMode: "fixed" }, {
@@ -120,6 +122,7 @@ export async function verifyProjectRoutingDomains(
       }
       log("Domain verification and HTTPS checks completed.");
     } catch (error) {
+      observeCaughtError(error, "platform/engine/modules/domains/domain.operations");
       const message = `${row.hostname}: ${safeErrorMessage(error)}`;
       onLog?.(message);
       warnings.push(message);
@@ -210,7 +213,10 @@ export const domainDependencies: DomainDependencies = {
       return result;
     },
     async uploadCert(ctx, id, input) {
-      if (env.CLOUD_MODE) throw new NotFoundError("Operation");
+      if (env.CLOUD_MODE) {
+        const domain = await service.getDomain(ctx, id);
+        if (!domain.projectId || !await isCustomerProject(ctx.organizationId, domain.projectId)) throw new NotFoundError("Operation");
+      }
       await domainExecution(ctx, id);
       const result = await service.uploadDomainCert(ctx, id, input);
       record(ctx, id, "domain.cert_uploaded", { domain: result.domain, issuer: result.issuer, expiresAt: result.expiresAt });
@@ -249,6 +255,7 @@ export const domainDependencies: DomainDependencies = {
         emit("log", { type: "log", message: result.message ?? (result.verified ? "Verified." : "Not verified."), level: result.verified ? "info" : "error" });
         emit("complete", { type: "complete", status: result.verified ? "completed" : "failed" });
       } catch (error) {
+        observeCaughtError(error, "platform/engine/modules/domains/domain.operations");
         emit("log", { type: "log", message: safeErrorMessage(error), level: "error" });
         emit("complete", { type: "complete", status: "failed" });
       }

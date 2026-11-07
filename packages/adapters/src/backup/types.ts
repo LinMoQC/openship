@@ -21,7 +21,7 @@ import type { Readable } from "node:stream";
  *  into the DB. Everything an executor or producer might need about
  *  the service is on this handle. */
 export interface ServiceHandle {
-  /** Stable service id from the DB. */
+  /** Stable source id: a service, standalone project, or mail server. */
   id: string;
   projectId: string;
   /** Compose-style service name; used for hostnames + container names. */
@@ -33,7 +33,7 @@ export interface ServiceHandle {
    *  `pg_dump -U $POSTGRES_USER` etc. The orchestrator decrypts the
    *  per-service env_vars before constructing the handle. */
   env: Record<string, string>;
-  /** Raw compose-syntax volume strings from `service.volumes`. The
+  /** Declared persistent volumes in Compose syntax. The
    *  executor parses these to discover sources. */
   volumes: string[];
   /** Runtime-specific container/workspace id when the service is
@@ -65,6 +65,9 @@ export interface ServiceHandle {
    *  top-level `name:`. These names already identify the daemon volume and
    *  must not receive the Openship project prefix in backup fallbacks. */
   externalVolumeNames?: string[];
+  /** Migration includes bind-mounted config files; default backups keep their
+   * existing directory/volume selection. */
+  includeFileBinds?: boolean;
 }
 
 export interface ExecExitInfo {
@@ -79,6 +82,8 @@ export interface ExecExitInfo {
 /** The set of physical sources an executor can pull bytes out of for a
  *  given service. Producers iterate this to decide what to back up. */
 export interface BackupSource {
+  /** False for a single bind-mounted file when explicitly requested. */
+  isDirectory?: boolean;
   /** Opaque id understood by the executor — typically the path or
    *  volume name. */
   id: string;
@@ -117,6 +122,8 @@ export interface ExecuteCommandOpts {
 
 export interface StreamPathOpts {
   compression?: PayloadCompression;
+  /** A migration may intentionally copy an empty source; backups stay strict. */
+  allowEmpty?: boolean;
   /** Glob-ish patterns to exclude (passed to tar `--exclude`). */
   exclude?: string[];
   /**
@@ -156,6 +163,8 @@ export interface StreamPathOpts {
 
 export interface ReceiveStreamOpts {
   compression?: PayloadCompression;
+  /** Incoming archive contains one file at the canonical `file` entry. */
+  sourceIsFile?: boolean;
   /** Wipe the target before extracting. Default false — adapter-
    *  specific safer modes (delete-then-recreate volume) take precedence. */
   clearTarget?: boolean;
@@ -170,6 +179,8 @@ export interface ReceiveStreamOpts {
    * continuously, a wedged helper moves nothing — so the idle timer separates
    * them exactly where a wall-clock bound has to choose between strangling the
    * first and missing the second.
+   * Docker stages uploads first: this idle guard ends at upload EOF, while
+   * local validation and extraction remain covered by timeoutMs and signal.
    */
   idleTimeoutMs?: number;
   /** Absolute ceiling regardless of traffic, as a last resort behind
@@ -189,7 +200,7 @@ export interface ReceiveStreamOpts {
  *  Oblien cloud, or an SSH host. */
 export interface BackupExecutor {
   /** Identifies which RuntimeAdapter this executor pairs with. */
-  readonly runtimeName: "docker" | "bare" | "cloud";
+  readonly runtimeName: "docker" | "bare";
   /** False when stopping the service also stops access to its filesystem. */
   readonly supportsOfflineVolumeRestore?: boolean;
 
@@ -456,6 +467,7 @@ export type DestinationCapability =
   | "streamingGet"
   | "multipart"
   | "presignedGet"
+  | "rangedGet"
   | "presignedPut"
   | "quota"
   | "serverSideCopy";
@@ -471,6 +483,9 @@ export type DestinationKind =
  *  module decrypts its own secrets at construction time and discards
  *  the plaintext immediately. */
 export interface BackupDestinationRow {
+  /** Trusted execution policy, injected by the control plane at use time.
+   * Never persisted or accepted from a destination's configuration. */
+  publicNetworkOnly?: boolean;
   id: string;
   organizationId: string;
   name: string;
@@ -482,6 +497,9 @@ export interface BackupDestinationRow {
   sshHost: string | null;
   sshPort: number | null;
   sshUser: string | null;
+  /** Existing host identity pinned on a saved server; never discard it when
+   * hydrating an openship_server destination. Base64 SSH public host key. */
+  sshHostKey?: string | null;
   /** When kind="openship_server" this is the user's servers.id. The
    *  apps/api layer hydrates SSH creds from that server BEFORE handing
    *  the row to resolveDestination — the adapter never queries the DB. */
@@ -545,7 +563,8 @@ export interface BackupDestination {
   preflight(): Promise<{ ok: true } | { ok: false; reason: string }>;
 
   put(key: string, body: Readable, opts: PutOpts): Promise<PutResult>;
-  get(key: string): Promise<Readable>;
+  /** Ranges require the rangedGet capability; offsets are inclusive. */
+  get(key: string, options?: { range?: { start: number; end: number } }): Promise<Readable>;
   head(key: string): Promise<HeadInfo | null>;
   list(prefix: string, opts?: ListOpts): Promise<ListPage>;
   delete(key: string): Promise<void>;

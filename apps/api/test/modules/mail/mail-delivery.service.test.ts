@@ -354,7 +354,7 @@ describe("describePath", () => {
 function box(opts: {
   queue?: string | Error;
   relay?: OutboundRelay;
-  detect?: string;
+  detect?: string | Error;
 }): CommandExecutor & { exec: ReturnType<typeof vi.fn> } {
   const state = JSON.stringify({
     version: 1,
@@ -366,7 +366,11 @@ function box(opts: {
   });
   return {
     exec: vi.fn(async (cmd: string) => {
-      if (cmd.includes("{{.Config.Image}}")) return opts.detect ?? "true\topenship/mail:latest";
+      if (cmd.includes("{{.Config.Image}}")) {
+        if (opts.detect instanceof Error) throw opts.detect;
+        return opts.detect ?? "true\topenship/mail:latest";
+      }
+      if (cmd.includes("systemctl show")) return "__OPENSHIP_NO_SYSTEMCTL__";
       if (cmd.startsWith("cat ")) return state;
       const queue = opts.queue ?? "Mail queue is empty";
       if (queue instanceof Error) throw queue;
@@ -468,8 +472,9 @@ describe("checkMailDelivery", () => {
     // No container, but systemd knows the units → flavor host.
     const exec = {
       exec: vi.fn(async (cmd: string) => {
-        if (cmd.includes("{{.Config.Image}}")) return "";
-        if (cmd.includes("systemctl show")) return "## postfix\nLoadState=loaded\nActiveState=active";
+        if (cmd.includes("{{.Config.Image}}")) throw new Error("Error: No such object: openship-mail");
+        if (cmd.includes("systemctl show")) return ["postfix", "dovecot"]
+          .map((unit) => `## ${unit}\nLoadState=loaded\nActiveState=active`).join("\n");
         if (cmd.startsWith("cat ")) return "";
         return "Mail queue is empty";
       }),
@@ -486,10 +491,16 @@ describe("checkMailDelivery", () => {
   // Every `unknown` below must carry a reason: without one the row is unactionable
   // and the operator's only recourse is to SSH in and run the probe by hand.
   it("reports unknown on a box with no mail engine", async () => {
-    const health = await checkMailDelivery(box({ detect: "" }));
+    const health = await checkMailDelivery(box({ detect: new Error("Error: No such object: openship-mail") }));
 
     expect(health).toMatchObject({ status: "unknown", queued: 0, deferrals: [] });
     expect(health.detail).toContain("No mail engine");
+  });
+
+  it("leaves delivery unknown without trying a queue read after a lost engine connection", async () => {
+    const exec = box({ detect: new Error("connect ENETUNREACH 192.0.2.1:22") });
+    expect(await checkMailDelivery(exec)).toMatchObject({ status: "unknown", detail: expect.stringContaining("ENETUNREACH") });
+    expect(exec.exec.mock.calls.some(([command]) => command.includes("postqueue"))).toBe(false);
   });
 
   it("reports unknown, and says so, when the engine container is stopped", async () => {

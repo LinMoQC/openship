@@ -33,6 +33,7 @@ interface DropdownPosition {
   left: number;
   width: number;
   maxHeight: number;
+  zIndex: number;
 }
 
 export interface CustomSelectProps<T extends string> {
@@ -44,6 +45,8 @@ export interface CustomSelectProps<T extends string> {
   placeholder?: string;
   className?: string;
   triggerClassName?: string;
+  /** Keep domain-specific rows identical in the trigger and searchable menu. */
+  renderOption?: (option: Option<T>, selected: boolean) => React.ReactNode;
   /** Input and filled use the shared Input appearance, with descriptions only in the menu. */
   variant?: "default" | "input" | "filled";
   footerAction?: CustomSelectFooterAction;
@@ -70,6 +73,7 @@ export function CustomSelect<T extends string>({
   placeholder = "Select",
   className = "",
   triggerClassName,
+  renderOption,
   variant = "default",
   footerAction,
   onOpen,
@@ -127,6 +131,12 @@ export function CustomSelect<T extends string>({
     const spaceAbove = rect.top - VIEWPORT_PADDING;
     const openAbove = spaceBelow < 220 && spaceAbove > spaceBelow;
     const availableHeight = Math.max(120, (openAbove ? spaceAbove : spaceBelow) - MENU_OFFSET);
+    // Menus are portaled to body, so they must inherit the owning modal's
+    // layer explicitly. A nested modal sits above the default menu layer.
+    const modalLayer = Number(
+      triggerRef.current.closest("[data-modal-layer]")?.getAttribute("data-modal-layer") ?? 0,
+    );
+    const zIndex = Math.max(10050, modalLayer + 50);
 
     setMenuPosition(
       openAbove
@@ -135,12 +145,14 @@ export function CustomSelect<T extends string>({
             left,
             width,
             maxHeight: Math.min(MENU_MAX_HEIGHT, availableHeight),
+            zIndex,
           }
         : {
             top: rect.bottom + MENU_OFFSET,
             left,
             width,
             maxHeight: Math.min(MENU_MAX_HEIGHT, availableHeight),
+            zIndex,
           },
     );
   }, []);
@@ -237,8 +249,10 @@ export function CustomSelect<T extends string>({
   };
 
   const handleFooterAction = () => {
-    footerAction?.onClick();
     setIsOpen(false);
+    // A dialog opened by the action must restore focus to the surviving trigger.
+    triggerRef.current?.focus();
+    footerAction?.onClick();
   };
 
   const moveHighlight = (delta: number) => {
@@ -281,11 +295,12 @@ export function CustomSelect<T extends string>({
           <div
             ref={menuRef}
             onKeyDown={handleMenuKeyDown}
-            className="fixed z-[10050] flex flex-col overflow-hidden rounded-2xl border border-border/50 bg-popover shadow-xl shadow-black/[0.08]"
+            className="fixed flex flex-col overflow-hidden rounded-2xl border border-border/50 bg-popover shadow-[var(--th-dropdown-shadow)]"
             style={{
               left: menuPosition.left,
               width: menuPosition.width,
               maxHeight: menuPosition.maxHeight,
+              zIndex: menuPosition.zIndex,
               ...(menuPosition.top !== undefined
                 ? { top: menuPosition.top }
                 : { bottom: menuPosition.bottom }),
@@ -294,7 +309,10 @@ export function CustomSelect<T extends string>({
             {showSearch && (
               <div className="flex-none border-b border-border/50 px-3 py-2">
                 <div className="flex items-center gap-2">
-                  <UiIcon name="search" className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
+                  <UiIcon
+                    name="search"
+                    className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0"
+                  />
                   <input
                     ref={inputRef}
                     type="text"
@@ -354,18 +372,27 @@ export function CustomSelect<T extends string>({
                       type="button"
                     >
                       <span className="flex min-w-0 items-center gap-2">
-                        {option.icon}
-                        <span className="flex min-w-0 flex-col">
-                          <span className="truncate">{option.label}</span>
-                          {option.description && (
-                            <span className="truncate text-xs text-muted-foreground/70">
-                              {option.description}
+                        {renderOption ? (
+                          renderOption(option, isSelected)
+                        ) : (
+                          <>
+                            {option.icon}
+                            <span className="flex min-w-0 flex-col">
+                              <span className="truncate">{option.label}</span>
+                              {option.description && (
+                                <span className="truncate text-xs text-muted-foreground/70">
+                                  {option.description}
+                                </span>
+                              )}
                             </span>
-                          )}
-                        </span>
+                          </>
+                        )}
                       </span>
                       {isSelected && (
-                        <UiIcon name="check" className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
+                        <UiIcon
+                          name="check"
+                          className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0"
+                        />
                       )}
                     </button>
                   );
@@ -449,27 +476,34 @@ export function CustomSelect<T extends string>({
       >
         <span
           className={cn(
-            "flex min-w-0 items-center gap-2",
+            "flex min-w-0 flex-1 items-center gap-2",
             variant !== "default" ? "text-foreground" : "text-foreground/70",
           )}
         >
-          {selectedOption?.icon}
-          {selectedOption ? (
-            <span className="flex min-w-0 flex-col text-start">
-              <span id={`${listId}-value`} className="truncate">
-                {selectedOption.label}
-              </span>
-              {variant === "default" && selectedOption.description && (
-                <span className="truncate text-xs font-normal text-muted-foreground/70">
-                  {selectedOption.description}
-                </span>
-              )}
+          {selectedOption && renderOption ? (
+            <span id={`${listId}-value`} className="flex min-w-0 flex-1 items-center gap-3">
+              {renderOption(selectedOption, true)}
             </span>
+          ) : selectedOption ? (
+            <>
+              {selectedOption.icon}
+              <span className="flex min-w-0 flex-col text-start">
+                <span id={`${listId}-value`} className="truncate">
+                  {selectedOption.label}
+                </span>
+                {variant === "default" && selectedOption.description && (
+                  <span className="truncate text-xs font-normal text-muted-foreground/70">
+                    {selectedOption.description}
+                  </span>
+                )}
+              </span>
+            </>
           ) : (
             <span className="text-muted-foreground">{placeholder}</span>
           )}
         </span>
-        <UiIcon name="chevron-down"
+        <UiIcon
+          name="chevron-down"
           className={`w-4 h-4 text-muted-foreground transition-transform duration-200 flex-shrink-0 ${
             isOpen ? "rotate-180" : ""
           }`}

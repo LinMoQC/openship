@@ -1,5 +1,6 @@
 "use client";
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { Icon as UiIcon } from "@repo/ui/icons";
 
 import React, { useCallback, useEffect, useState } from "react";
@@ -39,7 +40,7 @@ export function RollbackBackupPanel({
 }: {
   /** Null until the project exists (first deploy through the wizard). */
   projectId?: string | null;
-  /** The Advanced disclosure is open — don't fetch while collapsed. */
+  /** Whether the destination settings are being viewed. */
   enabled: boolean;
   artifactKind?: "image" | "files";
 }) {
@@ -54,7 +55,7 @@ export function RollbackBackupPanel({
 
   const load = useCallback(async () => {
     if (!projectId) return;
-    const pol = await backupsApi.listPolicies(projectId).then((r) => r.data ?? []).catch(() => []);
+    const pol = await backupsApi.listPolicies(projectId).then((r) => r.data ?? []).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "dashboard/app/(dashboard)/(deployment)/deploy/[slug]/components/RollbackBackupPanel"); return []; });
     setPolicies(pol);
   }, [projectId]);
 
@@ -89,9 +90,9 @@ export function RollbackBackupPanel({
     await settings.toggleStrategy();
   };
 
-  const changeWindow = async (next: number) => {
-    const clamped = Math.max(0, Math.min(effective?.maxWindow ?? MAX_ROLLBACK_WINDOW, next));
-    if (clamped === (effective?.window ?? DEFAULT_ROLLBACK_WINDOW)) return;
+  const changeWindow = async (next: number | null) => {
+    const clamped = next === null ? null : Math.max(0, Math.min(effective?.maxWindow ?? MAX_ROLLBACK_WINDOW, next));
+    if (clamped === null ? effective?.explicit === null : clamped === effective?.explicit) return;
     if (!projectId) {
       updateConfig({ rollbackWindow: clamped });
       return;

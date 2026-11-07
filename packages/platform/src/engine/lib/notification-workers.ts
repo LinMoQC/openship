@@ -14,6 +14,7 @@
  * The runner handles retry policy uniformly so each worker stays simple.
  */
 
+import { observedAllSettled, reportError, reportCaughtError as observeCaughtError, diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import { createHmac } from "node:crypto";
 import { repos, type NotificationChannel, type NotificationDelivery } from "@repo/db";
 import { sendMail } from "@repo/platform/engine/lib/mail";
@@ -24,6 +25,7 @@ import { safeFetch } from "@repo/platform/engine/lib/safe-fetch";
 import { safeErrorMessage } from "@repo/core";
 import { trackBackgroundWork } from "./background-work";
 import { canReceiveNotification } from "./notification-access";
+import { notificationPreferenceAllows } from "./notification-preferences";
 
 /* ─── Render helpers ─────────────────────────────────────────────────────── */
 
@@ -62,6 +64,8 @@ function notificationContent(delivery: NotificationDelivery) {
   if (payload.jobName || payload.label) {
     fields.push({ label: "Job", value: String(payload.jobName ?? payload.label) });
   }
+  if (payload.workflowName) fields.push({ label: "Workflow", value: String(payload.workflowName) });
+  if (payload.runNumber) fields.push({ label: "Run", value: String(payload.runNumber) });
   if (payload.branch) fields.push({ label: "Branch", value: String(payload.branch) });
   if (payload.commitSha)
     fields.push({ label: "Commit", value: String(payload.commitSha).slice(0, 8) });
@@ -269,21 +273,28 @@ function redactBotToken(message: string, botToken: string): string {
 
 /* ─── Channel workers ─────────────────────────────────────────────────────── */
 
+class PermanentNotificationError extends Error {}
+
 async function sendEmail(
   delivery: NotificationDelivery,
   channel: NotificationChannel,
 ): Promise<void> {
-  const config = channel.config as { address?: string };
+  const config = channel.config as { address?: string; accountEmail?: boolean };
   if (!config?.address) {
     throw new Error("Email channel has no address configured");
   }
 
+  if (config.accountEmail || channel.id.startsWith("nch_account_email_")) {
+    const account = await repos.user.findById(delivery.userId);
+    if (!account?.emailVerified || account.email !== config.address) throw new PermanentNotificationError("Account email is no longer verified");
+  }
   const { title, body } = renderMessage(delivery);
   const delivered = await sendMail({
     to: config.address,
     subject: `[Openship] ${title}`,
     text: body,
     html: renderEmailHtml(delivery),
+    organizationId: delivery.organizationId,
   });
   // THROW when nothing could carry it. `sendMail` only warns on an empty transport
   // chain, so ignoring its result meant this worker returned normally and the delivery
@@ -360,7 +371,7 @@ async function sendWebhook(
     allowPrivate,
   });
   if (!res.ok) {
-    const text = await res.text().catch(() => "");
+    const text = await res.text().catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/lib/notification-workers"); return ""; });
     throw new Error(`Webhook returned ${res.status}: ${text.slice(0, 200)}`);
   }
 }
@@ -406,7 +417,7 @@ async function sendDiscord(
     allowPrivate,
   });
   if (!res.ok) {
-    const text = await res.text().catch(() => "");
+    const text = await res.text().catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/lib/notification-workers"); return ""; });
     throw new Error(`Discord webhook returned ${res.status}: ${text.slice(0, 200)}`);
   }
 }
@@ -438,7 +449,7 @@ async function sendSlack(
     allowPrivate,
   });
   if (!res.ok) {
-    const text = await res.text().catch(() => "");
+    const text = await res.text().catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/lib/notification-workers"); return ""; });
     throw new Error(`Slack webhook returned ${res.status}: ${text.slice(0, 200)}`);
   }
 }
@@ -480,8 +491,9 @@ async function sendMSTeams(
   };
 
   // SSRF-safe: the Teams webhook URL is user-configured. Creation-time
-  // validation restricts the host to *.logic.azure.com / *.webhook.office.com,
-  // but an attacker-provisioned Azure Logic App passes that suffix check and can
+  // validation restricts the host to *.environment.api.powerplatform.com /
+  // *.logic.azure.com / *.webhook.office.com, but an attacker-provisioned
+  // Azure Logic App or Power Automate workflow passes that suffix check and can
   // 302-redirect the server-side POST into the internal network / metadata IP.
   // So pin the resolved IP and never follow a redirect (maxRedirects defaults to
   // 0 → a 3xx is non-2xx → thrown), exactly like the Slack/webhook workers.
@@ -496,7 +508,7 @@ async function sendMSTeams(
   // Note: Power Automate Workflows respond 202 even when the flow fails
   // downstream — a 2xx means "accepted", not "delivered".
   if (!res.ok) {
-    const text = await res.text().catch(() => "");
+    const text = await res.text().catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/lib/notification-workers"); return ""; });
     throw new Error(`Microsoft Teams webhook returned ${res.status}: ${text.slice(0, 200)}`);
   }
 }
@@ -538,7 +550,7 @@ async function sendTelegram(
       body: JSON.stringify(payload),
       timeoutMs: 10_000,
     });
-    raw = await res.text().catch(() => "");
+    raw = await res.text().catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/lib/notification-workers"); return ""; });
   } catch (err) {
     // The token sits in the URL path, and delivery errors are persisted and shown
     // in the dashboard — never let a transport error carry it out of here.
@@ -590,6 +602,7 @@ export async function sendTestToChannel(channel: NotificationChannel): Promise<v
   if (!worker) throw new Error(`No worker for channel kind "${channel.kind}"`);
   const testDelivery = {
     id: "test",
+    userId: channel.userId,
     category: "test",
     createdAt: new Date(),
     payload: {
@@ -597,7 +610,10 @@ export async function sendTestToChannel(channel: NotificationChannel): Promise<v
     },
   } as unknown as NotificationDelivery;
   try { await worker(testDelivery, channel); }
-  catch (error) { throw new Error(channelErrorMessage(error, channel)); }
+  catch (error) {
+    // The caller observes this sanitized error; raw webhook paths are credentials.
+    throw new Error(channelErrorMessage(error, channel));
+  }
 }
 
 function channelErrorMessage(error: unknown, channel: NotificationChannel): string {
@@ -607,7 +623,9 @@ function channelErrorMessage(error: unknown, channel: NotificationChannel): stri
     const stored = config[key];
     if (typeof stored !== "string" || !stored) continue;
     let secret = stored;
-    if (key !== "url") { try { secret = decrypt(stored); } catch {} }
+    if (key !== "url") { try { secret = decrypt(stored); } catch (diagnosticFailure) {
+      observeCaughtError(diagnosticFailure, "platform/engine/lib/notification-workers");
+    } }
     if (secret) message = message.split(secret).join("<redacted>");
   }
   return message;
@@ -623,64 +641,77 @@ const MAX_ATTEMPTS = 5;
  * batch of queued rows, sends them concurrently, and marks the results.
  *
  * Retry policy:
- *   - Transient failures (worker throws): up to MAX_ATTEMPTS attempts,
- *     backoff via the next scheduled tick (no in-process delay — keeps
- *     the loop simple and the DB row visibly "queued" between tries)
- *   - Permanent failures (channel missing, malformed config): mark
- *     failed immediately, surface in the dashboard
+ *   - Transient failures: ordinary notices have MAX_ATTEMPTS; durable credit
+ *     alerts retry with persisted backoff. A renewable lease recovers a lost
+ *     worker or database acknowledgment without waiting for an API restart.
+ *   - Lost access or deleted/disabled/unverified channels fail permanently.
  */
 async function deliverQueuedNotifications(): Promise<void> {
-  const queued = await repos.notificationDelivery.claimQueued(25).catch(() => []);
+  const queued = await repos.notificationDelivery.claimQueued(25).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/lib/notification-workers"); return []; });
   if (queued.length === 0) return;
 
-  const settled = await Promise.allSettled(
+  const settled = await observedAllSettled(
     queued.map(async (delivery) => {
-      // Resolve channel — null channelId means the subscription pointed
-      // at a now-deleted channel. Mark failed permanently.
-      if (!delivery.channelId) {
-        await repos.notificationDelivery.markFailed(delivery.id, "Channel deleted", false);
-        return;
-      }
-      const channel = await repos.notificationChannel
-        .findById(delivery.channelId)
-        .catch(() => undefined);
-      if (!channel) {
-        await repos.notificationDelivery.markFailed(delivery.id, "Channel not found", false);
-        return;
-      }
-      if (channel.userId !== delivery.userId || !channel.enabled || !channel.verified ||
-          !(await canReceiveNotification(delivery.userId, delivery.organizationId, delivery))) {
-        await repos.notificationDelivery.markFailed(delivery.id, "Channel or recipient access is no longer available", false);
-        return;
-      }
-
-      const worker = WORKERS[channel.kind];
-      if (!worker) {
-        await repos.notificationDelivery.markFailed(
-          delivery.id,
-          `No worker for channel kind "${channel.kind}"`,
-          false,
-        );
-        return;
-      }
-
+      let channel: NotificationChannel | undefined;
+      const attempt = delivery.attempts + 1;
+      let renewal: Promise<unknown> | undefined;
+      const heartbeat = setInterval(() => {
+        renewal ??= repos.notificationDelivery.renewLease(delivery.id, attempt)
+          .catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/lib/notification-workers"); return false; }).finally(() => { renewal = undefined; });
+      }, 20_000);
+      heartbeat.unref?.();
       try {
-        await worker(delivery, channel);
-        await repos.notificationDelivery.markSent(delivery.id);
-        await repos.notificationChannel.touchLastDelivered(channel.id).catch(() => {});
-      } catch (err) {
-        const message = channelErrorMessage(err, channel);
-        const attempts = delivery.attempts + 1;
-        const retry = attempts < MAX_ATTEMPTS;
-        await repos.notificationDelivery.markFailed(delivery.id, message, retry);
-        if (!retry) {
-          console.error(
-            `[notification] delivery ${delivery.id} failed permanently after ${attempts} attempts:`,
-            message,
-          );
+        // Resolve channel — null channelId means the subscription pointed
+        // at a now-deleted channel. Mark failed permanently.
+        if (!delivery.channelId) {
+          await repos.notificationDelivery.markFailed(delivery.id, "Channel deleted", false, attempt);
+          return;
         }
+        channel = await repos.notificationChannel.findById(delivery.channelId);
+        if (!channel) {
+          await repos.notificationDelivery.markFailed(delivery.id, "Channel not found", false, attempt);
+          return;
+        }
+        if (channel.userId !== delivery.userId || !channel.enabled || !channel.verified ||
+            !(await canReceiveNotification(delivery.userId, delivery.organizationId, delivery)) ||
+            !(await notificationPreferenceAllows(delivery.userId, delivery.organizationId, delivery.category, channel))) {
+          await repos.notificationDelivery.markFailed(delivery.id, "Channel or recipient access is no longer available", false, attempt);
+          return;
+        }
+
+        const worker = WORKERS[channel.kind];
+        if (!worker) {
+          await repos.notificationDelivery.markFailed(
+            delivery.id,
+            `No worker for channel kind "${channel.kind}"`,
+            false,
+            attempt,
+          );
+          return;
+        }
+
+        if (!(await repos.notificationDelivery.renewLease(delivery.id, attempt))) return;
+        await worker(delivery, channel);
+        await repos.notificationDelivery.markSent(delivery.id, attempt);
+        await repos.notificationChannel.touchLastDelivered(channel.id).catch((diagnosticFailure) => {
+          observeCaughtError(diagnosticFailure, "platform/engine/lib/notification-workers");
+        });
+      } catch (err) {
+        const message = channel ? channelErrorMessage(err, channel) : "Notification lookup temporarily unavailable";
+        const retry = !(err instanceof PermanentNotificationError) &&
+          ((delivery.payload as { durable?: boolean })?.durable === true || attempt < MAX_ATTEMPTS);
+        await repos.notificationDelivery.markFailed(delivery.id, message, retry, attempt);
+        reportError(message, {
+          source: "worker", kind: "background", component: "notification-delivery",
+          operation: "notifications.deliver", resourceType: "notification_delivery", resourceId: delivery.id,
+          userId: delivery.userId, organizationId: delivery.organizationId ?? undefined,
+          attempt, retryable: retry, severity: retry ? "warn" : "error", handled: true,
+        });
+      } finally {
+        clearInterval(heartbeat);
+        await renewal;
       }
-    }),
+    }), "platform/engine/lib/notification-workers",
   );
   const failures = settled.filter((result): result is PromiseRejectedResult => result.status === "rejected");
   if (failures.length) throw new AggregateError(failures.map(result => result.reason), "Notification delivery state could not be recorded");
@@ -699,7 +730,7 @@ export function startNotificationRunner(intervalMs = 5000): void {
   if (runnerInterval) return;
   runnerInterval = setInterval(() => {
     void processQueuedNotifications().catch((err) =>
-      console.error("[notification] runner tick failed:", err),
+      errorDiagnostics.error("platform/engine/lib/notification-workers", "[notification] runner tick failed:", err),
     );
   }, intervalMs);
   runnerInterval.unref?.();

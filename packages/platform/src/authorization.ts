@@ -1,9 +1,18 @@
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
+import { enrichErrorContext } from "@repo/core/diagnostics/node";
 import { randomUUID } from "node:crypto";
 import {
   AppError,
   NotFoundError,
   UnauthorizedError,
   ORG_SINGLETON_RESOURCE_TYPES,
+  RESOURCE_TYPES,
+  capabilityFor,
+  capabilityAction,
+  capabilityRoot,
+  isCapability,
+  type Capability,
+  type GrantPermission,
   type Permission,
   type ResourceType,
 } from "@repo/core";
@@ -15,15 +24,16 @@ import {
 } from "./context";
 
 export const ORG_SINGLETON_RESOURCES: ReadonlySet<string> = new Set(ORG_SINGLETON_RESOURCE_TYPES);
-export type CheckedResourceType =
-  | ResourceType
-  | "deployment"
-  | "domain"
-  | "service"
-  | "env_var"
-  | "backup_run"
-  | "backup_restore"
-  | "build_session";
+
+/** Checked children include environment variables and build sessions, which are not grant-row types. */
+export const CHECKED_RESOURCE_TYPES = [...RESOURCE_TYPES, "env_var", "build_session"] as const;
+export type CheckedResourceType = (typeof CHECKED_RESOURCE_TYPES)[number];
+
+const CHECKED_RESOURCE_SET: ReadonlySet<string> = new Set(CHECKED_RESOURCE_TYPES);
+
+export function isCheckedResourceType(type: string): type is CheckedResourceType {
+  return CHECKED_RESOURCE_SET.has(type);
+}
 
 export interface PermissionInput {
   resourceType: CheckedResourceType;
@@ -33,6 +43,12 @@ export interface PermissionInput {
   scope?: "list" | "all";
   /** Only the dedicated project-create operation may enable create-only grants. */
   projectCreate?: boolean;
+  /**
+   * The fine-grained capability that also satisfies this check, for a check on a
+   * ROOT made on behalf of one of its children (list a project's domains, trigger
+   * a deploy). Omitted, it is derived from `resourceType` + `action`.
+   */
+  capability?: Capability;
 }
 
 export interface PermissionGrantSource {
@@ -41,7 +57,7 @@ export interface PermissionGrantSource {
     userId: string,
     type: ResourceType,
     id: string,
-  ): Promise<{ permissions: readonly Permission[] } | null>;
+  ): Promise<{ permissions: readonly GrantPermission[] } | null>;
 }
 
 export interface PermissionMembership {
@@ -77,7 +93,7 @@ export interface PermissionRepositories {
 export interface AuthorizationDependencies {
   repos: PermissionRepositories;
   grantSourceFor(ctx: ExecutionContext): PermissionGrantSource;
-  /** A self-hosted gateway can authorize an upstream project before forwarding. */
+  /** A self-hosted gateway can authorize upstream account resources before forwarding. */
   cloud?: { isCanonical(): boolean; isLinked(organizationId: string): Promise<boolean> };
   now?: () => number;
 }
@@ -112,7 +128,7 @@ export function roleAllowsResourceType(
   return type !== "billing" && type !== "audit";
 }
 
-export function permitsAction(permissions: readonly Permission[], action: Permission): boolean {
+export function permitsAction(permissions: readonly GrantPermission[], action: Permission): boolean {
   switch (action) {
     case "read":
       return permissions.some((p) => p === "read" || p === "write" || p === "admin");
@@ -136,6 +152,22 @@ function membershipRole(member: PermissionMembership): ContextRole | null {
     : null;
 }
 
+/**
+ * Does a grant authorize this check? Its coarse level, or — for a resource tree
+ * that defines one — the capability the check maps to (`domain`+`admin` ⇒
+ * `domains:delete`). A capability never satisfies a different check.
+ */
+export function grantPermits(permissions: readonly GrantPermission[], input: PermissionInput): boolean {
+  // Explicit capabilities are only for checks on their parent, at their own
+  // action. A mistaken read capability must never satisfy an admin operation.
+  if (input.capability && (!isCapability(input.capability) ||
+    capabilityRoot(input.capability) !== input.resourceType ||
+    capabilityAction(input.capability) !== input.action)) return false;
+  if (permitsAction(permissions, input.action)) return true;
+  const capability = input.capability ?? capabilityFor(input.resourceType, input.action);
+  return !!capability && permissions.includes(capability);
+}
+
 /** The existing API policy, with persistence and cloud linkage supplied by its owner. */
 export function createAuthorization(deps: AuthorizationDependencies) {
   const { repos } = deps;
@@ -148,7 +180,7 @@ export function createAuthorization(deps: AuthorizationDependencies) {
         return (await repos.project.findById(id))?.organizationId ?? null;
       case "server":
       case "mail_server":
-        return (await repos.server.get(id).catch(() => null))?.organizationId ?? null;
+        return (await repos.server.get(id).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/authorization"); return null; }))?.organizationId ?? null;
       case "backup_destination":
         return (await repos.backupDestination.findById(id))?.organizationId ?? null;
       case "billing":
@@ -178,22 +210,22 @@ export function createAuthorization(deps: AuthorizationDependencies) {
         rootId = (await repos.service.findById(id))?.projectId;
         break;
       case "env_var":
-        rootId = (await repos.project.findEnvVarById(id).catch(() => null))?.projectId;
+        rootId = (await repos.project.findEnvVarById(id).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/authorization"); return null; }))?.projectId;
         break;
       case "backup_policy":
         rootType = "backup_destination";
-        rootId = (await repos.backupPolicy.findById(id).catch(() => null))?.destinationId;
+        rootId = (await repos.backupPolicy.findById(id).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/authorization"); return null; }))?.destinationId;
         break;
       case "backup_run":
         rootType = "backup_destination";
-        rootId = (await repos.backupRun.findById(id).catch(() => null))?.destinationId;
+        rootId = (await repos.backupRun.findById(id).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/authorization"); return null; }))?.destinationId;
         break;
       case "backup_restore":
         rootType = "backup_destination";
-        rootId = (await repos.backupRestore.findById(id).catch(() => null))?.destinationId;
+        rootId = (await repos.backupRestore.findById(id).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/authorization"); return null; }))?.destinationId;
         break;
       case "build_session": {
-        const session = await repos.deployment.findBuildSession(id).catch(() => null);
+        const session = await repos.deployment.findBuildSession(id).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/authorization"); return null; });
         rootId = session?.deploymentId
           ? (await repos.deployment.findById(session.deploymentId))?.projectId
           : null;
@@ -214,8 +246,8 @@ export function createAuthorization(deps: AuthorizationDependencies) {
     if (input.scope === "list" || input.resourceId === "*") return scopeOrg;
     const resource = await resolveResourceOrg(input.resourceType, input.resourceId);
     if (resource) return resource.orgId;
-    if (!canForward() || !PROJECT_ROOTED.has(input.resourceType) || !scopeOrg) return null;
-    return (await deps.cloud!.isLinked(scopeOrg).catch(() => false)) ? scopeOrg : null;
+    if (!canForward() || (!PROJECT_ROOTED.has(input.resourceType) && input.resourceType !== "server") || !scopeOrg) return null;
+    return (await deps.cloud!.isLinked(scopeOrg).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/authorization"); return false; })) ? scopeOrg : null;
   }
 
   async function allowsMember(
@@ -253,7 +285,7 @@ export function createAuthorization(deps: AuthorizationDependencies) {
         input.resourceType as ResourceType,
         "*",
       );
-      return grant ? permitsAction(grant.permissions, input.action) : false;
+      return grant ? grantPermits(grant.permissions, input) : false;
     }
 
     let root = await resolveResourceOrg(input.resourceType, input.resourceId);
@@ -265,7 +297,7 @@ export function createAuthorization(deps: AuthorizationDependencies) {
       } else return false;
     }
     const grant = await source.findForResource(organizationId, userId, root.rootType, root.rootId);
-    return grant ? permitsAction(grant.permissions, input.action) : false;
+    return grant ? grantPermits(grant.permissions, input) : false;
   }
 
   /** Internal compatibility helper. The caller must already have verified resource ownership. */
@@ -327,6 +359,9 @@ export function createAuthorization(deps: AuthorizationDependencies) {
     }
     const resolved = await decision(ctx, input, scopeOrg);
     if (!resolved) throw new NotFoundError(input.resourceType, input.resourceId);
+    // Diagnostics only: authorization still returns its explicit immutable scope.
+    enrichErrorContext({ organizationId: resolved.org, userId: ctx.userId,
+      resourceType: input.resourceType, resourceId: input.resourceId });
     const base = freezeContext(ctx);
     return freezeContext({
       ...base,

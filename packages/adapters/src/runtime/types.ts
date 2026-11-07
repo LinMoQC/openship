@@ -7,7 +7,7 @@
  * Three implementations:
  *   - DockerRuntime → Docker Engine via dockerode
  *   - BareRuntime   → Direct processes via child_process
- *   - CloudRuntime  → Oblien cloud API
+ *   - Managed Cloud → the same Docker/bare engines through Oblien transport
  */
 
 import type {
@@ -26,7 +26,7 @@ import type {
   ShellOptions,
   ShellSession,
 } from "../types";
-import type { ComposeAdvanced } from "@repo/core";
+import type { ComposeAdvanced, StackRole } from "@repo/core";
 import type { BuildLogger } from "./build-pipeline";
 import type { PortProbeExecutor } from "../system/port-listen";
 import type { ContainerStabilitySample } from "./stability";
@@ -48,6 +48,12 @@ export type RuntimeCapability =
   | "prebuiltImage"
   | "deploy"
   | "multiServiceDeploy"
+  /** Scheduler-level replica/task status, independent of Docker task containers. */
+  | "clusterStatus"
+  /** A service release can be stopped, restored on failure, then retired on success. */
+  | "retainedServiceCutover"
+  /** Mount resolved service config files through the scheduler, without host bind paths. */
+  | "serviceConfigFiles"
   | "stop"
   | "start"
   | "restart"
@@ -141,6 +147,13 @@ export type RuntimeCapability =
    */
   | "releaseCommand"
   /**
+   * Runtime can run a deployment's ROLE processes (a worker, a scheduler) as
+   * separate containers off the same image as the web app: `deployRole`. Docker
+   * implements it; Cloud and Bare do not yet, so a deployment that declares
+   * roles must be refused there.
+   */
+  | "roles"
+  /**
    * Runtime can report a container's RESTART HISTORY and health, not just a
    * point-in-time status — the readings the post-deploy stabilization watch
    * needs to tell "up" from "bouncing" (`sampleStability`). Docker implements
@@ -203,6 +216,9 @@ export interface RuntimeAdapter {
 
   /** Check if a specific feature is supported */
   supports(cap: RuntimeCapability): boolean;
+  status?(containerId: string): Promise<import("@repo/core").ClusterWorkloadStatus>;
+  /** Prepare an artifact's settings/storage before stopping its previous release. */
+  prepareDeployment?(config: DeployConfig): Promise<void>;
 
   /** Clean up any resources held by the runtime (connections, temp files) */
   dispose?(): Promise<void>;
@@ -257,6 +273,24 @@ export interface RuntimeAdapter {
     opts?: ReleaseCommandOptions,
   ): Promise<void>;
 
+  /**
+   * Start ONE replica of a runtime role (a worker or scheduler process) from
+   * the deployment's built image (`config.imageRef`), next to its web process.
+   * `replica` is 1-based and part of the container identity. The role gets the
+   * app's env, mounts and project network, but no port and no network alias.
+   * `opts.beforeStart` runs with the created container's id before its process
+   * starts (e.g. to join connected databases' networks); if it rejects, the
+   * container is removed and the error propagates.
+   * Callers must gate on `supports("roles")`.
+   */
+  deployRole?(
+    config: DeployConfig,
+    role: Pick<StackRole, "name" | "command" | "stopSignal" | "stopGracePeriod">,
+    replica: number,
+    onLog?: LogCallback,
+    opts?: { beforeStart?: (containerId: string) => Promise<void> },
+  ): Promise<{ containerId: string }>;
+
   /** Stop a running container/process (preserves state) */
   stop(containerId: string): Promise<void>;
 
@@ -277,7 +311,7 @@ export interface RuntimeAdapter {
    */
   listProjectContainerIds?(projectId: string): Promise<string[]>;
   /** Remove an empty owned project scope after full project teardown (not one release). */
-  cleanupProject?(projectId: string): Promise<void>;
+  cleanupProject?(projectId: string, options?: { wipeVolumes?: boolean }): Promise<void>;
 
   /**
    * List the containers this runtime owns for `deploymentId`, matched by the
@@ -536,6 +570,8 @@ export interface MultiServiceGroupHandle {
 
 export interface MultiServiceDeployConfig {
   deploymentId: string;
+  /** Exact outgoing service container, before the deployment pipeline removes it. */
+  previousContainerId?: string;
   projectId: string;
   slug: string;
   serviceName: string;
@@ -576,7 +612,8 @@ export interface MultiServiceDeployConfig {
    *  Every entry is a live name on the project network; loopback publish
    *  unchanged. Already normalized (DNS-safe) by the caller. */
   extraAliases?: string[];
-  resources?: { cpuCores?: number; memoryMb?: number };
+  /** Per-service caps; `swapDisabled` is honored by Docker (MemorySwap=Memory). */
+  resources?: { cpuCores?: number; memoryMb?: number; swapDisabled?: boolean };
   publicPort?: number;
   publicSlug?: string;
   customDomain?: string;
@@ -585,11 +622,8 @@ export interface MultiServiceDeployConfig {
   cloudEndpoints?: Array<{ hostname: string; port: number; custom: boolean }>;
   /** Ports needed by project/composite edge routes, without a service hostname. */
   cloudProxyPorts?: number[];
-  /** Cloud only: the workspace id this service used in the PREVIOUS deployment.
-   *  Reused so its permanent-workspace disk — the only persistence Oblien
-   *  offers (no volume primitive) — survives a redeploy. A fresh workspace each
-   *  deploy = silent data loss for stateful services (Postgres, Redis, …). */
-  previousWorkspaceId?: string;
+  /** Container ports needed by the shared route layer, including secondary domains. */
+  routedPorts?: number[];
   /** Service names this service depends on (compose `depends_on`). Used for
    *  readiness ordering on runtimes with no native healthcheck. */
   dependsOn?: string[];
@@ -649,6 +683,7 @@ export interface MultiServiceRuntimeAdapter extends RuntimeAdapter {
    * everything it's given (the Docker runtime).
    */
   readonly unsupportedComposeKeys: ReadonlySet<keyof ComposeAdvanced>;
+  prepareServiceWorkload?(config: MultiServiceDeployConfig): Promise<void>;
 
   /** Prepare shared runtime state for sibling services (network, workspace, mesh, etc.) */
   ensureServiceGroup(config: {
@@ -826,8 +861,15 @@ export interface DockerContainerDetail {
   };
   /** Live cpu/memory caps read off HostConfig, so adopting a container keeps the
    *  limits it was actually running with — including one set by hand with
-   *  `docker update --memory`. Omitted fields mean the container had no cap. */
-  resources?: { cpuCores?: number; memoryMb?: number };
+   *  `docker update --memory`. Omitted fields mean the container had no cap.
+   *  `swapDisabled` is derived from the live HostConfig (`MemorySwap === Memory`). */
+  resources?: { cpuCores?: number; memoryMb?: number; swapDisabled?: boolean };
+  /** Live GPU configuration, including an empty object when no GPU was requested. */
+  gpu?: import("@repo/core").ComposeGpuConfig;
+  /** Inspection still succeeds; adoption refuses a GPU configuration it cannot replay. */
+  gpuImportError?: string;
+  /** Live private /dev/shm size, retained when adopting an existing container. */
+  shmSize?: number;
   composeProject?: string;
   composeService?: string;
   /** com.docker.compose.project.config_files — absolute compose paths on the host. */

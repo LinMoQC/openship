@@ -13,6 +13,7 @@ import { ServiceDetailPanel } from "./ServiceDetailPanel";
 const mocks = vi.hoisted(() => ({
   getEnvironment: vi.fn(),
   mergeEnv: vi.fn(),
+  reviewEnv: vi.fn(),
   restart: vi.fn(),
   post: vi.fn(),
   push: vi.fn(),
@@ -20,6 +21,8 @@ const mocks = vi.hoisted(() => ({
   invalidate: vi.fn(),
   pricing: vi.fn(),
   refresh: vi.fn(),
+  update: vi.fn(),
+  trigger: vi.fn(),
 }));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: mocks.push }) }));
 vi.mock("@/context/ToastContext", () => ({ useToast: () => ({ showToast: mocks.toast }) }));
@@ -40,11 +43,17 @@ vi.mock("@/lib/api/services", async (original) => {
       ...actual.servicesApi,
       getEnvironment: mocks.getEnvironment,
       mergeEnv: mocks.mergeEnv,
+      reviewEnv: mocks.reviewEnv,
       restart: mocks.restart,
+      update: mocks.update,
     },
   };
 });
 vi.mock("@/lib/api/projects", () => ({ projectsApi: { getEnv: async () => ({ data: [] }) } }));
+vi.mock("@/lib/api/deploy", async (original) => {
+  const actual = await original<typeof import("@/lib/api/deploy")>();
+  return { ...actual, deployApi: { ...actual.deployApi, trigger: mocks.trigger } };
+});
 vi.mock("@/lib/api", async (original) => {
   const actual = await original<typeof import("@/lib/api")>();
   return { ...actual, backupsApi: { ...actual.backupsApi, listPolicies: async () => ({ data: [] }) } };
@@ -109,9 +118,12 @@ beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   mocks.getEnvironment.mockResolvedValue(environmentState());
   mocks.mergeEnv.mockResolvedValue({ success: true });
+  mocks.reviewEnv.mockResolvedValue({ revision: "a".repeat(64), changes: [] });
   mocks.restart.mockResolvedValue({ success: true });
   mocks.post.mockResolvedValue(applied);
   mocks.pricing.mockReturnValue(false);
+  mocks.update.mockResolvedValue({ success: true });
+  mocks.trigger.mockResolvedValue({ success: true, data: { deployment: { id: "dep-empty" } } });
   host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);
@@ -230,6 +242,90 @@ describe("service environment apply", () => {
     expect(host.textContent).not.toContain("No environment variables");
     expect(button(copy.saveEnvironment).disabled).toBe(true);
     expect(host.textContent).not.toContain(copy.environmentApply.title);
+    expect(mocks.mergeEnv).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])("reviews inherited edits before saving (shared: %s)", async (shared) => {
+    mocks.getEnvironment.mockResolvedValue(environmentState([
+      { key: "BILLING_ENABLED", value: "false", source: "project", isSecret: false },
+    ], "synced"));
+    mocks.reviewEnv.mockResolvedValue({ revision: "a".repeat(64), changes: [{
+      key: "BILLING_ENABLED", projectKey: "BILLING_ENABLED",
+      services: [{ id: service.id, name: "api", keys: ["BILLING_ENABLED"] }, { id: "worker", name: "Worker", keys: ["BILLING_ENABLED"] }],
+    }] });
+    mocks.mergeEnv.mockResolvedValue({ success: true, ...(shared ? { affectedServices: [{ id: "worker", name: "Worker" }] } : {}) });
+    await render();
+    await editFlag("true");
+    await click(copy.saveEnvironment);
+    expect(mocks.mergeEnv).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain("Worker");
+    expect(document.body.textContent).toContain(copy.environmentState.shared.repositoryHint);
+    await click(shared ? copy.environmentState.shared.updateSelected : copy.environmentState.shared.onlyService);
+    expect(mocks.mergeEnv).toHaveBeenCalledExactlyOnceWith("project-stack", "svc-api", {
+      environment: "production", deletes: [],
+      upserts: [{ key: "BILLING_ENABLED", value: "true", isSecret: false, sourceId: null }],
+      ...(shared ? { shared: { keys: ["BILLING_ENABLED"], revision: "a".repeat(64) } } : {}),
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    if (shared) expect(host.querySelector('a[href="/projects/project-stack/services/worker/env"]')).not.toBeNull();
+    expect(mocks.post).not.toHaveBeenCalled();
+  });
+
+  it("keeps the draft when shared review fails, without silently saving an override", async () => {
+    mocks.getEnvironment.mockResolvedValue(environmentState([
+      { key: "BILLING_ENABLED", value: "false", source: "project", isSecret: false },
+    ], "synced"));
+    mocks.reviewEnv.mockRejectedValue(new Error("Review unavailable"));
+    await render();
+    await editFlag("true");
+    await click(copy.saveEnvironment);
+    expect(mocks.mergeEnv).not.toHaveBeenCalled();
+    expect(mocks.toast).toHaveBeenCalledWith("Review unavailable", "error", "api");
+    expect(button(copy.saveEnvironment).disabled).toBe(false);
+    expect([...host.querySelectorAll("input")].some((input) => input.value === "true")).toBe(true);
+  });
+
+  it("preserves per-variable choices and the draft after a stale shared save", async () => {
+    mocks.getEnvironment.mockResolvedValue(environmentState([
+      { key: "BILLING_ENABLED", value: "false", source: "project", isSecret: false },
+      { key: "FEATURE_ENABLED", value: "false", source: "project", isSecret: false },
+    ], "synced"));
+    mocks.reviewEnv.mockResolvedValue({ revision: "a".repeat(64), changes: ["BILLING_ENABLED", "FEATURE_ENABLED"].map(key => ({
+      key, projectKey: key, services: [{ id: "worker", name: "Worker", keys: [key] }],
+    })) });
+    mocks.mergeEnv.mockRejectedValue(new ApiError(409, "Conflict", {
+      code: "ENVIRONMENT_CHANGED", error: "Shared configuration changed. Review your changes again before saving.",
+    }));
+    await render();
+    await editFlag("true");
+    await editFlag("true");
+    await click(copy.saveEnvironment);
+    await click("FEATURE_ENABLED");
+    expect(button("FEATURE_ENABLED").getAttribute("aria-checked")).toBe("false");
+    await click(copy.environmentState.shared.updateSelected);
+    expect(mocks.mergeEnv).toHaveBeenCalledExactlyOnceWith("project-stack", "svc-api", {
+      environment: "production", deletes: [],
+      upserts: ["BILLING_ENABLED", "FEATURE_ENABLED"].map(key => ({ key, value: "true", isSecret: false, sourceId: null })),
+      shared: { keys: ["BILLING_ENABLED"], revision: "a".repeat(64) },
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect([...host.querySelectorAll("input")].filter(input => input.value === "true")).toHaveLength(2);
+    expect(button(copy.saveEnvironment).disabled).toBe(false);
+    expect(mocks.post).not.toHaveBeenCalled();
+  });
+
+  it("discards a shared review that finishes after switching services", async () => {
+    mocks.getEnvironment.mockResolvedValue(environmentState([
+      { key: "BILLING_ENABLED", value: "false", source: "project", isSecret: false },
+    ], "synced"));
+    let finish!: (value: unknown) => void;
+    mocks.reviewEnv.mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+    await render();
+    await editFlag("true");
+    await click(copy.saveEnvironment);
+    await render("env", { service: { ...service, id: "other", name: "Other" } });
+    await act(async () => finish({ revision: "a".repeat(64), changes: [{ key: "BILLING_ENABLED", projectKey: "BILLING_ENABLED", services: [] }] }));
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
     expect(mocks.mergeEnv).not.toHaveBeenCalled();
   });
 
@@ -399,6 +495,124 @@ describe("service environment apply", () => {
     expect(mocks.restart).not.toHaveBeenCalled();
   });
 
+  it("does not redisplay the old revealed value after saving a secret", async () => {
+    await render();
+    mocks.post.mockResolvedValueOnce({
+      success: true,
+      environment: { TOKEN: "old-token" },
+    });
+    await click(baseDictionary.projectSettings.envVars.showValue);
+    const input = host.querySelector(
+      'input[value="old-token"]',
+    ) as HTMLInputElement;
+    expect(input.type).toBe("text");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )!.set!.call(input, "new-token");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    expect(input.value).toBe("new-token");
+    await click(copy.saveEnvironment);
+    expect(mocks.mergeEnv).toHaveBeenCalledWith("project-stack", "svc-api", {
+      environment: "production",
+      upserts: [
+        {
+          key: "TOKEN",
+          value: "new-token",
+          isSecret: true,
+          sourceId: "saved-secret",
+        },
+      ],
+      deletes: [],
+    });
+    expect(
+      [...host.querySelectorAll("input")].map((item) => item.value),
+    ).not.toContain("old-token");
+    mocks.post.mockResolvedValueOnce({
+      success: true,
+      environment: { TOKEN: "new-token" },
+    });
+    await click(baseDictionary.projectSettings.envVars.showValue);
+    expect(host.querySelector('input[value="new-token"]')).not.toBeNull();
+    expect(mocks.post).toHaveBeenCalledTimes(2);
+    expect(button(copy.saveEnvironment).disabled).toBe(true);
+  });
+
+  it("ignores a reveal started before a value was edited and saved", async () => {
+    await render();
+    let finishReveal!: (value: unknown) => void;
+    mocks.post.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishReveal = resolve;
+      }),
+    );
+    await click(baseDictionary.projectSettings.envVars.showValue);
+    const input = host.querySelector(
+      'input[value="••••••••"]',
+    ) as HTMLInputElement;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )!.set!.call(input, "new-token");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await click(copy.saveEnvironment);
+    let finishCurrentReveal!: (value: unknown) => void;
+    mocks.post.mockReturnValueOnce(
+      new Promise((resolve) => {
+        finishCurrentReveal = resolve;
+      }),
+    );
+    await click(baseDictionary.projectSettings.envVars.showValue);
+    await act(async () =>
+      finishReveal({ success: true, environment: { TOKEN: "old-token" } }),
+    );
+    expect(
+      [...host.querySelectorAll("input")].map((item) => item.value),
+    ).not.toContain("old-token");
+    expect(
+      button(baseDictionary.projectSettings.envVars.showValue).disabled,
+    ).toBe(true);
+    await act(async () =>
+      finishCurrentReveal({ success: true, environment: { TOKEN: "new-token" } }),
+    );
+    expect(host.querySelector('input[value="new-token"]')).not.toBeNull();
+    expect(button(copy.saveEnvironment).disabled).toBe(true);
+    expect(mocks.toast).not.toHaveBeenCalledWith(
+      expect.anything(),
+      "error",
+      expect.anything(),
+    );
+  });
+
+  it("keeps an untouched secret revealed when another variable is edited", async () => {
+    await render();
+    mocks.post.mockResolvedValueOnce({
+      success: true,
+      environment: { TOKEN: "saved-token" },
+    });
+    await click(baseDictionary.projectSettings.envVars.showValue);
+    await editFlag("true");
+    expect(host.querySelector('input[value="saved-token"]')).not.toBeNull();
+    mocks.getEnvironment.mockResolvedValue(
+      environmentState([{ ...savedEnv[0]!, value: "true" }, savedEnv[1]!]),
+    );
+    await click(copy.saveEnvironment);
+    expect(host.querySelector('input[value="saved-token"]')).not.toBeNull();
+    expect(mocks.post).toHaveBeenCalledOnce();
+    expect(mocks.mergeEnv.mock.calls[0]![2].upserts).toEqual([
+      {
+        sourceId: "billing-flag",
+        key: "BILLING_ENABLED",
+        value: "true",
+        isSecret: false,
+      },
+    ]);
+  });
+
   it("opens the Environment panel after a refused restart and waits for Apply", async () => {
     mocks.restart.mockRejectedValue(stale());
     await render("settings");
@@ -513,5 +727,44 @@ describe("service environment apply", () => {
     expect(button(copy.environmentApply.title).title).toBe(copy.environmentApply.hint);
     await click(copy.environmentApply.title);
     expectServiceApply();
+  });
+});
+
+
+describe("empty storage through the service deployment flow", () => {
+  async function prepare() {
+    await render("volumes", { service: { ...service, volumes: ["original:/data", "shared:/shared:ro"] }, deployTarget: "cloud" });
+    await click(copy.storage.emptyVolume.menu);
+    await click(copy.storage.emptyVolume.title);
+    const input = document.querySelector<HTMLInputElement>("[data-modal-layer] input")!;
+    expect(input).not.toBeNull();
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, "api");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  }
+  it("saves a fresh named volume before deploying only this service", async () => {
+    await prepare(); await click(copy.storage.emptyVolume.action);
+    expect(mocks.update).toHaveBeenCalledExactlyOnceWith("project-stack", "svc-api", {
+      volumes: [expect.stringMatching(/^openship-fresh-[a-f0-9-]+:\/data$/), "shared:/shared:ro"],
+    });
+    expect(mocks.trigger).toHaveBeenCalledExactlyOnceWith({ projectId: "project-stack", serviceIds: ["svc-api"] });
+    expect(mocks.update.mock.invocationCallOrder[0]).toBeLessThan(mocks.trigger.mock.invocationCallOrder[0]!);
+    expect(mocks.push).toHaveBeenCalledWith("/build/dep-empty");
+  });
+  it("does not deploy if saving the new mount fails", async () => {
+    mocks.update.mockRejectedValueOnce(new Error("Save rejected"));
+    await prepare(); await click(copy.storage.emptyVolume.action);
+    expect(mocks.trigger).not.toHaveBeenCalled();
+    expect(document.body.textContent).toContain("Save rejected");
+  });
+  it("retries a refused deployment without replacing the volume configuration again", async () => {
+    mocks.trigger.mockRejectedValueOnce(new Error("Build already in progress"));
+    await prepare(); await click(copy.storage.emptyVolume.action);
+    expect(document.body.textContent).toContain(copy.storage.emptyVolume.retryHint);
+    await click(copy.storage.emptyVolume.retry);
+    expect(mocks.update).toHaveBeenCalledOnce();
+    expect(mocks.trigger).toHaveBeenCalledTimes(2);
+    expect(mocks.push).toHaveBeenCalledWith("/build/dep-empty");
   });
 });

@@ -2,14 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ClusterStorageAdapter, longhornBase, managedStorageClass } from "./storage";
 import { StorageProbe } from "./storage-probe";
 import { downloadClusterAddon } from "./database-addons";
-import { runClusterJob } from "./job";
 import { KubernetesApiError, type KubernetesApi, type KubernetesObject } from "./kubernetes-api";
 
 vi.mock("./database-addons", async (original) => ({
   ...(await original<typeof import("./database-addons")>()),
   downloadClusterAddon: vi.fn(async () => []),
 }));
-vi.mock("./job", () => ({ runClusterJob: vi.fn(async () => ({})) }));
 beforeEach(() => {
   vi.clearAllMocks();
   vi.spyOn(StorageProbe.prototype, "cleanup").mockResolvedValue(undefined);
@@ -83,88 +81,113 @@ function setup() {
 }
 
 describe("shared-storage cleanup boundaries", () => {
-  it("does not start an uninstaller when confirmation is missing or was not saved", async () => {
-    for (const missing of [false, true]) {
+  it.each(["missing", "false", "create-race", "cache-race"])(
+    "confirms empty storage removal when Longhorn's setting is %s",
+    async (initial) => {
       const { adapter, request, objects } = setup();
-      const confirmation = `${longhornBase}/settings/deleting-confirmation-flag`;
+      const settings = `${longhornBase}/settings`;
+      const confirmation = `${settings}/deleting-confirmation-flag`;
+      const setting = {
+        apiVersion: "longhorn.io/v1beta2",
+        kind: "Setting",
+        metadata: {
+          name: "deleting-confirmation-flag",
+          namespace: "longhorn-system",
+          uid: "setting",
+          resourceVersion: "1",
+        },
+        value: "false",
+      };
       objects.set("/api/v1/namespaces/longhorn-system", {
-        metadata: { uid: "namespace", labels: { "openship.io/runtime": "runtime" } },
+        kind: "Namespace",
+        metadata: {
+          name: "longhorn-system",
+          uid: "namespace",
+          labels: { "openship.io/runtime": "runtime" },
+        },
       });
       objects.set(`${longhornBase}/volumes`, { metadata: {}, items: [] });
-      if (!missing)
-        objects.set(confirmation, {
-          metadata: { uid: "confirmation", resourceVersion: "1" },
-          value: "false",
-        });
-      const actual = request.getMockImplementation()!;
-      request.mockImplementation(async (method, path, body) =>
-        method === "PATCH" && path === confirmation
-          ? { ...objects.get(path)!, value: "true" }
-          : actual(method, path, body),
-      );
-      vi.mocked(runClusterJob).mockClear();
-      await expect(adapter.remove(async () => {})).rejects.toThrow(
-        missing ? /unavailable/ : /not saved/,
-      );
-      expect(runClusterJob).not.toHaveBeenCalled();
-      expect(request.mock.calls.every(([method]) => method !== "DELETE")).toBe(true);
-    }
-  });
-  it("verifies the uninstall setting and retains the native bounded retry without forcing volumes", async () => {
-    const { adapter, request, objects } = setup();
-    const namespace = "/api/v1/namespaces/longhorn-system";
-    const confirmation = `${longhornBase}/settings/deleting-confirmation-flag`;
-    objects.set(namespace, {
-      metadata: { uid: "namespace", labels: { "openship.io/runtime": "runtime" } },
-    });
-    objects.set(`${longhornBase}/volumes`, { metadata: {}, items: [] });
-    objects.set(confirmation, {
-      metadata: { uid: "confirmation", resourceVersion: "1" },
-      value: "false",
-    });
-    const actual = request.getMockImplementation()!;
-    request.mockImplementation(async (method, path, body) => {
-      if (method === "PATCH" && path === confirmation) {
-        const saved = { ...objects.get(path)!, ...body };
-        objects.set(path, saved);
-        return saved;
-      }
-      return actual(method, path, body);
-    });
-    vi.mocked(downloadClusterAddon).mockImplementation(async (name) =>
-      name === "longhorn-uninstall"
-        ? [
-            {
-              apiVersion: "batch/v1",
-              kind: "Job",
-              metadata: { name: "uninstall", namespace: "longhorn-system" },
-              spec: {
-                backoffLimit: 1,
-                template: {
-                  spec: { containers: [{ command: ["longhorn-manager", "uninstall", "--force"] }] },
-                },
+      if (initial === "false") objects.set(confirmation, structuredClone(setting));
+      vi.mocked(downloadClusterAddon).mockImplementation(async (name) =>
+        name === "longhorn-uninstall"
+          ? [
+              {
+                apiVersion: "batch/v1",
+                kind: "Job",
+                metadata: { name: "longhorn-uninstall", namespace: "longhorn-system" },
+                spec: { backoffLimit: 1, template: { spec: {} } },
               },
-            },
-          ]
-        : [],
-    );
-    await adapter.remove(async () => {});
-    expect(objects.get(confirmation)?.value).toBe("true");
-    const definition = vi.mocked(runClusterJob).mock.calls[0]![1];
-    expect(definition.spec.backoffLimit).toBe(1);
-    expect(definition.spec.template.spec.containers[0].command).toEqual([
-      "longhorn-manager",
-      "uninstall",
-    ]);
-    const call = request.mock.calls.findIndex(
-      ([method, path]) => method === "PATCH" && path === confirmation,
-    );
-    expect(
-      request.mock.calls
-        .slice(call + 1)
-        .some(([method, path]) => method === "GET" && path === confirmation),
-    ).toBe(true);
-  });
+            ]
+          : [],
+      );
+      const actual = request.getMockImplementation()!;
+      let jobReads = 0;
+      request.mockImplementation(async (method, path, body) => {
+        if (
+          initial === "cache-race" &&
+          method === "GET" &&
+          path.endsWith("/jobs/longhorn-uninstall")
+        ) {
+          const job = objects.get(path);
+          if (job?.status?.active && ++jobReads > 1) {
+            job.status = {
+              failed: 1,
+              succeeded: 1,
+              conditions: [{ type: "Complete", status: "True" }],
+            };
+          }
+          if (job) return job;
+        }
+        if (method === "POST" && path === settings) {
+          if (initial === "create-race") {
+            objects.set(confirmation, structuredClone(setting));
+            throw new KubernetesApiError(
+              409,
+              "The manager created the default setting concurrently",
+            );
+          }
+          const created = { ...structuredClone(body), metadata: setting.metadata };
+          objects.set(confirmation, created);
+          return created;
+        }
+        if (method === "PATCH" && path === confirmation) {
+          expect(body.metadata).toMatchObject({ uid: "setting", resourceVersion: "1" });
+          const updated = { ...objects.get(path), ...body };
+          objects.set(path, updated);
+          return updated;
+        }
+        if (method === "POST" && path.endsWith("/jobs")) {
+          // The native uninstaller reads false when the setting is absent.
+          expect(objects.get(confirmation)?.value, "Longhorn deletion confirmation").toBe("true");
+          const job = {
+            ...body,
+            metadata: { ...body.metadata, uid: "uninstall-job" },
+            status:
+              initial === "cache-race"
+                ? body.spec.backoffLimit > 0
+                  ? { failed: 1, active: 1 }
+                  : {
+                      failed: 1,
+                      conditions: [
+                        { type: "Failed", status: "True", reason: "BackoffLimitExceeded" },
+                      ],
+                    }
+                : { conditions: [{ type: "Complete", status: "True" }] },
+          };
+          objects.set(`${path}/${body.metadata.name}`, job);
+          return job;
+        }
+        if (method === "GET" && path.includes("/pods?")) return { items: [] };
+        return actual(method, path, body);
+      });
+      await adapter.remove(async () => {});
+      expect(
+        request.mock.calls.some(([method, path]) => method === "POST" && path.endsWith("/jobs")),
+      ).toBe(true);
+      expect(objects.has("/api/v1/namespaces/longhorn-system")).toBe(false);
+      if (initial === "cache-race") expect(jobReads).toBeGreaterThan(1);
+    },
+  );
   it("finishes interrupted cleanup while preserving local database and custom storage classes", async () => {
     const { adapter, request, objects } = setup();
     await adapter.remove(async () => {});

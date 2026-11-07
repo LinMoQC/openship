@@ -36,6 +36,7 @@
   <a href="docs/i18n/README.de.md"><img src="https://img.shields.io/badge/lang-Deutsch-555" alt="Deutsch" /></a>
   <a href="docs/i18n/README.tr.md"><img src="https://img.shields.io/badge/lang-Türkçe-555" alt="Türkçe" /></a>
   <a href="docs/i18n/README.ko.md"><img src="https://img.shields.io/badge/lang-한국어-555" alt="한국어" /></a>
+  <a href="docs/i18n/README.ru.md"><img src="https://img.shields.io/badge/lang-Русский-555" alt="Русский" /></a>
 </p>
 
 <p align="center">
@@ -183,11 +184,12 @@ Databases, domains, SSL, CDN, mail, and backups are managed from the same place.
 
 ## Interfaces
 
-Three ways to drive the same backend:
+Choose how to work with OpenShip:
 
 - **Desktop app** — full GUI, real-time logs, one-click everything. Best for solo.
 - **Web dashboard** — the same UI in the browser, built for teams.
 - **CLI** — scriptable and CI-friendly; also how you install and manage a self-hosted instance.
+- **Ship SDK** — deploy and manage resources from JavaScript or TypeScript. Connect to an existing instance with `OpenshipClient`, or embed the engine with `createShip`. Install with `npm install openship` (0.8.0+, Node.js 22+) and follow the [SDK guide](https://openship.io/docs/api/sdk).
 
 An **MCP** endpoint (for AI agents) and a **REST API** round it out for automation. Only routes that opt in are exposed as MCP tools, every call re-checks your permissions, and credential/token routes can never become tools. Full reference at [openship.io/docs](https://openship.io/docs).
 

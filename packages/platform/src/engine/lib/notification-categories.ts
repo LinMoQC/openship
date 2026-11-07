@@ -26,10 +26,13 @@
  * than a category that quietly belongs to no tab.
  */
 export const CATEGORY_GROUPS = [
+  { id: "security", label: "Security" },
   { id: "deployment", label: "Deployment" },
   { id: "app_health", label: "App health" },
   { id: "backups", label: "Backups" },
   { id: "jobs", label: "Jobs" },
+  { id: "assistant", label: "Assistant" },
+  { id: "actions", label: "Actions" },
   { id: "domains", label: "Domains & SSL" },
   { id: "members", label: "Members" },
   // Self-hosted-only, and dropped from `listCategories` under CLOUD_MODE — the mirror
@@ -57,9 +60,22 @@ export interface NotificationCategory {
   description: string;
   /** Default enabled state when a brand-new user joins an org. */
   defaultEnabled: boolean;
+  /** New channels inherit defaults independently; explicit per-channel opt-outs win. */
+  defaultPerChannel?: boolean;
+  defaultChannelKinds?: string[];
 }
 
 export const CATEGORIES: readonly NotificationCategory[] = [
+  { id: "assistant.automation", group: "assistant", label: "Assistant automations", description: "Investigation results, action approvals, and verified recovery from your enabled assistant automations.", defaultEnabled: false },
+  {
+    id: "security.advisory",
+    group: "security",
+    label: "Security advisory",
+    description: "A published security advisory affects Openship, a deployed service or a customer-operated server. Includes the cause and the available update.",
+    defaultEnabled: true,
+    defaultPerChannel: true,
+    defaultChannelKinds: ["email", "webhook", "in_app", "slack", "discord", "msteams", "telegram"],
+  },
   {
     id: "deploy.failed",
     group: "deployment",
@@ -176,11 +192,33 @@ export const CATEGORIES: readonly NotificationCategory[] = [
   },
 
   {
+    id: "action.run.failed",
+    group: "actions",
+    label: "Workflow failed",
+    description: "An Actions workflow failed or timed out. Open the run to review its checks and logs.",
+    defaultEnabled: false,
+  },
+  {
+    id: "action.run.succeeded",
+    group: "actions",
+    label: "Workflow succeeded",
+    description: "An Actions workflow completed successfully.",
+    defaultEnabled: false,
+  },
+  {
+    id: "action.run.cancelled",
+    group: "actions",
+    label: "Workflow cancelled",
+    description: "An Actions workflow was cancelled.",
+    defaultEnabled: false,
+  },
+
+  {
     id: "domain.expiring",
     group: "domains",
     label: "SSL cert expiring",
     description:
-      "Daily check — fires when any of your custom domain certs has under 7 days left and the renewer can't reach the host.",
+      "Daily check — fires when any custom domain certificate renewal fails and has under 14 days left.",
     defaultEnabled: true,
   },
   {
@@ -268,6 +306,9 @@ export const CATEGORIES: readonly NotificationCategory[] = [
  * cares about).
  */
 const EVENT_TYPE_TO_CATEGORY: Record<string, string> = {
+  "assistant.automation": "assistant.automation",
+  "security.advisory": "security.advisory",
+  "security.refresh_failed": "security.advisory",
   // Deploy
   "deployment.failed": "deploy.failed",
   "deployment.succeeded": "deploy.succeeded",
@@ -302,6 +343,9 @@ const EVENT_TYPE_TO_CATEGORY: Record<string, string> = {
   "job_run.failed": "job.run.failed",
   "job_run.succeeded": "job.run.succeeded",
   "job_run.started": "job.run.started",
+  "action_run.failed": "action.run.failed",
+  "action_run.succeeded": "action.run.succeeded",
+  "action_run.cancelled": "action.run.cancelled",
 
   // Domains / SSL
   "domain.expiring": "domain.expiring",
@@ -347,6 +391,8 @@ export function categoryForEventType(eventType: string): string | undefined {
  * two-direction categories: anything else belongs in `CATEGORIES` as its own row.
  */
 export const EVENT_HEADLINES: Record<string, { title: string; description: string }> = {
+  "billing.credit_low": { title: "Cloud credits running low", description: "Review your remaining allowance before Cloud workloads are interrupted." },
+  "billing.credit_exhausted": { title: "Cloud credits exhausted", description: "Open billing to add credits or review your plan." },
   "server.reachable": {
     title: "Server reachable",
     description: "A server's Docker daemon is answering again, with how long it was gone.",

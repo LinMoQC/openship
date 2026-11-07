@@ -1,6 +1,10 @@
 {
   "title": "mail",
   "pages": [
-    "index"
+    "index",
+    "alias",
+    "domain",
+    "inbound",
+    "mailbox"
   ]
 }

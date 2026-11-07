@@ -29,6 +29,7 @@
  * Same shape as backups — dashboard refresh-safe.
  */
 
+import { reportCaughtError as observeCaughtError, diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import { findActiveDeployment } from "@repo/platform/engine/lib/active-deployment";
 import crypto from "node:crypto";
 import { Writable, pipeline as streamPipeline } from "node:stream";
@@ -54,6 +55,7 @@ import {
 import { staticReleaseDir, usableRef } from "../deployments/rollback/restore-plan";
 import { serviceHandleFor, withContainerEnv } from "./service-handle";
 import { resolveSourceExecutor } from "./source-platform";
+import { resolveProjectBackupSource } from "./project-source";
 import {
   disposeRuntime,
   resolveDeploymentPlatform,
@@ -77,6 +79,7 @@ import { boundedStorableText } from "../deployments/build-log-sanitize";
 import { deferBackgroundWork } from "../../lib/background-work";
 import { assertNativeJobs } from "../../native/execution-policy";
 import { withBackupRunLock } from "./backup-lock";
+import { withProjectRuntimeLock } from "../../lib/project-runtime-lock";
 
 const TRUNCATE_ERROR = 4096;
 
@@ -222,7 +225,8 @@ function discardingSink(): Writable {
 function digestIfComplete(hasher: HashingPassthrough): string | null {
   try {
     return hasher.summary().sha256;
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "platform/engine/modules/backups/restore.orchestrator");
     return null;
   }
 }
@@ -325,8 +329,8 @@ export class RestoreOrchestrator {
     });
 
     void deferBackgroundWork(() => this.runPrepare(restoreId)).catch((err) =>
-        console.error(
-          `[restore-orchestrator] prepare ${restoreId} crashed: ${safeErrorMessage(err)}`,
+        errorDiagnostics.error("platform/engine/modules/backups/restore.orchestrator",
+          `[restore-orchestrator] prepare ${restoreId} crashed: ${safeErrorMessage(err)}`, err,
         ),
     );
 
@@ -343,7 +347,8 @@ export class RestoreOrchestrator {
     const restore = await repos.backupRestore.findById(restoreId);
     try {
       assertResourceInOrg(restore, "Restore", ctx.organizationId, restoreId);
-    } catch {
+    } catch (diagnosticFailure) {
+      observeCaughtError(diagnosticFailure, "platform/engine/modules/backups/restore.orchestrator");
       throw new Error("Restore not found");
     }
     // Forensic stamp: still ensure the actor opening the destructive
@@ -404,7 +409,7 @@ export class RestoreOrchestrator {
       );
     }
     if (claim !== "claimed") {
-      const current = await repos.backupRestore.findById(restoreId).catch(() => undefined);
+      const current = await repos.backupRestore.findById(restoreId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/backups/restore.orchestrator"); return undefined; });
       throw new Error(
         `Restore is in status=${current?.status ?? "unknown"} or cancellation was requested; ` +
           "it can no longer be applied",
@@ -413,8 +418,8 @@ export class RestoreOrchestrator {
     this.publishTransitionEvent(restoreId, "applying");
 
     void deferBackgroundWork(() => this.runApply(restoreId)).catch((err) =>
-        console.error(
-          `[restore-orchestrator] apply ${restoreId} crashed: ${safeErrorMessage(err)}`,
+        errorDiagnostics.error("platform/engine/modules/backups/restore.orchestrator",
+          `[restore-orchestrator] apply ${restoreId} crashed: ${safeErrorMessage(err)}`, err,
         ),
     );
   }
@@ -449,7 +454,8 @@ export class RestoreOrchestrator {
     const restore = await repos.backupRestore.findById(restoreId);
     try {
       assertResourceInOrg(restore, "Restore", ctx.organizationId, restoreId);
-    } catch {
+    } catch (diagnosticFailure) {
+      observeCaughtError(diagnosticFailure, "platform/engine/modules/backups/restore.orchestrator");
       throw new Error("Restore not found");
     }
     void ctx.userId;
@@ -529,7 +535,7 @@ export class RestoreOrchestrator {
     restoreId: string,
     patch: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
-    const row = await repos.backupRestore.findById(restoreId).catch(() => undefined);
+    const row = await repos.backupRestore.findById(restoreId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/backups/restore.orchestrator"); return undefined; });
     return { ...(row ? this.metaOf(row) : {}), ...patch };
   }
 
@@ -544,7 +550,8 @@ export class RestoreOrchestrator {
         destructive,
         cancelRequested: true,
       });
-    } catch {
+    } catch (diagnosticFailure) {
+      observeCaughtError(diagnosticFailure, "platform/engine/modules/backups/restore.orchestrator");
       // bus failures never block the FSM
     }
   }
@@ -620,7 +627,7 @@ export class RestoreOrchestrator {
         return;
       }
       const message = safeErrorMessage(err);
-      console.error(`[restore-orchestrator] prepare ${restoreId} failed: ${message}`);
+      errorDiagnostics.error("platform/engine/modules/backups/restore.orchestrator", `[restore-orchestrator] prepare ${restoreId} failed: ${message}`, err);
       await this.transition(restoreId, "failed", {
         errorMessage: boundedStorableText(message, TRUNCATE_ERROR),
       });
@@ -666,6 +673,7 @@ export class RestoreOrchestrator {
       try {
         sources = await executor.listSources(serviceHandle);
       } catch (err) {
+        observeCaughtError(err, "platform/engine/modules/backups/restore.orchestrator");
         probeError = safeErrorMessage(err);
       }
       const restorable = sources.filter((s) => s.type !== "tmpfs");
@@ -771,13 +779,13 @@ export class RestoreOrchestrator {
    */
   private async shouldClearTarget(run: BackupRun, kind: PayloadKind): Promise<boolean> {
     if (!run.policyId) return clearsTarget(kind, null);
-    const policy = await repos.backupPolicy.findById(run.policyId).catch(() => undefined);
+    const policy = await repos.backupPolicy.findById(run.policyId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/backups/restore.orchestrator"); return undefined; });
     return clearsTarget(kind, (policy?.payloadConfig ?? null) as Record<string, unknown> | null);
   }
 
   private async shouldVerifyOnPrepare(run: BackupRun): Promise<boolean> {
     if (!run.policyId) return true;
-    const policy = await repos.backupPolicy.findById(run.policyId).catch(() => undefined);
+    const policy = await repos.backupPolicy.findById(run.policyId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/backups/restore.orchestrator"); return undefined; });
     const configured = (policy?.payloadConfig as Record<string, unknown> | null | undefined)
       ?.verifyOnPrepare;
     return configured === false ? false : true;
@@ -809,9 +817,9 @@ export class RestoreOrchestrator {
       for await (const chunk of stream) chunks.push(Buffer.from(chunk as Buffer));
       parsed = JSON.parse(Buffer.concat(chunks).toString("utf8"));
     } catch (err) {
-      console.warn(
+      errorDiagnostics.warn("platform/engine/modules/backups/restore.orchestrator",
         `[restore-orchestrator] no readable manifest at ${run.manifestKey} ` +
-          `(${safeErrorMessage(err)}) — verifying against the recorded artifact list`,
+          `(${safeErrorMessage(err)}) — verifying against the recorded artifact list`, err,
       );
       return { manifest: "missing" };
     }
@@ -930,7 +938,7 @@ export class RestoreOrchestrator {
         `${sizeOnly.length} artifact(s) in this backup have no recorded sha256, so only their ` +
         `byte size could be checked: ${sizeOnly.join(", ")}. Re-run the backup to capture ` +
         `verifiable artifacts.`;
-      console.warn(`[restore-orchestrator] ${restoreId}: ${warning}`);
+      errorDiagnostics.warn("platform/engine/modules/backups/restore.orchestrator", `[restore-orchestrator] ${restoreId}: ${warning}`);
       this.publishWarning(restoreId, warning);
     }
     if (!verify) {
@@ -938,7 +946,7 @@ export class RestoreOrchestrator {
         "Prepare-time verification is disabled on this backup policy " +
         "(payloadConfig.verifyOnPrepare = false) — artifact digests are only checked while " +
         "apply streams them, which is after the target has been cleared.";
-      console.warn(`[restore-orchestrator] ${restoreId}: ${warning}`);
+      errorDiagnostics.warn("platform/engine/modules/backups/restore.orchestrator", `[restore-orchestrator] ${restoreId}: ${warning}`);
       this.publishWarning(restoreId, warning);
     }
 
@@ -958,12 +966,20 @@ export class RestoreOrchestrator {
   private publishWarning(restoreId: string, message: string): void {
     try {
       restoreRunBus.publish(restoreId, { type: "warning", message });
-    } catch {
+    } catch (diagnosticFailure) {
+      observeCaughtError(diagnosticFailure, "platform/engine/modules/backups/restore.orchestrator");
       // bus failures never block the FSM
     }
   }
 
   private async runApply(restoreId: string): Promise<void> {
+    const restore = await repos.backupRestore.findById(restoreId);
+    const target = restore?.forkServiceId ? await repos.service.findById(restore.forkServiceId) : null;
+    const projectId = target?.projectId ?? restore?.projectId;
+    return projectId ? withProjectRuntimeLock(projectId, () => this.runApplyLocked(restoreId)) : this.runApplyLocked(restoreId);
+  }
+
+  private async runApplyLocked(restoreId: string): Promise<void> {
     // The durable applying transition was claimed synchronously by apply(). The
     // local handle is registered before this worker re-reads the row or touches
     // the target; a cancel that landed before registration is still carried by
@@ -1060,7 +1076,9 @@ export class RestoreOrchestrator {
             .then(() => {
               serviceDown = false;
             })
-            .catch(() => {});
+            .catch((diagnosticFailure) => {
+              observeCaughtError(diagnosticFailure, "platform/engine/modules/backups/restore.orchestrator");
+            });
         }
       });
 
@@ -1131,7 +1149,9 @@ export class RestoreOrchestrator {
                   download = pipelineP(body, hasher);
                   // The producer observes the error through hasher; attach a handler
                   // immediately because it may fail before open() returns.
-                  void download.catch(() => {});
+                  void download.catch((diagnosticFailure) => {
+                    observeCaughtError(diagnosticFailure, "platform/engine/modules/backups/restore.orchestrator");
+                  });
                   await this.markDestructive(restoreId, targetLabel);
                   wroteInto = targetLabel;
                   // Mark before handing bytes to the producer: a volume helper
@@ -1159,7 +1179,9 @@ export class RestoreOrchestrator {
             // A producer can reject before consuming its input. Release the
             // download before reporting completion or releasing the runtime.
             hasher.destroy();
-            await download?.catch(() => {});
+            await download?.catch((diagnosticFailure) => {
+              observeCaughtError(diagnosticFailure, "platform/engine/modules/backups/restore.orchestrator");
+            });
           }
           // Null when the producer didn't drain the stream (a pg_restore that
           // stops early, say) — unverifiable, not a mismatch.
@@ -1206,6 +1228,7 @@ export class RestoreOrchestrator {
             await executor.startService(serviceHandle);
             serviceDown = false;
           } catch (bounceErr) {
+            observeCaughtError(bounceErr, "platform/engine/modules/backups/restore.orchestrator");
             throw new PartialWriteError(
               `The artifact was written, but restarting ${serviceHandle.name} to load it ` +
                 `failed: ${safeErrorMessage(bounceErr)}. The service holds the restored file ` +
@@ -1227,7 +1250,7 @@ export class RestoreOrchestrator {
           }),
         });
         if (lateCancel) {
-          console.warn(
+          errorDiagnostics.warn("platform/engine/modules/backups/restore.orchestrator",
             `[restore-orchestrator] apply ${restoreId} ignored a cancel that arrived after ` +
               `the last write — completing was safer than stopping`,
           );
@@ -1249,11 +1272,11 @@ export class RestoreOrchestrator {
         // that was corrupt in transit, a bounce that did not complete).
         const partial = unfinishedTarget !== null || innerErr instanceof PartialWriteError;
         if (partial) {
-          console.error(
+          errorDiagnostics.error("platform/engine/modules/backups/restore.orchestrator",
             `[restore-orchestrator] apply ${restoreId} left partial data — ` +
               (serviceDown
                 ? "leaving the service stopped"
-                : "the service restores through its own container and is still running"),
+                : "the service restores through its own container and is still running"), innerErr,
           );
         } else if (stoppedByUs) {
           // Only what WE stopped: a service that was already down when the restore
@@ -1261,7 +1284,8 @@ export class RestoreOrchestrator {
           try {
             await executor.startService(serviceHandle);
             serviceDown = false;
-          } catch {
+          } catch (diagnosticFailure) {
+            observeCaughtError(diagnosticFailure, "platform/engine/modules/backups/restore.orchestrator");
             // best-effort: the row then reports the service as down, which is true.
           }
         }
@@ -1316,7 +1340,7 @@ export class RestoreOrchestrator {
         return;
       }
       const message = safeErrorMessage(err);
-      console.error(`[restore-orchestrator] apply ${restoreId} failed: ${message}`);
+      errorDiagnostics.error("platform/engine/modules/backups/restore.orchestrator", `[restore-orchestrator] apply ${restoreId} failed: ${message}`, err);
       await this.transition(restoreId, "failed", {
         errorMessage: boundedStorableText(message, TRUNCATE_ERROR),
         // Unconditional, unlike before: the flags are computed from what happened, so
@@ -1337,7 +1361,7 @@ export class RestoreOrchestrator {
   /** The durable half of the signal, re-read at every checkpoint so a cancel
    *  taken by another node is honored here. */
   private async cancelRequested(restoreId: string): Promise<boolean> {
-    const row = await repos.backupRestore.findById(restoreId).catch(() => undefined);
+    const row = await repos.backupRestore.findById(restoreId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/backups/restore.orchestrator"); return undefined; });
     return row?.cancelRequested === true;
   }
 
@@ -1371,7 +1395,8 @@ export class RestoreOrchestrator {
   private async markDestructive(restoreId: string, source: string): Promise<void> {
     try {
       restoreRunBus.publish(restoreId, { type: "destructive", destructive: true, source });
-    } catch {
+    } catch (diagnosticFailure) {
+      observeCaughtError(diagnosticFailure, "platform/engine/modules/backups/restore.orchestrator");
       // bus failures never block the FSM
     }
     try {
@@ -1383,7 +1408,8 @@ export class RestoreOrchestrator {
           destructiveSource: source,
         }),
       });
-    } catch {
+    } catch (diagnosticFailure) {
+      observeCaughtError(diagnosticFailure, "platform/engine/modules/backups/restore.orchestrator");
       // A meta write that fails must not abort a restore that is fine; the
       // in-memory path still holds the label for the terminal transition.
     }
@@ -1425,7 +1451,7 @@ export class RestoreOrchestrator {
       try {
         const row = await repos.backupRestore.findById(restoreId);
         if (row) {
-          const project = await repos.project.findById(row.projectId).catch(() => null);
+          const project = await repos.project.findById(row.projectId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/backups/restore.orchestrator"); return null; });
           notification.emit({
             organizationId: row.organizationId,
             eventType:
@@ -1441,8 +1467,8 @@ export class RestoreOrchestrator {
           });
         }
       } catch (err) {
-        console.error(
-          `[restore-orchestrator] notify failed for ${restoreId}: ${safeErrorMessage(err)}`,
+        errorDiagnostics.error("platform/engine/modules/backups/restore.orchestrator",
+          `[restore-orchestrator] notify failed for ${restoreId}: ${safeErrorMessage(err)}`, err,
         );
       }
     }
@@ -1470,7 +1496,8 @@ export class RestoreOrchestrator {
           errorMessage: typeof patch?.errorMessage === "string" ? patch.errorMessage : undefined,
         });
       }
-    } catch {
+    } catch (diagnosticFailure) {
+      observeCaughtError(diagnosticFailure, "platform/engine/modules/backups/restore.orchestrator");
       // bus failures never block the FSM
     }
   }
@@ -1508,22 +1535,27 @@ export class RestoreOrchestrator {
       return { executor: built.executor, serviceHandle: built.handle, runtime: built.runtime };
     }
 
-    if (!sourceRun.serviceId) throw new Error("Source run has no serviceId");
-    const serviceRow = await repos.service.findById(sourceRun.serviceId);
-    if (!serviceRow) throw new Error("Target service disappeared");
-    const project = await repos.project.findById(serviceRow.projectId);
+    if (sourceRun.sourceKind !== "project" && !sourceRun.serviceId) throw new Error("Source run has no serviceId");
+    if (sourceRun.sourceKind === "project" && sourceRun.serviceId)
+      throw new Error("An app backup cannot also target a service");
+    const app = sourceRun.sourceKind === "project"
+      ? await resolveProjectBackupSource(sourceRun.projectId, destinationRow.organizationId)
+      : null;
+    const serviceRow = app ? null : await repos.service.findById(sourceRun.serviceId!);
+    if (!app && !serviceRow) throw new Error("Target service disappeared");
+    const project = app?.project ?? await repos.project.findById(serviceRow!.projectId);
     if (!project) throw new Error("Project disappeared");
     // Resolved through the SAME rule the backup used (source-platform.ts): a
     // container-backed service whose adopt deployment says `runtimeMode: "bare"`
     // must restore through Docker, exactly as it was captured through Docker. If
     // these two diverged, a dump taken with `pg_dump` inside the container would be
     // handed to a host that has no `pg_restore`.
-    const serviceHandle = await this.buildServiceHandle(serviceRow);
+    const serviceHandle = app?.handle ?? await this.buildServiceHandle(serviceRow!);
     const target = await resolveSourceExecutor({
-      meta: await this.activeDeploymentMeta(project.id),
+      meta: app?.deployment.meta ?? await this.activeDeploymentMeta(project.id),
       organizationId: destinationRow.organizationId,
       containerId: serviceHandle.containerId,
-      serviceName: serviceRow.name,
+      serviceName: serviceHandle.name,
     });
     return {
       executor: target.executor,
@@ -1606,7 +1638,7 @@ export class RestoreOrchestrator {
   ): Promise<string | null> {
     const ref = usableRef(dep.containerId);
     if (!ref || staticReleaseDir(dep) !== null) return null;
-    const siblings = await repos.service.listByProject(project.id).catch(() => []);
+    const siblings = await repos.service.listByProject(project.id).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/backups/restore.orchestrator"); return []; });
     if (siblings.length !== 1 || siblings[0].id !== serviceRow.id) return null;
     return ref;
   }

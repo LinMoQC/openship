@@ -35,10 +35,19 @@ export interface SecretColumn {
 
 /** table.column → { drizzle table, scheme }. Keys mirror ENCRYPTED_COLUMNS. */
 const SCHEME_BY_KEY: Record<string, { table: AnyTable; scheme: SecretScheme }> = {
+  "action_oidc_key.privateKeyEnc": { table: schema.actionOidcKey, scheme: "scalar" },
+  "action_credit_purchase.checkoutUrlEnc": { table: schema.actionCreditPurchase, scheme: "scalar" },
+  "action_workflow.secrets": { table: schema.actionWorkflow, scheme: "map" },
+  "action_run.configuration": { table: schema.actionRun, scheme: "json" },
+  "action_runner_session.registration": { table: schema.actionRunnerSession, scheme: "scalar" },
+  "two_factor.secret": { table: schema.twoFactor, scheme: "better-auth" },
+  "two_factor.backupCodes": { table: schema.twoFactor, scheme: "better-auth" },
   "cluster_database.secretEncrypted": { table: schema.clusterDatabase, scheme: "scalar" },
   "cluster_database.envValueEncrypted": { table: schema.clusterDatabase, scheme: "scalar" },
+  "cluster_database.readEnvValueEncrypted": { table: schema.clusterDatabase, scheme: "scalar" },
   "user_settings.cloudSessionToken": { table: schema.userSettings, scheme: "scalar" },
   "user_settings.cloneTokenEncrypted": { table: schema.userSettings, scheme: "scalar" },
+  "user_settings.githubAuthorizationEncrypted": { table: schema.userSettings, scheme: "scalar" },
   "project.cloneTokenEncrypted": { table: schema.project, scheme: "scalar" },
   "project.webhookSecret": { table: schema.project, scheme: "scalar" },
   "cloud_webhook_binding.webhookSecret": { table: schema.cloudWebhookBinding, scheme: "scalar" },
@@ -46,6 +55,7 @@ const SCHEME_BY_KEY: Record<string, { table: AnyTable; scheme: SecretScheme }> =
   "incoming_webhook.tokenEncrypted": { table: schema.incomingWebhook, scheme: "scalar" },
   "incoming_webhook.hmacSecretEncrypted": { table: schema.incomingWebhook, scheme: "scalar" },
   "env_var.value": { table: schema.envVar, scheme: "scalar" },
+  "route_protection.secret": { table: schema.routeProtection, scheme: "scalar" },
   "backup_destination.accessKeyIdEnc": { table: schema.backupDestination, scheme: "enc1" },
   "backup_destination.secretAccessKeyEnc": { table: schema.backupDestination, scheme: "enc1" },
   "backup_destination.sftpPasswordEnc": { table: schema.backupDestination, scheme: "enc1" },
@@ -66,6 +76,7 @@ const SCHEME_BY_KEY: Record<string, { table: AnyTable; scheme: SecretScheme }> =
   "github_deploy_key.privateKeyEncrypted": { table: schema.githubDeployKey, scheme: "scalar" },
   // Plaintext at rest (the Better Auth plugin owns the column) — "plaintext" moves it
   // into the sealed bundle verbatim rather than pretending it was encrypted.
+  "oauth_client.clientSecret": { table: schema.oauthClient, scheme: "plaintext" },
   "oauth_application.clientSecret": { table: schema.oauthApplication, scheme: "plaintext" },
   "instance_settings.tunnelToken": { table: schema.instanceSettings, scheme: "plaintext" },
   "instance_settings.ghDeviceTokenEncrypted": { table: schema.instanceSettings, scheme: "scalar" },

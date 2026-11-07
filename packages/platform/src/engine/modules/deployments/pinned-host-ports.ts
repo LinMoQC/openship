@@ -5,7 +5,12 @@ import {
   type HostPortClaim,
   type HostPortTargetKey,
 } from "@repo/db";
-import type { AllocateHostPortOptions, EdgeProxyApi, HostPortAllocation } from "@repo/adapters";
+import type {
+  AllocateHostPortOptions,
+  AlternativeHostPort,
+  EdgeProxyApi,
+  HostPortAllocation,
+} from "@repo/adapters";
 import type { HostPortTargetIdentity } from "../../lib/host-port-target";
 import { createProvisionLock } from "../../lib/provision-lock";
 
@@ -348,7 +353,8 @@ function exactQuarantineClaim(claim: HostPortClaim): boolean {
  * {@link withHostPortTargetLock}.
  *
  * Desired mappings are reserved before any read or release. A forced fresh edge
- * scan then proves which old ports are still dialled. If that scan or any
+ * scan then proves which old ports are still dialled. An empty desired set with
+ * no owned or quarantine claims needs no edge inventory. If a required scan or any
  * database read fails, no claim is released. Other projects are never touched;
  * legacy aliases are removed only when this project's canonical desired claim
  * already protects the same physical port.
@@ -368,12 +374,20 @@ export async function convergeTargetHostPortClaimsUnlocked(
     });
   }
 
+  const knownTargetKeys = targetKeys(input.target);
+  const readClaims = async () => (await Promise.all(knownTargetKeys.map(listClaimsByKey))).flat();
+  // Unrouted workloads can run on a host without an edge. There is nothing to
+  // converge unless this project owns claims or the host has quarantine rows.
+  // Read all aliases under the target lock, and reuse that snapshot below.
+  const preloadedClaims = desiredPublishes.length === 0 ? await readClaims() : undefined;
+  if (preloadedClaims && !preloadedClaims.some(claim => claim.projectId === input.projectId || isQuarantineClaim(claim))) {
+    return { released: 0, retained: [] };
+  }
+
   // Convergence runs after route writes, so the allocation-time memoized scan is
   // not authoritative here. A failed refresh rejects and releases nothing.
   const observedPorts = await input.edgeProxy.listLoopbackUpstreamPortsStrict({ refresh: true });
-  const knownTargetKeys = targetKeys(input.target);
-  const claimSets = await Promise.all(knownTargetKeys.map(listClaimsByKey));
-  const allClaims = claimSets.flat();
+  const allClaims = preloadedClaims ?? await readClaims();
   const desiredByPort = new Map(desiredPublishes.map((publish) => [publish.hostPort, publish]));
   const desiredCanonicalPorts = new Set<number>();
   for (const publish of desiredPublishes) {
@@ -601,6 +615,76 @@ export async function allocateAndReservePinnedHostPort(
     port: allocation.port,
   });
   return { ...allocation, preferred, previousClaim, claimWasCreated, claim };
+}
+
+/**
+ * Suggest a replacement without reserving it or changing the current allocation.
+ * Like ordinary allocation, this runs under the target lock through Docker bind.
+ * Confirmation refreshes both inventories and reserves only the approved number.
+ */
+export async function suggestAlternativePinnedHostPort(input: {
+  target: HostPortTargetIdentity;
+  allocation: AllocatedPinnedHostPort;
+  excluded: ReadonlySet<number>;
+  readClaims: () => Promise<readonly PinnedHostPort[]>;
+  allocate: (options: AllocateHostPortOptions) => Promise<HostPortAllocation>;
+  isAvailable: (port: number) => Promise<boolean | null>;
+  onSelected: (allocation: AllocatedPinnedHostPort) => void;
+}): Promise<AlternativeHostPort | null> {
+  assertStableTarget(input.target);
+  if (input.allocation.claim.targetKey !== input.target.targetKey) {
+    throw new Error("Cannot move a host-port claim from another physical target");
+  }
+  const avoid = pinnedHostPortsToAvoid(await input.readClaims());
+  for (const port of input.excluded) avoid.add(port);
+  avoid.add(input.allocation.port);
+
+  // The socket allocator cannot see Docker's DNAT-only publishes. Check its
+  // candidates against Docker too, with a bound so a busy host cannot hold up
+  // the existing conflict choices indefinitely.
+  for (let attempt = 0; attempt < 16; attempt += 1) {
+    const { port } = await input.allocate({ avoid });
+    if (!Number.isInteger(port) || port < 1 || port > 65535 || avoid.has(port)) return null;
+    const available = await input.isAvailable(port);
+    if (available === null) return null;
+    if (!available) {
+      avoid.add(port);
+      continue;
+    }
+
+    return {
+      port,
+      apply: async () => {
+        const claims = await input.readClaims();
+        if (claims.some((claim) => claim.port === port)) return false;
+        if ((await input.isAvailable(port)) !== true) return false;
+
+        let claim: HostPortClaim;
+        try {
+          claim = await reserveTargetPinnedHostPort(input.target, {
+            projectId: input.allocation.claim.projectId,
+            serviceId: input.allocation.claim.serviceId,
+            containerPort: input.allocation.claim.containerPort,
+            port,
+          });
+        } catch (error) {
+          if (error instanceof HostPortClaimConflictError) return false;
+          throw error;
+        }
+        // Keep the original previousClaim for failure recovery. The initial
+        // allocation may itself have been created by this unfinished deploy.
+        input.onSelected({
+          ...input.allocation,
+          port,
+          scanned: true,
+          claim,
+          claimWasCreated: true,
+        });
+        return true;
+      },
+    };
+  }
+  return null;
 }
 
 /**

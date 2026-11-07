@@ -15,6 +15,7 @@
  * or modify another member's channels.
  */
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import type { ExecutionContext } from "../../../context";
 import type { Static } from "@sinclair/typebox";
 import { CreateChannelBody, UpdateChannelBody, UpsertSubscriptionBody, UpsertNotificationDefaultBody, NotificationDeliveryQuery, ValidationError, NotFoundError } from "@repo/contracts";
@@ -180,6 +181,7 @@ export async function testChannel(ctx: ExecutionContext, id: string) {
   try {
     await sendTestToChannel(channel);
   } catch (err) {
+    observeCaughtError(err, "platform/engine/modules/notifications/notifications.service");
     return { ok: false, error: safeErrorMessage(err) };
   }
 
@@ -323,13 +325,15 @@ export async function listDeliveries(ctx: ExecutionContext, input: Static<typeof
   const unseenOnly = input.unseen ?? false;
   const limit = input.limit ?? 100;
   const deliveries = [];
-  for (let offset = 0; deliveries.length < limit; offset += 250) {
-    const rows = await repos.notificationDelivery.listForUser(ctx.userId, ctx.organizationId, { unseenOnly, limit: 250, offset });
+  let before = input.before;
+  while (deliveries.length < limit) {
+    const rows = await repos.notificationDelivery.listForUser(ctx.userId, ctx.organizationId, { unseenOnly, limit: 250, before });
     for (const row of rows) if (await canReadNotification(ctx, row)) {
       deliveries.push(row);
       if (deliveries.length === limit) break;
     }
     if (rows.length < 250) break;
+    before = rows[rows.length - 1]!.id;
   }
   return deliveries;
 }
@@ -388,6 +392,7 @@ function sanitizeChannelConfig(
         try {
           assertPublicUrlLiteral(url, { allowHttp: true });
         } catch (e) {
+          observeCaughtError(e, "platform/engine/modules/notifications/notifications.service");
           return { ok: false, error: e instanceof SsrfError ? e.message : "Invalid webhook URL" };
         }
       }
@@ -435,14 +440,18 @@ function sanitizeChannelConfig(
     case "msteams": {
       const webhookUrl = String(cfg.webhookUrl ?? "").trim();
       if (!webhookUrl) return { ok: false, error: "Invalid Microsoft Teams webhook URL" };
-      // Power Automate Workflows live on *.logic.azure.com; legacy
-      // connectors on *.webhook.office.com. Suffix-match the hostname so
+      // Teams "Send webhook alerts to a channel" workflows are issued on
+      // *.<region>.environment.api.powerplatform.com; the pre-migration
+      // Power Automate trigger URLs were on *.logic.azure.com and legacy
+      // Office 365 connectors on *.webhook.office.com. All three are still
+      // live, so all three are accepted. Suffix-match the hostname so
       // lookalike domains (e.g. evil-logic.azure.com.attacker.io) fail.
       try {
         const parsed = new URL(webhookUrl);
         if (
           parsed.protocol !== "https:" ||
           !(
+            parsed.hostname.endsWith(".environment.api.powerplatform.com") ||
             parsed.hostname.endsWith(".logic.azure.com") ||
             parsed.hostname.endsWith(".webhook.office.com")
           )

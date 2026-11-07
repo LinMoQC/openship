@@ -1,8 +1,12 @@
 "use client";
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { Icon as UiIcon, type IconName } from "@repo/ui/icons";
 
+import { CommandEnvironmentNotice } from "@/components/import-project/CommandEnvironmentNotice";
+import { BuildCacheMigration } from "@/components/project-settings/DeploymentAutomation";
 import React, { useEffect, useState } from "react";
+import { useOptionalProjectSettings } from "@/context/ProjectSettingsContext";
 import { Checkbox } from "@/components/ui/Checkbox";
 import { TagListInput, ChipMultiSelect } from "@/components/ui/TagListInput";
 import { useI18n } from "@/components/i18n-provider";
@@ -40,6 +44,8 @@ interface ServiceSettingsFormProps {
   submitLabel?: string;
   /** Service detail owns mounts in its Volumes tab; topology editors keep them here. */
   includeVolumes?: boolean;
+  /** Immediate persisted actions are enabled only by the saved service editor. */
+  enableAutomationActions?: boolean;
 }
 
 /** Backend per-item caps (service.schema.ts ComposeFieldsBlock) surfaced here so
@@ -61,7 +67,8 @@ const splitList = (value: string) =>
     .map((item) => item.trim())
     .filter(Boolean);
 
-export function ServiceSettingsForm({ service, siblingServiceNames = [], onSubmit, submitLabel, includeVolumes = true }: ServiceSettingsFormProps) {
+export function ServiceSettingsForm({ service, siblingServiceNames = [], onSubmit, submitLabel, includeVolumes = true, enableAutomationActions = false }: ServiceSettingsFormProps) {
+  const projectContext = useOptionalProjectSettings();
   const { t } = useI18n();
   const f = t.projectDetail.services.settingsForm;
   const isMonorepo = serviceKind(service) === "monorepo";
@@ -256,6 +263,7 @@ export function ServiceSettingsForm({ service, siblingServiceNames = [], onSubmi
     try {
       await onSubmit(payload);
     } catch (err) {
+      observeCaughtError(err, "dashboard/app/(dashboard)/projects/[id]/components/services/ServiceSettingsForm");
       setError(err instanceof Error ? err.message : f.errors.saveFailed);
     } finally {
       setSaving(false);
@@ -264,6 +272,21 @@ export function ServiceSettingsForm({ service, siblingServiceNames = [], onSubmi
 
   return (
     <form onSubmit={handleSubmit} className="space-y-5">
+      {enableAutomationActions && projectContext && (
+        <BuildCacheMigration key={service.id} projectId={projectContext.id} serviceId={service.id} />
+      )}
+      {isMonorepo && (
+        <CommandEnvironmentNotice
+          projectId={enableAutomationActions ? projectContext?.id : undefined}
+          serviceId={service.id}
+          commands={{ installCommand, buildCommand, startCommand }}
+          onMigrated={commands => {
+            if (commands.installCommand !== undefined) setInstallCommand(commands.installCommand);
+            if (commands.buildCommand !== undefined) setBuildCommand(commands.buildCommand);
+            if (commands.startCommand !== undefined) setStartCommand(commands.startCommand);
+          }}
+        />
+      )}
       {error && (
         <div className="rounded-xl border border-danger-border bg-danger-bg px-3 py-2 text-sm text-danger">
           {error}
@@ -495,8 +518,8 @@ export function ServiceSettingsForm({ service, siblingServiceNames = [], onSubmi
         <label className="mb-4 flex items-start gap-3 rounded-xl border border-border/50 bg-muted/20 p-3">
           <Checkbox checked={monitoringEnabled} onCheckedChange={(value) => setMonitoringEnabled(value === true)} />
           <span>
-            <span className="block text-sm font-medium text-foreground">Watch this service for outages</span>
-            <span className="block text-xs leading-relaxed text-muted-foreground">Uses the shared server event stream and reconciliation sweep. Turn off only for intentionally unmanaged or disposable services.</span>
+            <span className="block text-sm font-medium text-foreground">{f.monitoring}</span>
+            <span className="block text-xs leading-relaxed text-muted-foreground">{f.monitoringHint}</span>
           </span>
         </label>
         {!isMonorepo && (

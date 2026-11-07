@@ -1,3 +1,4 @@
+import "../../../src/modules/system/server-resource.routes";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Value } from "@sinclair/typebox/value";
 import type { TSchema } from "@sinclair/typebox";
@@ -320,6 +321,8 @@ describe("MCP route input and transport contracts", () => {
 
   it("all workflow references resolve to real tools and unavailable cluster flows stay off Cloud", () => {
     for (const name of [
+      "deploy-a-folder",
+      "deploy-from-git",
       "cluster-and-scale",
       "cluster-database",
       "backup-and-restore",
@@ -382,5 +385,18 @@ describe("MCP route input and transport contracts", () => {
         call.params.name,
       ).toEqual([]);
     }
+  });
+});
+
+describe("fine-grained deployment tool discovery", () => {
+  it("advertises scoped history and trigger operations without administrative cancellation, rollback or deletion", () => {
+    const principal = { role: "restricted" as const, readOnly: false, grantedRootTypes: new Set<string>(), wildcardGrants: new Map(), grantedCapabilities: new Set(["deployments:read", "deployments:trigger"] as const), canCreateProjects: false };
+    const names = filterToolsForPrincipal(getMcpTools(), principal).map(tool => tool.name);
+    expect(names).toContain("get_projects_by_id_deployments");
+    expect(names).toContain("get_deployments");
+    expect(names).toContain("post_deployments_by_id_redeploy");
+    expect(names).not.toContain("post_deployments_by_id_cancel");
+    expect(names).not.toContain("post_deployments_by_id_rollback");
+    expect(names).not.toContain("delete_deployments_by_id");
   });
 });

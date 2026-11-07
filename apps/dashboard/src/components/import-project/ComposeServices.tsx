@@ -2,7 +2,7 @@
 
 import { Icon as UiIcon } from "@repo/ui/icons";
 
-import React, { useState, useCallback, useEffect, useMemo } from "react";
+import React, { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { useDeployment } from "@/context/DeploymentContext";
 import { isMaskedValue } from "@repo/core";
 import { useServiceEnvReveal } from "@/hooks/use-service-env-reveal";
@@ -19,15 +19,22 @@ import { parseContainerPort, serviceExposedPort } from "@/utils/compose-ports";
 import PublicEndpointsCard from "@/components/routing/PublicEndpointsCard";
 import { Modal } from "@/components/ui/Modal";
 import DropdownMenu from "@/components/ui/DropdownMenu";
-import EnvironmentVariables from "./EnvironmentVariables";
+import { Input } from "@/components/ui/input";
+import { CustomSelect } from "@/components/ui/CustomSelect";
+import EnvironmentVariables, { type EnvironmentVariableRow } from "./EnvironmentVariables";
+import { servicesApi } from "@/lib/api/services";
+import { getApiErrorMessage } from "@/lib/api/client";
+import { serviceEnvironmentRows } from "@/lib/service-environment-editor";
+import { Button } from "@/components/ui/button";
 import { isEnvironmentValueMissing } from "./environment-resolution";
+import { composeEnvironmentPreview, editComposeEnvironment } from "./compose-environment-preview";
 import BuildSettings from "./BuildSettings";
 import { cn } from "@/lib/utils";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-type EnvVarRow = { key: string; value: string; visible: boolean };
+type EnvVarRow = EnvironmentVariableRow;
 
 /** Convert Record<string,string> ↔ Array<{key,value,visible}> */
 const envToArray = (
@@ -248,6 +255,8 @@ const ServiceDomainSection: React.FC<{
             hasServer
             runtimePort={primaryPort}
             allowPortEdit
+            allowRedirects
+            allowWww
             saveMode="change"
             hideHeader
             portInline
@@ -260,7 +269,7 @@ const ServiceDomainSection: React.FC<{
 };
 
 const ServiceCardSkeleton: React.FC = () => (
-  <div className="overflow-hidden rounded-2xl border border-border/50 bg-card">
+  <div className="overflow-hidden rounded-2xl bg-card">
     <div className="p-4 sm:p-5">
       <div className="flex flex-wrap items-center gap-2">
         <SkeletonBlock className="h-6 w-28" />
@@ -275,7 +284,7 @@ const ServiceCardSkeleton: React.FC = () => (
 
     <div className="border-t border-border/30 px-4 pb-4 sm:px-5 sm:pb-5">
       <div className="grid gap-3 pt-4 lg:grid-cols-[minmax(0,1fr)_minmax(240px,0.72fr)]">
-        <div className="rounded-xl border border-border/40 bg-muted/20 px-4 py-3">
+        <div className="rounded-xl bg-card px-4 py-3">
           <div className="flex items-center justify-between gap-4">
             <div className="flex items-center gap-3">
               <SkeletonBlock className="h-9 w-9 rounded-lg" />
@@ -288,7 +297,7 @@ const ServiceCardSkeleton: React.FC = () => (
           </div>
         </div>
 
-        <div className="rounded-xl border border-border/40 bg-muted/20 px-4 py-3">
+        <div className="rounded-xl bg-card px-4 py-3">
           <div className="flex items-center justify-between gap-4">
             <div className="min-w-0 flex-1 space-y-2">
               <SkeletonBlock className="h-4 w-36" />
@@ -320,7 +329,7 @@ const SharedEnvironmentCard: React.FC<{
   }, [envVars, importableRootVars, onChange]);
 
   return (
-    <div className="rounded-xl border border-border/40 bg-muted/20 px-4 py-3">
+    <div className="rounded-xl bg-card px-4 py-3">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex min-w-0 items-center gap-3">
           <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10">
@@ -330,7 +339,7 @@ const SharedEnvironmentCard: React.FC<{
             <div className="flex flex-wrap items-center gap-2">
               <p className="text-sm font-medium text-foreground">{sh.title}</p>
               {rootEnvVars.length > 0 && (
-                <span className="rounded-md bg-success-bg px-2 py-0.5 text-[11px] font-medium text-success">
+                <span className="rounded-md bg-success-bg px-2 py-0.5 text-xs font-medium text-success">
                   {sh.rootEnvFound}
                 </span>
               )}
@@ -476,16 +485,15 @@ const ServiceConfigSection: React.FC<{
   const volumesStr = interpolate(service.volumes.length === 1 ? cnt.volumeOne : cnt.volumeOther, { count: String(service.volumes.length) });
   const summary = interpolate(cfg.summary, { ports: portsStr, volumes: volumesStr });
 
-  const inputCls =
-    "w-full rounded-lg border border-border/50 bg-background px-2.5 py-1.5 text-sm text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-primary/20";
-  const labelCls = "text-xs font-semibold uppercase tracking-wider text-foreground/80";
+  const labelCls = "text-sm font-medium text-foreground";
 
   return (
-    <div className="mt-3 rounded-xl border border-border/40 bg-muted/10">
+    <div className="mt-3 rounded-xl bg-card">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center justify-between gap-3 px-4 py-3 text-start"
+        aria-expanded={open}
+        className="flex w-full items-center justify-between gap-3 rounded-xl px-4 py-3 text-start focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
       >
         <span className="flex items-center gap-2.5">
           <UiIcon name="sliders" className="size-4 text-muted-foreground" />
@@ -517,7 +525,10 @@ const ServiceConfigSection: React.FC<{
                 const isRouted = !!row.container && row.container === routedPort;
                 return (
                   <div key={i} className="flex items-center gap-2">
-                    <input
+                    <Input
+                      dir="ltr"
+                      variant="filled"
+                      aria-label={`${cfg.publishedLabel} ${i + 1}`}
                       value={row.host}
                       onChange={(e) =>
                         commitPorts(portRows.map((r, j) => (j === i ? { ...r, host: e.target.value } : r)))
@@ -525,20 +536,23 @@ const ServiceConfigSection: React.FC<{
                       placeholder={isCloud ? cfg.naOnCloud : cfg.publishedLabel}
                       disabled={isCloud}
                       inputMode="numeric"
-                      className={cn(inputCls, "flex-1", isCloud && "opacity-50")}
+                      className="min-w-0 flex-1"
                     />
                     <span className="text-muted-foreground">:</span>
-                    <input
+                    <Input
+                      dir="ltr"
+                      variant="filled"
+                      aria-label={`${cfg.containerLabel} ${i + 1}`}
                       value={row.container}
                       onChange={(e) =>
                         commitPorts(portRows.map((r, j) => (j === i ? { ...r, container: e.target.value } : r)))
                       }
                       placeholder={cfg.containerLabel}
                       inputMode="numeric"
-                      className={cn(inputCls, "flex-1")}
+                      className="min-w-0 flex-1"
                     />
                     {isRouted && (
-                      <span className="shrink-0 rounded-md bg-success-bg px-2 py-0.5 text-[11px] font-medium text-success">
+                      <span className="shrink-0 rounded-md bg-success-bg px-2 py-0.5 text-xs font-medium text-success">
                         {cfg.publicBadge}
                       </span>
                     )}
@@ -587,24 +601,30 @@ const ServiceConfigSection: React.FC<{
             <div className="space-y-2">
               {volumeRows.map((row, i) => (
                 <div key={i} className="flex items-center gap-2">
-                  <input
+                  <Input
+                    dir="ltr"
+                    variant="filled"
+                    aria-label={`${cfg.sourcePlaceholder} ${i + 1}`}
                     value={row.source}
                     onChange={(e) =>
                       commitVolumes(volumeRows.map((r, j) => (j === i ? { ...r, source: e.target.value } : r)))
                     }
                     placeholder={cfg.sourcePlaceholder}
                     disabled={isCloud}
-                    className={cn(inputCls, "flex-1", isCloud && "opacity-50")}
+                    className="min-w-0 flex-1"
                   />
                   <span className="text-muted-foreground">:</span>
-                  <input
+                  <Input
+                    dir="ltr"
+                    variant="filled"
+                    aria-label={`${cfg.containerPathPlaceholder} ${i + 1}`}
                     value={row.target}
                     onChange={(e) =>
                       commitVolumes(volumeRows.map((r, j) => (j === i ? { ...r, target: e.target.value } : r)))
                     }
                     placeholder={cfg.containerPathPlaceholder}
                     disabled={isCloud}
-                    className={cn(inputCls, "flex-1", isCloud && "opacity-50")}
+                    className="min-w-0 flex-1"
                   />
                   <button
                     type="button"
@@ -613,7 +633,7 @@ const ServiceConfigSection: React.FC<{
                     }
                     disabled={isCloud}
                     className={cn(
-                      "shrink-0 rounded-md px-2 py-1 text-[11px] font-medium",
+                      "shrink-0 rounded-md px-2 py-1 text-xs font-medium",
                       row.ro ? "bg-primary/10 text-primary" : "bg-muted/60 text-muted-foreground",
                       isCloud && "opacity-50",
                     )}
@@ -649,26 +669,29 @@ const ServiceConfigSection: React.FC<{
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="space-y-1.5">
               <span className={labelCls}>{cfg.command}</span>
-              <input
+              <Input
+                dir="ltr"
+                variant="filled"
+                aria-label={cfg.command}
                 value={service.command ?? ""}
                 onChange={(e) => onChange({ command: e.target.value || undefined })}
                 placeholder={cfg.imageDefault}
-                className={cn(inputCls, "font-mono")}
+                className="font-mono"
               />
             </div>
             <div className="space-y-1.5">
               <span className={labelCls}>{cfg.restartPolicy}</span>
-              <select
+              <CustomSelect
+                aria-label={cfg.restartPolicy}
+                variant="filled"
+                triggerClassName="bg-muted/60 hover:bg-muted"
                 value={service.restart ?? ""}
-                onChange={(e) => onChange({ restart: e.target.value || undefined })}
-                className={inputCls}
-              >
-                {RESTART_OPTIONS.map((opt) => (
-                  <option key={opt} value={opt}>
-                    {opt === "" ? cfg.restartDefault : opt}
-                  </option>
-                ))}
-              </select>
+                onChange={(restart) => onChange({ restart: restart || undefined })}
+                options={RESTART_OPTIONS.map((value) => ({
+                  value,
+                  label: value === "" ? cfg.restartDefault : value,
+                }))}
+              />
             </div>
           </div>
         </div>
@@ -683,21 +706,73 @@ const ServiceCard: React.FC<{
   service: ComposeServiceInfo;
   projectName: string;
   onUpdate: (updates: Partial<ComposeServiceInfo>) => void;
-  onEnvChange: (env: Record<string, string>) => void;
   onDelete: () => void;
-}> = ({ service, projectName, onUpdate, onEnvChange, onDelete }) => {
+}> = ({ service, projectName, onUpdate, onDelete }) => {
   const { t } = useI18n();
   const { config } = useDeployment();
   const cs = t.importProject.composeServices;
   const cnt = t.importProject.counts;
-  const missingCount = missingEnvCount(service);
-  const envCount = Object.keys(service.environment).length;
+  const preview = useMemo(
+    () => composeEnvironmentPreview(service, config.envVars, config.rootEnvVars),
+    [service, config.envVars, config.rootEnvVars],
+  );
+  const missingCount = missingEnvCount({ ...service, ...preview });
+  const envCount = Object.keys(preview.environment).length;
   const [envModalOpen, setEnvModalOpen] = useState(false);
   // Fresh scans already supply editable values. Only saved, masked rows fetch
   // on demand, using the same lookup as the project's service detail panel.
-  const onReveal = useServiceEnvReveal(config.projectId, service.serviceId);
+  const onReveal = useServiceEnvReveal(
+    config.projectId,
+    service.serviceId,
+    service.environmentDraft?.environment,
+  );
+  const [envReadError, setEnvReadError] = useState<string | null>(null);
+  const [envReadAttempt, retryEnvRead] = useState(0);
+  const updateRef = useRef(onUpdate);
+  updateRef.current = onUpdate;
+  const envLabels = t.projectDetail.services.detail.environmentState;
+  const needsSavedEnvironment = Boolean(
+    config.projectId && service.serviceId && !service.environmentDraft,
+  );
+  useEffect(() => {
+    if (!envModalOpen || !needsSavedEnvironment || !config.projectId || !service.serviceId) return;
+    let active = true;
+    setEnvReadError(null);
+    void servicesApi
+      .getEnvironment(config.projectId, service.serviceId)
+      .then((result) => {
+        if (!result.success) throw new Error(envLabels.loadFailed);
+        if (!active) return;
+        const rows = serviceEnvironmentRows(result.environment, envLabels);
+        updateRef.current({
+          environmentDraft: {
+            environment: result.environment.environment,
+            baseline: rows,
+            rows,
+            generated: Object.fromEntries(
+              result.environment.variables
+                .filter((row) => row.source === "generated")
+                .map((row) => [row.key, row.value]),
+            ),
+          },
+        });
+      })
+      .catch((error) => {
+        if (active) setEnvReadError(getApiErrorMessage(error, envLabels.loadFailed));
+      });
+    return () => {
+      active = false;
+    };
+  }, [
+    envModalOpen,
+    needsSavedEnvironment,
+    config.projectId,
+    service.serviceId,
+    envReadAttempt,
+    envLabels,
+  ]);
   const [envRows, setEnvRows] = useState<EnvVarRow[]>(() =>
-    envToArray(service.environment),
+    needsSavedEnvironment ? [] : envToArray(preview.environment),
   );
 
   const statusLabel = service.exposed
@@ -709,18 +784,40 @@ const ServiceCard: React.FC<{
 
   /** Bridge: EnvironmentVariables uses editable rows - our service config persists Record<string,string>. */
   useEffect(() => {
+    if (needsSavedEnvironment) return;
     setEnvRows((current) => {
-      if (envRecordsEqual(arrayToEnv(current), service.environment)) return current;
-      return envToArray(service.environment, visibilityByKey(current));
+      const draftRows = service.environmentDraft?.rows;
+      if (draftRows) {
+        const next = draftRows.map((row) => ({
+          ...row,
+          value: preview.environment[row.key] ?? row.value,
+          visible: current.find((item) => item.key === row.key)?.visible ?? row.visible,
+        }));
+        return JSON.stringify(current) === JSON.stringify(next) ? current : next;
+      }
+      if (envRecordsEqual(arrayToEnv(current), preview.environment)) return current;
+      return envToArray(preview.environment, visibilityByKey(current));
     });
-  }, [service.environment, service.environmentMeta]);
+  }, [preview.environment, service.environmentDraft, needsSavedEnvironment]);
 
   const handleEnvChange = useCallback(
     (vars: EnvVarRow[]) => {
       setEnvRows(vars);
-      onEnvChange(arrayToEnv(vars));
+      const edited = arrayToEnv(vars);
+      const draft = service.environmentDraft;
+      if (draft) {
+        const rows = vars.map((row) => {
+          const original = draft.rows.find((before) => before.key === row.key);
+          return original && row.value === preview.environment[row.key]
+            ? { ...row, value: original.value }
+            : row;
+        });
+        onUpdate({ environmentDraft: { ...draft, rows } });
+      } else if (!envRecordsEqual(edited, preview.environment)) {
+        onUpdate(editComposeEnvironment(service, preview.environment, edited));
+      }
     },
-    [onEnvChange],
+    [onUpdate, service, preview.environment],
   );
 
   // Environment-variables card — sits in the right column beside the domain card.
@@ -729,7 +826,7 @@ const ServiceCard: React.FC<{
       type="button"
       onClick={() => setEnvModalOpen(true)}
       className={cn(
-        "w-full self-start rounded-xl border border-border/40 bg-muted/20 px-4 py-3 text-start transition-colors hover:bg-muted/30",
+        "w-full self-start rounded-xl bg-card px-4 py-3 text-start transition-colors hover:bg-muted/30",
         extra,
       )}
     >
@@ -768,13 +865,13 @@ const ServiceCard: React.FC<{
             {ports.map((port, index) => (
               <span
                 key={`${port}-${index}`}
-                className="rounded-md bg-muted/50 px-2 py-0.5 font-mono text-[11px] text-foreground"
+                className="rounded-md bg-muted/50 px-2 py-0.5 font-mono text-xs text-foreground"
               >
                 :{port}
               </span>
             ))}
             <span
-              className={`rounded-md px-2 py-0.5 text-[11px] font-medium ${
+              className={`rounded-md px-2 py-0.5 text-xs font-medium ${
                 service.exposed
                   ? "bg-success-bg text-success"
                   : "bg-muted/60 text-muted-foreground"
@@ -879,18 +976,37 @@ const ServiceCard: React.FC<{
         </div>
 
         <div className="max-h-[calc(86vh-92px)] overflow-y-auto">
-          <EnvironmentVariables
-            mode="settings"
-            showEditControls={true}
-            isEditingMode={true}
-            showSettingsActions={false}
-            borderless
-            hideTitle
-            envVars={envRows}
-            envMeta={service.environmentMeta}
-            onEnvVarsChange={handleEnvChange}
-            onReveal={onReveal}
-          />
+          {needsSavedEnvironment ? (
+            <div className="p-5" role="status">
+              {envReadError ? (
+                <div className="space-y-3" role="alert">
+                  <p className="text-sm text-danger">{envReadError}</p>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    onClick={() => retryEnvRead((attempt) => attempt + 1)}
+                  >
+                    {envLabels.reload}
+                  </Button>
+                </div>
+              ) : (
+                <div className="h-32 animate-pulse rounded-xl bg-muted/40" />
+              )}
+            </div>
+          ) : (
+            <EnvironmentVariables
+              mode="settings"
+              showEditControls={true}
+              isEditingMode={true}
+              showSettingsActions={false}
+              borderless
+              hideTitle
+              envVars={envRows}
+              envMeta={preview.environmentMeta}
+              onEnvVarsChange={handleEnvChange}
+              onReveal={onReveal}
+            />
+          )}
         </div>
       </Modal>
     </div>
@@ -915,14 +1031,6 @@ const ComposeServices: React.FC = () => {
   const updateService = useCallback(
     (index: number, updates: Partial<ComposeServiceInfo>) => {
       const next = services.map((s, i) => (i === index ? { ...s, ...updates } : s));
-      updateConfig({ services: next });
-    },
-    [services, updateConfig],
-  );
-
-  const updateServiceEnv = useCallback(
-    (index: number, env: Record<string, string>) => {
-      const next = services.map((s, i) => (i === index ? { ...s, environment: env } : s));
       updateConfig({ services: next });
     },
     [services, updateConfig],
@@ -1002,15 +1110,15 @@ const ComposeServices: React.FC = () => {
 
   return (
     <div className="space-y-5">
-      <div className="bg-card rounded-2xl border border-border/50">
+      <div className="bg-card rounded-2xl">
         <div className="px-5 py-5 space-y-6">
           {/* Header */}
           <div className="flex items-center gap-3">
-            <div className="p-2.5 bg-orange-500/10 rounded-xl">
-              <UiIcon name="layers" className="w-6 h-6 text-orange-500" />
+            <div className="p-2.5 bg-warning-bg rounded-xl">
+              <UiIcon name="layers" className="w-6 h-6 text-warning" />
             </div>
             <div>
-              <h3 className="text-[15px] font-semibold text-foreground">Docker Compose</h3>
+              <h3 className="text-sm font-semibold text-foreground">Docker Compose</h3>
               <p className="text-xs text-muted-foreground">
                 {isServiceDeployment ? cs.main.deployingServices : cs.main.deployingSingle}
                 {isServiceDeployment && (
@@ -1058,7 +1166,6 @@ const ComposeServices: React.FC = () => {
                       service={svc}
                       projectName={config.projectName || config.repo}
                       onUpdate={(updates) => updateService(i, updates)}
-                      onEnvChange={(env) => updateServiceEnv(i, env)}
                       onDelete={() => deleteService(i)}
                     />
                   ))}
@@ -1071,7 +1178,7 @@ const ComposeServices: React.FC = () => {
               )}
 
               {/* Info */}
-              <div className="p-4 bg-muted/30 rounded-xl border border-border/50">
+              <div className="p-4 bg-card rounded-xl">
                 <p className="text-sm text-muted-foreground leading-relaxed">
                   {cs.main.infoPart1}
                   <strong className="text-foreground">{cs.main.infoBold}</strong>{cs.main.infoPart2}
@@ -1079,7 +1186,7 @@ const ComposeServices: React.FC = () => {
               </div>
             </>
           ) : (
-            <div className="rounded-xl border border-border/50 bg-muted/20 p-4">
+            <div className="rounded-xl bg-card p-4">
               <p className="text-sm text-muted-foreground leading-relaxed">
                 {cs.main.singleAppNote}
               </p>
@@ -1111,7 +1218,7 @@ const ComposeServices: React.FC = () => {
             </button>
 
             {modeOptionsOpen && (
-              <div className="mt-4 rounded-xl border border-border/50 bg-muted/20 p-4">
+              <div className="mt-4 rounded-xl bg-card p-4">
                 <div className="grid gap-2 sm:grid-cols-2">
                   {modeOptions.map((option) => {
                     const Icon = option.icon;

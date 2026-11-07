@@ -26,11 +26,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const deploymentRepo = vi.hoisted(() => ({
   findById: vi.fn(),
-  findInProgressByCommit: vi.fn(),
-  findInProgressByReleaseVersion: vi.fn(),
+  listInFlightByProject: vi.fn(),
 }));
 const serviceRepo = vi.hoisted(() => ({ listByProject: vi.fn(), listByDeployment: vi.fn() }));
 const compareCommits = vi.hoisted(() => vi.fn());
+const impactIO = vi.hoisted(() => ({ read: vi.fn(), tree: vi.fn() }));
 
 vi.mock("@repo/db", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@repo/db")>();
@@ -42,7 +42,7 @@ vi.mock("@repo/db", async (importOriginal) => {
 
 vi.mock("@repo/platform/engine/modules/github/github.service", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
-  compareCommits,
+  compareCommits, getFileContent: impactIO.read, listRepositoryTree: impactIO.tree,
 }));
 
 import {
@@ -54,7 +54,7 @@ import {
 import type { Project } from "@repo/db";
 
 const SHIPPED = "13140747f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6";
-const NEWER = "282619c7aabbccddeeff00112233445566778899";
+const NEWER = "282619c7aabbccddeeff00112233445566778899".padEnd(40, "0");
 
 const gitProject = (over: Partial<Project> = {}) =>
   ({
@@ -83,11 +83,20 @@ const commitUpstream = (p: Project, latestSha: string | null): UpstreamDrift => 
 beforeEach(() => {
   for (const fn of Object.values({ ...deploymentRepo, ...serviceRepo })) fn.mockReset();
   deploymentRepo.findById.mockResolvedValue({ id: "dep_live", projectId: "proj_1", organizationId: "org_1" });
-  deploymentRepo.findInProgressByCommit.mockResolvedValue(undefined);
-  deploymentRepo.findInProgressByReleaseVersion.mockResolvedValue(undefined);
+  deploymentRepo.listInFlightByProject.mockResolvedValue([]);
   serviceRepo.listByProject.mockResolvedValue([]);
   serviceRepo.listByDeployment.mockResolvedValue([]);
   compareCommits.mockReset();
+  const manifests: Record<string, unknown> = {
+    "package.json": { workspaces: ["services/*"] },
+    "services/backend/package.json": { name: "backend" },
+    "services/client/package.json": { name: "client" },
+  };
+  impactIO.read.mockReset().mockImplementation(async (_ctx, _owner, _repo, path) => {
+    if (!(path in manifests)) throw Object.assign(new Error("Not found"), { status: 404 });
+    return { content: JSON.stringify(manifests[path]), size: 100 };
+  });
+  impactIO.tree.mockReset().mockResolvedValue(Object.keys(manifests).map(path => ({ path, type: "file" })));
 });
 
 describe("commit drift — the deployed side is live", () => {
@@ -188,6 +197,15 @@ describe("commit drift — the deployed side is live", () => {
     expect(after).toMatchObject({ behind: false, deployedSha: NEWER });
   });
 
+  it("does not invent an update for a manual rebuild of the current commit", async () => {
+    const p = gitProject();
+    deploymentRepo.findById.mockResolvedValue({ id: "dep_live", projectId: p.id, organizationId: p.organizationId, commitSha: NEWER });
+    deploymentRepo.listInFlightByProject.mockResolvedValue([{ id: "dep_rebuild", commitSha: NEWER, trigger: "manual" }]);
+    expect(await evaluateDrift(p, commitUpstream(p, NEWER))).toMatchObject({
+      behind: false, latestInProgress: false, inProgressDeploymentId: "dep_rebuild",
+    });
+  });
+
   it("reads an abbreviated deployed sha as the same commit, not a new one", async () => {
     // The reported case: `POST /deployments` accepts any ref as `commitSha` (an
     // `openship deploy --commit 1314074`, an MCP call, a CI script), git checks it
@@ -218,12 +236,12 @@ describe("commit drift — the deployed side is live", () => {
   it("suppresses the nudge while the newest commit is already deploying", async () => {
     const p = gitProject();
     deploymentRepo.findById.mockResolvedValue({ id: "dep_live", projectId: "proj_1", organizationId: "org_1", commitSha: SHIPPED });
-    deploymentRepo.findInProgressByCommit.mockResolvedValue({ id: "dep_building" });
+    deploymentRepo.listInFlightByProject.mockResolvedValue([{ id: "dep_building", commitSha: NEWER }]);
 
     const status = await evaluateDrift(p, commitUpstream(p, NEWER));
 
     expect(status).toMatchObject({ behind: true, latestInProgress: true });
-    expect(deploymentRepo.findInProgressByCommit).toHaveBeenCalledWith("proj_1", NEWER);
+    expect(deploymentRepo.listInFlightByProject).toHaveBeenCalledWith("proj_1");
   });
 
   it("claims nothing when the remote HEAD could not be resolved", async () => {
@@ -316,6 +334,17 @@ describe("cache keys — a repointed source is a miss, not stale drift", () => {
     });
   });
 
+  it("tracks a matching release while it deploys and an update through cleanup", async () => {
+    const p = gitProject({ gitProvider: "release", releaseSource: { mode: "github", repo: "oblien/openship" } as never });
+    const upstream: UpstreamDrift = { supported: true, mode: "release", key: releaseSourceKey(p), latestVersion: "0.6.0", pinned: false };
+    deploymentRepo.findById.mockResolvedValue({ id: "dep_live", projectId: p.id, organizationId: p.organizationId, releaseVersion: "0.5.0" });
+    deploymentRepo.listInFlightByProject.mockResolvedValue([{ id: "dep_release", releaseVersion: "0.6.0", trigger: "webhook" }]);
+    expect(await evaluateDrift(p, upstream)).toMatchObject({ behind: true, latestInProgress: true, inProgressDeploymentId: "dep_release" });
+    deploymentRepo.findById.mockResolvedValue({ id: "dep_live", projectId: p.id, organizationId: p.organizationId, releaseVersion: "0.6.0" });
+    deploymentRepo.listInFlightByProject.mockResolvedValue([{ id: "dep_release", releaseVersion: "0.6.0", trigger: "update", status: "ready" }]);
+    expect(await evaluateDrift(p, upstream)).toMatchObject({ behind: false, latestInProgress: true, inProgressDeploymentId: "dep_release" });
+  });
+
   it("drops a cached row whose project changed drift shape entirely", async () => {
     // Repo removed (now an image-only app): a commit upstream can't be evaluated.
     const now = gitProject({ gitOwner: null, gitRepo: null });
@@ -387,6 +416,53 @@ describe("image drift — digests keyed by the ref they were polled for", () => 
 
     expect(status).toMatchObject({ supported: true, behind: false });
     expect((status as { services: unknown[] }).services).toHaveLength(2);
+  });
+
+  it.each(["queued", "building", "deploying", "ready", "cancelled"])(
+    "keeps an image update busy while the admission query reports %s work in flight",
+    async (status) => {
+      serviceRepo.listByProject.mockResolvedValue([svc()]);
+      serviceRepo.listByDeployment.mockResolvedValue([
+        { serviceId: "svc_1", imageRef: "n8nio/n8n:1.2", imageDigest: "sha256:old" },
+      ]);
+      const upstream: UpstreamDrift = {
+        supported: true, mode: "image", digestByRef: { "n8nio/n8n:1.2": "sha256:new" },
+      };
+      deploymentRepo.listInFlightByProject.mockResolvedValue([
+        { id: "dep_update", status, trigger: "update" },
+      ]);
+      expect(await evaluateDrift(imageProject(), upstream)).toMatchObject({
+        behind: true, latestInProgress: true, inProgressDeploymentId: "dep_update",
+      });
+      // The same cached upstream after the worker releases its execution lease.
+      deploymentRepo.listInFlightByProject.mockResolvedValue([]);
+      expect(await evaluateDrift(imageProject(), upstream)).toMatchObject({
+        behind: true, latestInProgress: false, inProgressDeploymentId: null,
+      });
+    },
+  );
+
+  it("retains image progress after cutover removes the drift, until cleanup finishes", async () => {
+    serviceRepo.listByProject.mockResolvedValue([svc()]);
+    serviceRepo.listByDeployment.mockResolvedValue([
+      { serviceId: "svc_1", imageRef: "n8nio/n8n:1.2", imageDigest: "sha256:new" },
+    ]);
+    deploymentRepo.listInFlightByProject.mockResolvedValue([
+      { id: "dep_update", status: "ready", trigger: "update" },
+    ]);
+    expect(await evaluateDrift(imageProject(), {
+      supported: true, mode: "image", digestByRef: { "n8nio/n8n:1.2": "sha256:new" },
+    })).toMatchObject({ behind: false, latestInProgress: true, inProgressDeploymentId: "dep_update" });
+  });
+
+  it("reports another deployment's lock without claiming it is updating the images", async () => {
+    serviceRepo.listByProject.mockResolvedValue([svc()]);
+    deploymentRepo.listInFlightByProject.mockResolvedValue([
+      { id: "dep_manual", status: "building", trigger: "manual" },
+    ]);
+    expect(await evaluateDrift(imageProject(), {
+      supported: true, mode: "image", digestByRef: { "n8nio/n8n:1.2": "sha256:new" },
+    })).toMatchObject({ latestInProgress: false, inProgressDeploymentId: "dep_manual" });
   });
 
   it("becomes unsupported when the project has no image services left", async () => {

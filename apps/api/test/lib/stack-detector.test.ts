@@ -25,6 +25,49 @@ function files(...names: string[]): RepoFile[] {
   });
 }
 
+describe("repository-owned runtime defaults", () => {
+  it.each([
+    {
+      manifest: "next.config.js",
+      content: "export default {}",
+      packageJson: {
+        dependencies: { next: "^16" },
+        scripts: { start: "next start", build: "next build" },
+      },
+    },
+    {
+      manifest: "manage.py",
+      content: "from django.core.management import execute_from_command_line",
+      packageJson: { scripts: { start: "vite", build: "vite build" } },
+    },
+    {
+      manifest: "go.mod",
+      content: "module example.com/api",
+      packageJson: undefined,
+    },
+  ])(
+    "uses the Dockerfile for $manifest",
+    ({ manifest, content, packageJson }) => {
+      const result = detectStack(
+        files("Dockerfile", manifest, "package.json", "bun.lock"),
+        packageJson,
+        {
+          [manifest]: content,
+          Dockerfile: 'FROM scratch\nEXPOSE 8080\nENTRYPOINT ["/app"]',
+        },
+      );
+      expect(result).toMatchObject({
+        stack: "docker",
+        projectType: "docker",
+        installCommand: "",
+        buildCommand: "",
+        startCommand: "",
+        port: 8080,
+      });
+    },
+  );
+});
+
 // ─── Stack identification - table-driven across every supported framework ────
 
 interface StackCase {
@@ -59,6 +102,24 @@ const POSITIVE_STACK_CASES: StackCase[] = [
     expectedStack: "vite",
   },
   // ── JS/TS Frontend & Fullstack ──────────────────────────────────────────
+  {
+    name: "Farm.js - farm.config.ts + @farm.js/core",
+    files: files("package.json", "farm.config.ts", "src/", "pnpm-lock.yaml"),
+    packageJson: {
+      dependencies: { "@farm.js/core": "^0.1.0", react: "^19.0.0" },
+      devDependencies: { "@farm.js/cli": "^0.1.0" },
+    },
+    expectedStack: "farmjs",
+    expectedCategory: "fullstack",
+    expectedProjectType: "app",
+    expectedStartCommand: "node .farm/.output/server/index.mjs",
+  },
+  {
+    name: "Farm.js - farm.config.mjs is also detected",
+    files: files("package.json", "farm.config.mjs"),
+    packageJson: { dependencies: { "@farm.js/core": "^0.1.0" } },
+    expectedStack: "farmjs",
+  },
   {
     name: "Next.js - next.config.js + next dep",
     files: files("package.json", "next.config.js"),
@@ -516,6 +577,18 @@ describe("detectStack - rule ordering & gate disambiguation", () => {
     expect(result.stack).toBe("nextjs");
   });
 
+  it("Farm.js requires both its config marker and package dependency", () => {
+    const configOnly = detectStack(files("package.json", "farm.config.ts"), {
+      dependencies: { react: "^19.0.0" },
+    });
+    expect(configOnly.stack).not.toBe("farmjs");
+
+    const dependencyOnly = detectStack(files("package.json"), {
+      dependencies: { "@farm.js/core": "^0.1.0" },
+    });
+    expect(dependencyOnly.stack).not.toBe("farmjs");
+  });
+
   it("Nuxt wins over plain vue when both deps are present", () => {
     const result = detectStack(files("package.json", "nuxt.config.ts"), {
       dependencies: { nuxt: "^3.0.0", vue: "^3.0.0" },
@@ -582,6 +655,28 @@ describe("detectStack - rule ordering & gate disambiguation", () => {
     const result = detectStack(files("Dockerfile", "docker-compose.yml"));
     expect(result.stack).toBe("docker-compose");
   });
+
+  it.each(["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"])(
+    "prefers root %s over Vite + Dockerfile (#1355)",
+    (composeFile) => {
+      const result = detectStack(
+        files("package.json", "vite.config.ts", "Dockerfile", composeFile),
+        { devDependencies: { vite: "^6.0.0" } },
+      );
+      expect(result).toMatchObject({ stack: "docker-compose", projectType: "services" });
+    },
+  );
+
+  it.each([
+    { marker: "next.config.ts", packageJson: { dependencies: { next: "^15.0.0" } } },
+    { marker: "go.mod", packageJson: undefined },
+  ])(
+    "keeps Compose topology when $marker matches before Docker (#1355)",
+    ({ marker, packageJson }) => {
+      const result = detectStack(files(marker, "Dockerfile", "compose.yaml"), packageJson);
+      expect(result).toMatchObject({ stack: "docker-compose", projectType: "services" });
+    },
+  );
 
   it("Static site does NOT match when package.json is also present (falls to a JS stack)", () => {
     const result = detectStack(files("index.html", "package.json"), {
@@ -875,14 +970,14 @@ describe("detectStack - port detection", () => {
     expect(result.port).toBe(9000);
   });
 
-  it("script port wins over Dockerfile EXPOSE", () => {
+  it("Dockerfile EXPOSE wins over scripts that the image does not run", () => {
     const result = detectStack(files("package.json", "Dockerfile"), {
       dependencies: { express: "^5.0.0" },
       scripts: { start: "node server.js --port 7000" },
     }, {
       Dockerfile: "EXPOSE 9000",
     });
-    expect(result.port).toBe(7000);
+    expect(result.port).toBe(9000);
   });
 
   it("framework default for Astro is 4321", () => {
@@ -907,12 +1002,32 @@ describe("detectStack - output directory and build image", () => {
     expect(detectStack(files("package.json", "astro.config.mjs"), { dependencies: { astro: "^4" } }).outputDirectory).toBe("dist");
   });
 
+  it("uses Farm.js's universal output and Node server entry", () => {
+    const result = detectStack(files("package.json", "farm.config.ts"), {
+      dependencies: { "@farm.js/core": "^0.1.0" },
+    });
+    expect(result.outputDirectory).toBe(".farm/.output");
+    expect(result.productionPaths).toEqual([".farm/.output"]);
+    expect(result.buildCommand).toBe("farm build");
+    expect(result.startCommand).toBe("node .farm/.output/server/index.mjs");
+    expect(result.port).toBe(3000);
+  });
+
+  it("honors an explicit manager over stale lockfiles and carries Bun's version", () => {
+    const result = detectStack(files("package.json", "next.config.js", "pnpm-lock.yaml"), {
+      packageManager: "bun@1.2.10",
+      dependencies: { next: "^15.0.0" },
+    });
+    expect(result.packageManager).toBe("bun");
+    expect(result.buildImage).toBe("oven/bun:1.2.10");
+  });
+
   it("bun build image swaps to oven/bun for JS/TS stacks", () => {
     const result = detectStack(files("package.json", "next.config.js", "bun.lockb"), {
       dependencies: { next: "^15.0.0" },
     });
     expect(result.packageManager).toBe("bun");
-    expect(result.buildImage).toBe("oven/bun:latest");
+    expect(result.buildImage).toBe("oven/bun:1.4.4");
   });
 
   it("bun does NOT override build image for non-JS stacks", () => {
@@ -1483,5 +1598,45 @@ describe("Ruby runtime version detection", () => {
     expect(detectStack(files("Dockerfile", ".ruby-version"), undefined, {
       ".ruby-version": "3.4.1",
     })).toMatchObject({ stack: "docker", buildImage: "ubuntu:22.04" });
+  });
+});
+
+
+describe("repository Node engine compatibility", () => {
+  it("detects a plain Node server with its declared engine without project overrides", () => {
+    const result = detectStack(files("package.json", "server.mjs", "public/"), {
+      scripts: { start: "node server.mjs" },
+      engines: { node: ">=24" },
+    });
+    expect(result.stack).toBe("node");
+    expect(result.startCommand).toContain("start");
+    expect(result.buildImage).toBe("node:24");
+  });
+});
+
+describe("explicit deployment command precedence", () => {
+  it("preserves native configuration over imported Vercel commands", () => {
+    const result = detectStack(
+      files("package.json", "openship.json", "vercel.json"),
+      {
+        scripts: { start: "node server.mjs", build: "echo default" },
+      },
+      {
+        "openship.json": JSON.stringify({ buildCommand: "echo native" }),
+        "vercel.json": JSON.stringify({ buildCommand: "echo imported" }),
+      },
+    );
+    expect(result.buildCommand).toBe("echo native");
+  });
+  it("honors explicitly disabled Vercel build and install steps", () => {
+    const result = detectStack(
+      files("package.json", "vercel.json"),
+      {
+        scripts: { start: "node server.mjs", build: "echo must-not-run" },
+      },
+      { "vercel.json": JSON.stringify({ installCommand: "", buildCommand: "" }) },
+    );
+    expect(result.installCommand).toBe(":");
+    expect(result.buildCommand).toBe(":");
   });
 });

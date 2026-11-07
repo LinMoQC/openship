@@ -5,9 +5,14 @@ import { checkPermissionOnResource } from "@repo/platform/engine/lib/authorizati
 import { canUseGitHubRepo, resolveSourceAccess } from "@repo/platform/engine/modules/github/github-access";
 import {
   AppError,
+  capabilityAction,
+  capabilityRoot,
+  isCapability,
   isGrantableResourceType,
   isOrgSingletonResourceType,
   scopeIsSubset,
+  type Capability,
+  type GrantPermission,
   type SourceAccessScope,
 } from "@repo/core";
 import { mintPatToken } from "@repo/platform/engine/lib/pat";
@@ -55,7 +60,7 @@ function serialize(t: PublicPersonalAccessToken) {
 }
 
 /** The strongest action a grant's permissions imply. */
-function strongestAction(perms: Permission[]): Permission {
+function strongestAction(perms: readonly GrantPermission[]): Permission {
   if (perms.includes("admin")) return "admin";
   if (perms.includes("write")) return "write";
   return "read";
@@ -87,8 +92,19 @@ function splitRepoGrant(g: { resourceType: string; resourceId: string }): {
  */
 async function minterHasAccess(
   ctx: RequestContext,
-  g: { resourceType: string; resourceId: string; permissions: Permission[] },
+  g: { resourceType: string; resourceId: string; permissions: GrantPermission[] },
 ): Promise<boolean> {
+  // Each capability needs the same reach the minter would need to use it.
+  for (const capability of g.permissions.filter(isCapability)) {
+    const ok = await checkPermissionOnResource(ctx, {
+      resourceType: g.resourceType as never,
+      resourceId: g.resourceId,
+      action: capabilityAction(capability),
+      capability,
+    });
+    if (!ok) return false;
+  }
+  if (g.permissions.every(isCapability)) return true;
   const action = strongestAction(g.permissions);
   if (g.resourceType === "github_installation" || g.resourceType === "github_repository") {
     const op = action === "read" ? "read" : "write";
@@ -221,12 +237,12 @@ export function resolveScopeIntent(opts: {
  * callers satisfy it — `create` binds to `ctx.organizationId`, and
  * `authorizeMcpClient` passes a ctx from `mintContextFor`.
  */
-async function validateGrants(
+export async function validateGrants(
   ctx: RequestContext,
   grants: Array<{
     resourceType: string;
     resourceId: string;
-    permissions: Permission[];
+    permissions: GrantPermission[];
     scope?: SourceAccessScope | null;
   }>,
 ): Promise<{ status: 400 | 403; body: { error: string; code: string } } | null> {
@@ -246,6 +262,17 @@ async function validateGrants(
         body: {
           error: `${g.resourceType} is granted for the whole organization — use "*" as the resource id`,
           code: "SINGLETON_REQUIRES_WILDCARD",
+        },
+      };
+    }
+    // A capability is held on its root type only (`domains:*` on a project).
+    const misplaced = g.permissions.find((p) => isCapability(p) && capabilityRoot(p) !== g.resourceType);
+    if (misplaced) {
+      return {
+        status: 400,
+        body: {
+          error: `${misplaced} is granted on a ${capabilityRoot(misplaced as Capability)}, not a ${g.resourceType}`,
+          code: "INVALID_CAPABILITY",
         },
       };
     }
@@ -297,7 +324,17 @@ async function validateGrants(
 /** POST /api/tokens — mint a token. Returns the plaintext ONCE. */
 export async function create(ctx: RequestContext, body: TCreateTokenBody) {
   assertCredentialManagement(ctx);
+  return mintToken(ctx, body);
+}
 
+/** Internal delegation only. Never exposed by credential routes or returned to an agent. */
+export async function createExecutionToken(ctx: RequestContext, input: { name: string; readOnly: boolean; grants: NonNullable<TCreateTokenBody["grants"]> }) {
+  if (!input.grants.length || (!input.readOnly && ctx.credential?.readOnly))
+    throw new AppError("This task exceeds the initiating credential.", 403, "GRANT_EXCEEDS_ACCESS");
+  return mintToken(ctx, input, Date.now() + 10 * 60000);
+}
+
+async function mintToken(ctx: RequestContext, body: TCreateTokenBody, deadline?: number) {
   // A scoped token carries its own grants. Validate every grant is within the
   // minter's own access BEFORE minting, so a token can never exceed its owner.
   // The "projects it creates" scope is just a grant like any other:
@@ -320,6 +357,7 @@ export async function create(ctx: RequestContext, body: TCreateTokenBody) {
     : null;
   // A short-lived embedding identity or token must not mint a credential that
   // silently outlives the identity that authorized it.
+  if (deadline) expiresAt = new Date(Math.min(expiresAt?.getTime() ?? Infinity, deadline));
   const ceiling = await credentialExpiry(ctx);
   if (ceiling && (!expiresAt || expiresAt > ceiling)) expiresAt = ceiling;
 
@@ -504,7 +542,7 @@ function serializeBinding(
   b: { id: string; oauthClientId: string | null; name: string; organizationId: string | null; readOnly: boolean; scoped: boolean; createdAt: Date; lastUsedAt: Date | null; useCount: number; expiresAt?: Date | null },
   name: string,
   organizationName: string | null,
-  grants: Array<{ resourceType: string; resourceId: string; permissions: Permission[]; scope?: SourceAccessScope }>,
+  grants: Array<{ resourceType: string; resourceId: string; permissions: GrantPermission[]; scope?: SourceAccessScope }>,
   opts: { includeGrants: boolean },
 ) {
   return {

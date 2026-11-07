@@ -2,6 +2,8 @@
   "title": "system",
   "pages": [
     "index",
-    "migration"
+    "migration",
+    "onboarding",
+    "settings"
   ]
 }

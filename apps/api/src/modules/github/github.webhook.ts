@@ -11,6 +11,7 @@
  *   - check_run             → acknowledged, no action
  */
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { repos } from "@repo/db";
 import { env } from "@repo/platform/engine/config/env";
 import { decrypt } from "@repo/platform/engine/lib/encryption";
@@ -71,7 +72,7 @@ async function collectDeliverySecrets(
   const event = headers["x-github-event"];
   // installation / ping events aren't repo-scoped on the deploy side — they hit
   // api.openship.io's App webhook, verified with the env secret (no project).
-  if (event !== "push" && event !== "check_run") return [];
+  if (event !== "push" && event !== "check_run" && event !== "pull_request") return [];
 
   let parsed: unknown;
   try {
@@ -87,24 +88,26 @@ async function collectDeliverySecrets(
 
   const secrets = new Set<string>();
 
-  const projects = await repos.project.findByGitRepo(owner, repo).catch(() => []);
+  const projects = await repos.project.findByGitRepo(owner, repo).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "api/modules/github/github.webhook"); return []; });
   for (const p of projects) {
     if (!p.webhookSecret) continue;
     try {
       secrets.add(decrypt(p.webhookSecret));
-    } catch {
+    } catch (diagnosticFailure) {
+      observeCaughtError(diagnosticFailure, "api/modules/github/github.webhook");
       // corrupted / key-rotated row — skip; env fallback handles it in verify()
     }
   }
 
   // Cloud projects this box forwards for: the binding holds the same per-project
   // secret (preserved across promote), so a forged push still rejects.
-  const bindings = await repos.cloudWebhookBinding.findByRepo(owner, repo).catch(() => []);
+  const bindings = await repos.cloudWebhookBinding.findByRepo(owner, repo).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "api/modules/github/github.webhook"); return []; });
   for (const b of bindings) {
     if (!b.webhookSecret) continue;
     try {
       secrets.add(decrypt(b.webhookSecret));
-    } catch {
+    } catch (diagnosticFailure) {
+      observeCaughtError(diagnosticFailure, "api/modules/github/github.webhook");
       // try the next binding, then env fallback
     }
   }
@@ -188,10 +191,12 @@ export const githubWebhookProvider: WebhookProvider = {
     // A delivery is signed with exactly one hook's secret — accept on the first
     // candidate that matches (each comparison is constant-time).
     const valid = candidates.some((secret) => verifyHmacSha256(payload, secret, signature));
-    return valid ? { valid: true } : { valid: false, error: "Invalid signature" };
+    const appSecrets = [...sourceSecrets, ...(!customAppDelivery && env.GITHUB_WEBHOOK_SECRET ? [env.GITHUB_WEBHOOK_SECRET] : [])];
+    const githubApp = valid && installationId !== undefined && appSecrets.some(secret => verifyHmacSha256(payload, secret, signature));
+    return valid ? { valid: true, ...(githubApp ? { githubApp: true } : {}) } : { valid: false, error: "Invalid signature" };
   },
 
-  async handle(payload: unknown, headers: Record<string, string>): Promise<WebhookHandlerResult> {
+  async handle(payload: unknown, headers: Record<string, string>, verification?: WebhookVerifyResult): Promise<WebhookHandlerResult> {
     const event = headers["x-github-event"];
     if (!event) {
       return { success: true, event: "unknown", message: "Missing x-github-event header" };
@@ -204,12 +209,16 @@ export const githubWebhookProvider: WebhookProvider = {
     // by the push handler. Missing id or claim error → process (fail-open; the
     // commit-sha guard in triggerDeployment is the backstop).
     const deliveryId = headers["x-github-delivery"];
+    // Accept Actions work durably before the legacy deployment receipt claim.
+    // A repeated delivery fills any interrupted fan-out without executing twice.
+    if (verification?.githubApp && deliveryId)
+      await (await import("@repo/platform/engine/modules/actions/triggers")).enqueueActionWebhook(event, payload, deliveryId);
     let anchorId = "";
     const handledProjectIds = new Set<string>();
     if (deliveryId) {
       const claim = await repos.webhookDelivery
         .claimGithub({ deliveryId, event, outcome: "received" })
-        .catch(() => ({ claimed: true, id: "" }));
+        .catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "api/modules/github/github.webhook"); return ({ claimed: true, id: "" }); });
       if (!claim.claimed) {
         return { success: true, event, message: "Duplicate delivery ignored" };
       }
@@ -231,6 +240,10 @@ export const githubWebhookProvider: WebhookProvider = {
         case "check_run":
           result = await handleCheckRun(payload as GitHubCheckRunPayload);
           break;
+        case "pull_request":
+          await (await import("@repo/platform/engine/modules/projects/pull-request-previews")).enqueuePullRequestPreviews(payload);
+          result = { success: true, event, message: "Pull request automation queued" };
+          break;
         case "ping":
           result = { success: true, event, message: "Pong" };
           break;
@@ -246,7 +259,9 @@ export const githubWebhookProvider: WebhookProvider = {
             error: error instanceof Error ? error.message : "Webhook handler failed",
             summary: { handledProjectIds: [...handledProjectIds] },
           })
-          .catch(() => {});
+          .catch((diagnosticFailure) => {
+            observeCaughtError(diagnosticFailure, "api/modules/github/github.webhook");
+          });
       }
       throw error;
     }
@@ -259,7 +274,9 @@ export const githubWebhookProvider: WebhookProvider = {
           error: result.error,
           summary: { handledProjectIds: [...handledProjectIds] },
         })
-        .catch(() => {});
+        .catch((diagnosticFailure) => {
+          observeCaughtError(diagnosticFailure, "api/modules/github/github.webhook");
+        });
     }
     return result;
   },

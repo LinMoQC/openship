@@ -1,3 +1,5 @@
+import { reportCaughtError as observeCaughtError, diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
+import { requireWorkspaceServer } from "../../lib/cloud-workspace-scope";
 /** Live provider billing state plus read access to historical billing records. */
 
 import { eq, and, desc, inArray, db, schema, repos } from "@repo/db";
@@ -6,17 +8,21 @@ import {
   safeErrorMessage,
   CREDIT_PACKS,
   PLANS,
-  RESOURCE_TIER_SPECS,
+  planServiceResources,
+  detectTier,
   resolveCreditPackPriceId,
   type PlanTierId,
   type CreditPackDefinition,
 } from "@repo/core";
-import { entitlementQuota, syncOblienEntitlement } from "./billing-oblien-quota";
+import { entitlementQuota, syncOblienEntitlement, fromOblienCredits } from "./billing-oblien-quota";
 import { cloudPlan, complimentaryCloudPlan } from "./billing-catalog";
-import { canTopUpCloudSubscription, presentCloudSubscription } from "./billing-subscription";
+import { canStartCloudSubscription, canChangeCloudSubscription, canTopUpCloudSubscription, hasPendingSubscriptionChange, presentCloudSubscription } from "./billing-subscription";
 import { ensureNamespace } from "../../lib/openship-cloud";
 import { getBuildMinuteUsage, getFreeSubdomainUsage } from "@repo/platform/engine/lib/plan-guard";
 import { env } from "@repo/platform/engine/config/env";
+import { readCloudCapacity } from "../../lib/cloud-resource-limits";
+import { cloudBillingOwner, type CloudWorkspaceScope } from "../../lib/cloud-workspace-scope";
+import { mapWithLimit } from "../../lib/map-with-limit";
 
 const {
   billingCustomer,
@@ -54,69 +60,36 @@ export interface UpsertSubscriptionInput {
   cancelAtPeriodEnd?: boolean;
 }
 
-// ─── getBillingState ─────────────────────────────────────────────────────────
-
-/** Mirror fresh provider entitlement and add Openship application usage. */
-export async function getBillingState(orgId: string): Promise<BillingState> {
-  await ensureNamespace(orgId);
-  const {
-    entitlement,
-    tier,
-    limits: planLimitsForTier,
-    subscription: providerSubscription,
-    grant,
-  } = await syncOblienEntitlement(orgId, { syncResourceLimits: false });
-  const [plan, legacySubscriptions] = await Promise.all([
-    // A setup-only workspace has no product to look up. Catalog availability
-    // must not hide a customer's balance, invoices or subscription controls.
-    grant ? complimentaryCloudPlan(grant) : tier === "free"
-      ? null
-      : cloudPlan(tier, providerSubscription).catch((error) => {
-          console.warn(
-            `[billing] Plan details are temporarily unavailable: ${safeErrorMessage(error)}`,
-          );
-          return null;
-        }),
-    listLiveSubscriptions(orgId),
-  ]);
-  const subscription = presentCloudSubscription(providerSubscription);
+/** Shared credit read without namespace provisioning or application inventory. */
+async function readBillingCreditState(orgId: string, workspaceId?: CloudWorkspaceScope) {
+  const owner = await cloudBillingOwner(orgId, workspaceId);
+  const synced = await syncOblienEntitlement(orgId, { syncResourceLimits: false, workspaceId: owner.workspaceId });
+  const { entitlement, tier, subscription, grant } = synced;
+  const legacySubscriptions = owner.workspaceId ? [] : await listLiveSubscriptions(orgId);
   const managed = legacySubscriptions.length === 0 && !grant;
-  const canTopUp = canTopUpCloudSubscription(providerSubscription, entitlement);
-  // A missing free catalog product is intentional: project setup is not a
-  // subscription and includes no Cloud credits. Preserve any purchased balance.
-  const monthlyCreditLimit = tier === "free" ? 0 : plan?.monthlyCredits ?? null;
+  const canTopUp = canTopUpCloudSubscription(subscription, entitlement);
   const { quotaLimit, quotaUsed, quotaRemaining } = entitlementQuota(entitlement);
-  const overQuota = quotaRemaining !== null && quotaRemaining <= 0;
-
-  // Build time + free subdomains, read through the SAME helpers the plan gate
-  // enforces with. This used to compute its own window (the org's billing period,
-  // falling back to a rolling 30 days) — which, now that build minutes are
-  // actually enforced, would have shown a user "3 of 15 used" while a different
-  // window refused their deploy. One window, one number, one source.
-  const [buildMinutes, freeSubdomains, servicesUsed, projectsUsed] = await Promise.all([
-    getBuildMinuteUsage(orgId, { tier, limits: planLimitsForTier }),
-    getFreeSubdomainUsage(orgId, { tier, limits: planLimitsForTier }),
-    // Running services = Oblien workspaces, the ceiling customers feel most.
-    repos.service.countRunningForOrg(orgId).catch(() => null),
-    repos.projectGroup
-      .listByOrganization(orgId, { page: 1, perPage: 1 })
-      .then((r) => r.total)
-      .catch(() => null),
-  ]);
-  const buildTimeMinutes = buildMinutes.usedMinutes;
-
-  return {
+  const compute = entitlement.capacity;
+  const state: Pick<BillingState, "workspace" | "creditAlert" | "compute" | "tier" | "currentPeriod" | "balance" | "billing" | "topups"> = {
+    workspace: owner.workspace ? { id: owner.workspace.id, serverId: (await requireWorkspaceServer(orgId, owner.workspace.id)).id, name: owner.workspace.name } : null,
     tier,
-    status: entitlement.status,
-    plan,
-    subscription,
-    complimentary: grant ? { id: grant.id, expiresAt: grant.expiresAt?.toISOString() ?? null } : null,
-    capabilities: {
-      portal: managed,
-      cancellation: managed && subscription !== null && subscription.status !== "canceled",
-      resumption: managed && subscription !== null && subscription.status !== "canceled" && subscription.cancelAtPeriodEnd,
-      subscriptionChange: managed && env.BILLING_ENABLED,
-    },
+    compute: compute ? {
+      billingMode: compute.billingMode, covered: compute.computeCovered, status: compute.status,
+      currentPeriod: { start: compute.periodStart, end: compute.periodEnd }, autoRenew: compute.autoRenew,
+      monthlyAmount: compute.monthlyAmount, paygCapAmount: compute.paygCapAmount,
+      retention: compute.retention, network: compute.network, savings: compute.savings,
+    } : null,
+    creditAlert: !compute && entitlement.quota.alert ? {
+      namespace: entitlement.namespace,
+      state: entitlement.quota.alert.state,
+      percent: entitlement.quota.alert.percent,
+      threshold: entitlement.quota.alert.threshold,
+      thresholds: entitlement.quota.alert.thresholds,
+      // Keep the dashboard contract in milli-credits, just like balance.
+      limit: entitlement.quota.alert.limit === null ? null : fromOblienCredits(entitlement.quota.alert.limit),
+      remaining: entitlement.quota.alert.remaining === null ? null : fromOblienCredits(entitlement.quota.alert.remaining),
+      balance: entitlement.quota.alert.balance === null ? null : fromOblienCredits(entitlement.quota.alert.balance),
+    } : null,
     currentPeriod: {
       start: grant?.period.start ?? (entitlement.periodStart ? new Date(entitlement.periodStart) : null),
       end: grant?.period.end ?? (entitlement.periodEnd ? new Date(entitlement.periodEnd) : null),
@@ -129,34 +102,6 @@ export async function getBillingState(orgId: string): Promise<BillingState> {
       unlimited: tier === "enterprise" && entitlement.status === "active" && subscription !== null
         && ["active", "trialing"].includes(subscription.status) && quotaLimit === null && quotaRemaining === null,
     },
-    monthlyCreditLimit,
-    overQuota,
-    buildTimeMinutes,
-    buildMinutesResetAt: buildMinutes.periodEnd,
-    maxServiceMachine: tier !== "free" && planLimitsForTier.maxResourceTier
-      ? {
-          tier: planLimitsForTier.maxResourceTier,
-          cpuCores: RESOURCE_TIER_SPECS[planLimitsForTier.maxResourceTier].cpuCores,
-          memoryMb: RESOURCE_TIER_SPECS[planLimitsForTier.maxResourceTier].memoryMb,
-        }
-      : null,
-    /**
-     * The two allowances the plan gate actually refuses on, as meters. Both were
-     * declared in this contract and never populated — the dashboard's "Free
-     * routes" meter has been dead code — so a customer could hit a limit the UI
-     * never showed them approaching. `max: null` = unlimited on this tier.
-     */
-    capacity: {
-      routes: { used: freeSubdomains.used, max: freeSubdomains.limit },
-      buildMinutes: { used: buildMinutes.usedMinutes, max: tier === "free" ? 0 : buildMinutes.limitMinutes },
-      // Both of these have a REAL used count, unlike the vCPU/RAM/disk meters
-      // that were declared here and never populated (four permanently empty rows
-      // the dashboard rendered as "Syncing from cloud" forever). Per-service
-      // machine size is deliberately NOT a meter: Oblien's ceilings are
-      // per-workspace, so there is no pool to fill.
-      services: { used: servicesUsed, max: planLimitsForTier.runningServices },
-      projects: { used: projectsUsed, max: planLimitsForTier.maxProjects },
-    },
     billing: {
       enabled: env.BILLING_ENABLED,
       status: env.BILLING_ENABLED ? "live" : "coming_soon",
@@ -165,6 +110,86 @@ export async function getBillingState(orgId: string): Promise<BillingState> {
       // Top-ups need the master switch AND the sub-switch.
       available: canTopUp && managed && env.BILLING_ENABLED && env.BILLING_TOPUPS_ENABLED,
       status: !canTopUp || !managed ? "unavailable" : env.BILLING_ENABLED && env.BILLING_TOPUPS_ENABLED ? "available" : "coming_soon",
+    },
+  };
+  return { owner, ...synced, managed, state };
+}
+
+/** Each subscription is independent. An unavailable read must not suppress a
+ * successfully read sibling or replay another server's warning. */
+export async function getCreditAlerts(orgId: string) {
+  const workspaces = (await repos.cloudWorkspace.listByOrganization(orgId))
+    .filter(workspace => workspace.namespace && !workspace.deletionInProgress);
+  const results = await mapWithLimit(workspaces, 3, async workspace => {
+    try {
+      return { state: (await readBillingCreditState(orgId, workspace.id)).state, unavailable: null };
+    } catch (error) {
+      errorDiagnostics.warn("platform/engine/modules/billing/billing.repository", `[billing] Credit state unavailable for ${workspace.id}: ${safeErrorMessage(error)}`, error);
+      return { state: null, unavailable: workspace.id };
+    }
+  });
+  return {
+    items: results.flatMap(result => result.state ? [result.state] : []),
+    unavailableWorkspaceIds: results.flatMap(result => result.unavailable ? [result.unavailable] : []),
+  };
+}
+
+// ─── getBillingState ─────────────────────────────────────────────────────────
+
+/** Mirror fresh provider entitlement and add Openship application usage. */
+export async function getBillingState(orgId: string, workspaceId?: CloudWorkspaceScope): Promise<BillingState> {
+  await ensureNamespace(orgId, workspaceId);
+  const { owner, entitlement, tier, limits: planLimitsForTier, subscription: providerSubscription, grant, managed, state } = await readBillingCreditState(orgId, workspaceId);
+  // Catalog availability must not hide the balance or subscription controls.
+  const plan = grant ? await complimentaryCloudPlan(grant) : tier === "free" ? null
+    : await cloudPlan(tier, providerSubscription).catch(error => {
+        errorDiagnostics.warn("platform/engine/modules/billing/billing.repository", `[billing] Plan details are temporarily unavailable: ${safeErrorMessage(error)}`, error);
+        return null;
+      });
+  const subscription = presentCloudSubscription(providerSubscription);
+  const changingPlan = Boolean(subscription?.pendingChange) || hasPendingSubscriptionChange(owner.workspace?.subscriptionChange);
+  const monthlyCreditLimit = tier === "free" ? 0 : plan?.monthlyCredits ?? null;
+  const overQuota = !state.compute && state.balance.quotaRemaining !== null && state.balance.quotaRemaining <= 0;
+  // A connected installation keeps its project/service/build records locally.
+  // Partial control-plane counters are unknown server totals, never zero usage.
+  // Provider capacity, credits and the shared host's measured usage stay complete.
+  const hasLinkedApplications = owner.workspace?.linkedProjects.some(link => link.projects.length > 0) ?? false;
+
+  // Use the same application counters and billing windows as the plan gate.
+  const [buildMinutes, freeSubdomains, servicesUsed, projectsUsed, providerCapacity, binding] = await Promise.all([
+    getBuildMinuteUsage(orgId, { tier, limits: planLimitsForTier }, owner.workspaceId),
+    getFreeSubdomainUsage(orgId, { tier, limits: planLimitsForTier }, owner.workspaceId),
+    repos.service.countRunningForOrg(orgId, [], undefined, undefined, owner.workspaceId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/billing/billing.repository"); return null; }),
+    repos.project.countGroupsForOrganization(orgId, owner.workspaceId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/billing/billing.repository"); return null; }),
+    readCloudCapacity(entitlement.namespace).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/billing/billing.repository"); return ({}); }),
+    owner.workspaceId ? repos.cloudDockerWorkspace.find({ ownerWorkspaceId: owner.workspaceId }, orgId) : null,
+  ]);
+  const serviceResources = tier === "free" ? null : planServiceResources(planLimitsForTier);
+  return {
+    ...state,
+    workspace: state.workspace ? { ...state.workspace, provisioned: Boolean(binding?.workspaceId) } : null,
+    status: entitlement.status,
+    plan,
+    subscription,
+    complimentary: grant ? { id: grant.id, expiresAt: grant.expiresAt?.toISOString() ?? null } : null,
+    capabilities: {
+      portal: managed,
+      cancellation: managed && subscription !== null && subscription.status !== "canceled" && !changingPlan,
+      resumption: managed && subscription !== null && subscription.status !== "canceled" && subscription.cancelAtPeriodEnd && !changingPlan,
+      subscriptionChange: managed && env.BILLING_ENABLED && !changingPlan && (canStartCloudSubscription(providerSubscription) || Boolean(owner.workspaceId && canChangeCloudSubscription(providerSubscription, entitlement))),
+    },
+    monthlyCreditLimit,
+    overQuota,
+    buildTimeMinutes: hasLinkedApplications ? null : buildMinutes.usedMinutes,
+    buildMinutesResetAt: buildMinutes.periodEnd,
+    maxServiceMachine: serviceResources
+      ? { tier: detectTier({ ...serviceResources, diskMb: 0 }), ...serviceResources } : null,
+    capacity: {
+      ...providerCapacity,
+      routes: { used: hasLinkedApplications ? null : freeSubdomains.used, max: freeSubdomains.limit },
+      buildMinutes: { used: hasLinkedApplications ? null : buildMinutes.usedMinutes, max: tier === "free" ? 0 : buildMinutes.limitMinutes },
+      services: { used: hasLinkedApplications ? null : servicesUsed, max: planLimitsForTier.runningServices },
+      projects: { used: hasLinkedApplications ? null : projectsUsed, max: planLimitsForTier.maxProjects },
     },
   };
 }

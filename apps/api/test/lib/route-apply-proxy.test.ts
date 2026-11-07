@@ -1,7 +1,18 @@
 import { describe, expect, it, vi } from "vitest";
 
-vi.mock("@repo/db", () => ({ repos: {} }));
+vi.mock("@repo/db", () => ({
+  withAdvisoryLock: async (_key: string, work: () => Promise<unknown>) => work(),
+  repos: {
+  project: { findById: vi.fn(async (id: string) => ({ id, workspaceId: null })) },
+  pullRequestPreview: { findByProject: vi.fn(async () => undefined) },
+  routeProtection: { readPrivate: vi.fn(async () => null) },
+  domain: {listByProject:vi.fn(async()=>[])},
+  deployment: { findById: vi.fn(async () => ({
+    id: "dep-1", projectId: "proj-1", organizationId: "org-1", meta: { deployTarget: "local" },
+  })) },
+} }));
 
+import { repos } from "@repo/db";
 import { reconcileProjectRoutes } from "@repo/platform/engine/lib/route-apply.service";
 
 /**
@@ -18,7 +29,7 @@ import { reconcileProjectRoutes } from "@repo/platform/engine/lib/route-apply.se
 const project = (proxy?: unknown) => ({
   id: "proj-1",
   organizationId: "org-1",
-  cloudWorkspaceId: null,
+  workspaceId: null,
   activeDeploymentId: "dep-1",
   webhookDomain: null,
   routingConfig: proxy ? ({ proxy } as never) : null,
@@ -127,4 +138,23 @@ describe("reconcileProjectRoutes — project request limits", () => {
       proxy: { clientMaxBodySize: "50m" },
     });
   });
+});
+
+it("serves externally terminated domains over HTTP without an origin HTTPS redirect",async()=>{
+ vi.mocked(repos.domain.listByProject).mockResolvedValueOnce([{hostname:"app.example.com",externalIngress:true}] as never);
+ const {routing,registerRoute}=fakeRouting();
+ await reconcileProjectRoutes(project(),{routing,registers:[{...REGISTER[0],isCustomDomain:true}]});
+ expect(registerRoute).toHaveBeenCalledWith(expect.objectContaining({domain:"app.example.com",tls:false,terminatesTlsLocally:false}));
+});
+
+it("checks stored ingress mode before removing any live route",async()=>{
+  vi.mocked(repos.domain.listByProject).mockRejectedValueOnce(new Error("domain inventory unavailable"));
+  const removeRoute=vi.fn(),registerRoute=vi.fn();
+  await expect(reconcileProjectRoutes(project(),{
+    routing:{removeRoute,registerRoute} as never,
+    registers:REGISTER,
+    removes:[{hostname:"old.example.com"}],
+  })).rejects.toThrow("domain inventory unavailable");
+  expect(removeRoute).not.toHaveBeenCalled();
+  expect(registerRoute).not.toHaveBeenCalled();
 });

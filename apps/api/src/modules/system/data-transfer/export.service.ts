@@ -1,9 +1,10 @@
 /**
  * Scoped control-plane export. Collects the selected records, lifts each secret's
  * plaintext into a portable bundle and strips source-instance ciphertext from
- * the database snapshot. Project downloads include readable values by default.
+ * the database snapshot. Downloads include readable values for both scopes.
  */
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
@@ -23,7 +24,6 @@ import {
 
 import { env } from "@repo/platform/engine/config/env";
 import { CloudInstanceNotTransferableError } from "./errors";
-import { sealSecretBundle } from "./passphrase-crypto";
 import { extractPlaintext } from "./secret-codec";
 import { SECRET_COLUMNS, stripTransferSecrets } from "./secret-registry";
 import {
@@ -77,7 +77,7 @@ async function buildManifest(
   const cloudOrgs = [
     ...new Set(
       projects
-        .filter((project) => project.cloudWorkspaceId)
+        .filter((project) => project.workspaceId)
         .map((project) => project.organizationId),
     ),
   ];
@@ -92,7 +92,7 @@ async function buildManifest(
   );
   if (cloudAccounts.length)
     warnings.push(
-      "Cloud projects will work only when the destination workspace is connected to the same Openship Cloud account. A cloud server cannot be transferred in this file.",
+      "Managed server subscriptions and running resources are not transferred. Choose an existing destination server; imported Cloud projects stay disabled until deployed.",
     );
   if (servers.some((server) => !server.included))
     warnings.push(
@@ -100,7 +100,7 @@ async function buildManifest(
     );
   if (
     servers.some(needsExplicitServerMapping) ||
-    projects.some((project) => !project.serverId && !project.cloudWorkspaceId)
+    projects.some((project) => !project.serverId && !project.workspaceId)
   ) {
     warnings.push(
       "Projects on the source control-plane host need an explicit server mapping at the destination.",
@@ -152,7 +152,7 @@ export async function previewInstanceExport(
         slug: schema.project.slug,
         environmentName: schema.project.environmentName,
         serverId: schema.project.serverId,
-        cloudWorkspaceId: schema.project.cloudWorkspaceId,
+        workspaceId: schema.project.workspaceId,
         localPath: schema.project.localPath,
         deletedAt: schema.project.deletedAt,
       })
@@ -181,6 +181,7 @@ async function projectDump(
   try {
     return await dumpProjectTransfer(selection, excludedTables, metadataOnly);
   } catch (error) {
+    observeCaughtError(error, "api/modules/system/data-transfer/export.service");
     throw new InvalidExportSelectionError(
       error instanceof Error ? error.message : "The project selection could not be exported.",
     );
@@ -263,7 +264,7 @@ export async function prepareInstanceExport(
     for (const row of rows) {
       const id = row.id;
       if (typeof id !== "string") continue;
-      const entry = extractPlaintext(spec, id, row[spec.column]);
+      const entry = await extractPlaintext(spec, id, row[spec.column]);
       if (entry) entries.push(entry);
     }
   }
@@ -277,6 +278,10 @@ export async function prepareInstanceExport(
         const info = await stat(path);
         if (!info.isFile() || info.size > 1_048_576) throw new Error("Invalid SSH key file");
         const value = await readFile(path, "utf8");
+        const existing = entries.findIndex((entry) =>
+          entry.table === "servers" && entry.id === server.id && entry.column === "sshPrivateKey",
+        );
+        if (existing !== -1) entries.splice(existing, 1);
         entries.push({
           table: "servers",
           id: String(server.id),
@@ -285,7 +290,8 @@ export async function prepareInstanceExport(
           value,
         });
         server.sshKeyPath = null;
-      } catch {
+      } catch (diagnosticFailure) {
+        observeCaughtError(diagnosticFailure, "api/modules/system/data-transfer/export.service");
         throw new InvalidExportSelectionError(
           `The SSH key file for ${String(server.name ?? server.sshHost)} could not be read. Add its private key in server settings or export without credentials.`,
         );
@@ -297,7 +303,7 @@ export async function prepareInstanceExport(
   return {
     file: {
       kind: graph ? "openship-project-export" : "openship-instance-export",
-      envelopeVersion: 2,
+      envelopeVersion: 4,
       createdAt: new Date().toISOString(),
       sourceDriver: dump.sourceDriver,
       selection,
@@ -314,29 +320,14 @@ export async function prepareInstanceExport(
 }
 
 export async function exportInstance(opts: {
+  /** Accepted for older clients; new downloads always contain plaintext data. */
   passphrase?: string;
   selection?: ExportSelection;
 }): Promise<DataTransferFile> {
   if (env.CLOUD_MODE) throw new CloudInstanceNotTransferableError();
-  const plaintextProject = opts.selection?.scope === "projects" && !opts.passphrase;
-  if (!plaintextProject && opts.selection?.includeSecrets === true && !opts.passphrase) {
-    throw new InvalidExportSelectionError(
-      "Set a transfer password to include environment values, keys, and credentials.",
-    );
-  }
   const prepared = await prepareInstanceExport(opts.selection);
-  if (plaintextProject) {
-    return {
-      ...prepared.file,
-      envelopeVersion: 3,
-      secrets: prepared.secrets ? { ...prepared.secrets, encoding: "plaintext" } : null,
-    };
-  }
   return {
     ...prepared.file,
-    secrets:
-      opts.passphrase && prepared.secrets
-        ? sealSecretBundle(prepared.secrets, opts.passphrase)
-        : null,
+    secrets: prepared.secrets ? { ...prepared.secrets, encoding: "plaintext" } : null,
   };
 }

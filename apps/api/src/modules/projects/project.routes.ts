@@ -5,7 +5,7 @@
  * middleware (check + audit emission). The boot scanner refuses to
  * start if any route lacks one.
  *
- * Cloud-as-source: per-`:id` project routes carry `cloudProjectProxy`
+ * Cloud-as-source: per-`:id` project routes use the shared Cloud resource gateway
  * (mounted AFTER the permission middleware). For a project that is canonical
  * on the SaaS (no local row), it forwards the request to the SaaS as the org
  * owner and returns that response; for a local project it falls through to the
@@ -22,6 +22,7 @@ import {
   ImportLocalProjectBody,
   ProjectControlSchemas,
   RouteRuleInputSchema,
+  RouteProtectionInputSchema,
   ConnectProjectDomainInputSchema,
   SourceScanOptionsSchema,
   UpdateCloneTokenSchema,
@@ -46,8 +47,6 @@ import {
 } from "@repo/contracts";
 import { bodyLimit } from "hono/body-limit";
 import { secureRouter } from "../../lib/secure-router";
-import { requireInstanceAdmin } from "../../middleware/instance-admin";
-import { cloudProjectProxy } from "../../lib/cloud/project-router";
 import * as ctrl from "./project.controller";
 import * as folder from "./folder/folder.controller";
 import * as transfer from "./transfer.controller";
@@ -109,7 +108,7 @@ r.post(
     auditHandledByOperation: true,
     mcp: {
       description:
-        "Register a project from a source directory accessible to the Openship controller. This creates project configuration; deploy separately after reviewing the detected settings.",
+        "Register a project from a source directory accessible to the Openship controller. On desktop, use localPath and an accessible managed serverId to deploy that folder to Cloud without an out-of-band upload. This creates project configuration; deploy the returned projectId separately with buildStrategy:'server' for a managed server. Source location does not choose build location.",
     },
     body: ImportLocalProjectBody,
   },
@@ -130,12 +129,20 @@ r.get(
   edgeConfig.getEdgeConfig,
 );
 
+r.get("/:id/route-protection", {
+  tag: "project:read", localOnly: true,
+  mcp: { description: "List saved hostname password protection and whether the self-hosted edge acknowledged it. Never returns passwords or signing keys." },
+}, routeRules.listRouteProtection);
+r.put("/:id/route-protection", {
+  tag: "project:write", localOnly: true, body: RouteProtectionInputSchema, auditHandledByOperation: true,
+  mcp: { description: "Protect a self-hosted HTTPS hostname with a shared password, unlock it, revoke browser sessions, or retry a pending edge update. Cloud is unsupported. Public routes and direct origin ports are separate." },
+}, routeRules.changeRouteProtection);
+
 /* ─── Route rules (self-hosted OpenResty edge: rate-limit · ban · allow/deny) ── */
 r.get(
   "/:id/route-rules",
   {
     tag: "project:read",
-    localOnly: true,
     mcp: {
       description:
         "List project edge rules for rate limits, access restrictions and traffic filtering.",
@@ -147,7 +154,6 @@ r.post(
   "/:id/route-rules",
   {
     tag: "project:write",
-    localOnly: true,
     body: RouteRuleInputSchema,
     auditHandledByOperation: true,
     mcp: {
@@ -161,7 +167,6 @@ r.patch(
   "/:id/route-rules/:ruleId",
   {
     tag: "project:write",
-    localOnly: true,
     auditHandledByOperation: true,
     mcp: {
       description:
@@ -175,7 +180,6 @@ r.delete(
   "/:id/route-rules/:ruleId",
   {
     tag: "project:write",
-    localOnly: true,
     auditHandledByOperation: true,
     mcp: {
       description:
@@ -190,10 +194,9 @@ r.get(
   "/:id/incidents",
   {
     tag: "project:read",
-    localOnly: true,
     mcp: {
       description:
-        "Container runtime health for this project: OPEN incidents (a workload the health watch found `unhealthy`, `crash_loop`, or `down`, each with its reason, exit code, restart count, OOM flag and a log excerpt) plus recently-resolved ones. Two fields decide whether an empty list means anything, so always read them: `watching` is false when health monitoring is turned OFF — with it off, the absence of incidents is NOT evidence of health; `serverUnreachable` is non-null when the box itself is unreachable, in which case this project's rows are frozen and stale (nothing is being observed). Read this whenever a project looks unhealthy, or a deploy that reported success still isn't serving — it reports the RUNTIME state and complements the pending-actions tool (which covers deploy/domain/routing items that each carry a concrete fix). Incidents auto-resolve when the workload recovers; the usual move for an open one is to redeploy or inspect its `logExcerpt`. Self-hosted only.",
+        "Container runtime health for this project: OPEN incidents (a workload the health watch found `unhealthy`, `crash_loop`, or `down`, each with its reason, exit code, restart count, OOM flag and a log excerpt) plus recently-resolved ones. Two fields decide whether an empty list means anything, so always read them: `watching` is false when health monitoring is turned OFF — with it off, the absence of incidents is NOT evidence of health; `serverUnreachable` is non-null when the box itself is unreachable, in which case this project's rows are frozen and stale (nothing is being observed). Read this whenever a project looks unhealthy, or a deploy that reported success still isn't serving — it reports the RUNTIME state and complements the pending-actions tool (which covers deploy/domain/routing items that each carry a concrete fix). Incidents auto-resolve when the workload recovers; the usual move for an open one is to redeploy or inspect its `logExcerpt`. For customer-owned servers, including hosted Manage.",
     },
   },
   incidents.listProjectIncidents,
@@ -201,11 +204,10 @@ r.get(
 
 /* ─── Folder upload → deploy ─────────────────────────────────────────────
  * Browser-based folder deploy for clients with no filesystem-shared API.
- * `session` returns an opaque upload target: an Oblien workspace token (SaaS,
- * the browser uploads DIRECTLY to Oblien) or a relay path (self-hosted). The
+ * `session` returns an authenticated upload target for private source staging.
+ * Builds transfer that source to the selected connected or managed server. The
  * binary /folder/upload route is excluded from MCP (see mcp-tools). */
-// session + scan run on BOTH SaaS and self-hosted (session provisions the
-// Oblien workspace / staging dir; scan detects on the uploaded source).
+// Session, upload and scan share the same path on SaaS and self-hosted installs.
 r.post(
   "/folder/session",
   {
@@ -216,7 +218,7 @@ r.post(
     body: FolderSessionBody,
     mcp: {
       description:
-        "Folder-upload deploy — STEP 1/4. Opens an upload session for a local source folder and returns `upload` = { url, absoluteUrl, method, headers, requiresAuth }. NEXT, upload the gzipped tarball yourself: POST it to `upload.absoluteUrl` (or resolve the API-relative `upload.url` against your own API base) with the returned headers and Content-Type: application/gzip — and, when `upload.requiresAuth` is true, the SAME Authorization: Bearer token you used to open the session. That byte upload is NOT an MCP tool (raw binary can't cross JSON-RPC) — use an HTTP client. Then call folder/scan. Sequence: session → (out-of-band tarball upload) → folder/scan → projects/ensure → deployments/build/access.",
+        "Open a folder-upload session for projectId. Credentials limited to their own projects must create a project first and pass its id; omitting projectId requires wildcard project write access. Returns upload = { url, absoluteUrl, method, headers, requiresAuth }. An authenticated HTTP uploader must POST the gzipped tarball with the returned headers and the same API credential. Binary upload is not an MCP tool and MCP does not expose its OAuth bearer. For a folder on the desktop controller's machine, use projects/import with localPath instead. After upload: folder/scan → projects/ensure (explicit projectId) → deployments/build/access.",
     },
   },
   folder.createSession,
@@ -251,9 +253,8 @@ r.post(
   },
   folder.revealSessionEnv,
 );
-// The relay upload is SELF-HOSTED ONLY: on the SaaS the browser uploads
-// straight to the Oblien workspace, so the API never receives bytes. localOnly
-// 404s this in CLOUD_MODE; the 300MB bodyLimit only runs once localOnly passes.
+// Source bytes are staged privately on either installation; only the selected
+// execution server runs builds. The operation checks ownership and its ticket.
 r.post(
   "/folder/upload/:sessionId",
   {
@@ -261,7 +262,6 @@ r.post(
     collection: true,
     collectionProject: true,
     auditHandledByOperation: true,
-    localOnly: true,
     mcpExcluded:
       "Binary tarball upload; use the authenticated upload URL from folder/session outside JSON-RPC.",
   },
@@ -334,7 +334,6 @@ r.get(
     tag: "project:read",
     mcp: { description: "Get a project by id — config, source, routes, status." },
   },
-  cloudProjectProxy,
   ctrl.getById,
 );
 r.patch(
@@ -345,7 +344,6 @@ r.patch(
     auditHandledByOperation: true,
     mcp: { description: "Update a project's configuration (build config, source, options)." },
   },
-  cloudProjectProxy,
   ctrl.update,
 );
 r.delete(
@@ -359,7 +357,6 @@ r.delete(
     },
     query: RemoveProjectSchema,
   },
-  cloudProjectProxy,
   ctrl.remove,
 );
 r.get(
@@ -368,7 +365,6 @@ r.get(
     tag: "project:read",
     mcp: { description: "Get a project's detailed info (runtime, build, source)." },
   },
-  cloudProjectProxy,
   ctrl.getInfo,
 );
 r.get(
@@ -377,7 +373,6 @@ r.get(
     tag: "project:read",
     mcp: { description: "List a project's environments (production / previews)." },
   },
-  cloudProjectProxy,
   ctrl.listEnvironments,
 );
 r.post(
@@ -388,7 +383,6 @@ r.post(
     body: CreateProjectEnvironmentBody,
     mcp: { description: "Create a project environment (e.g. a preview)." },
   },
-  cloudProjectProxy,
   ctrl.createEnvironment,
 );
 r.get(
@@ -397,7 +391,6 @@ r.get(
     tag: "project:read",
     mcp: { description: "Preview what deleting this project would remove (read-only)." },
   },
-  cloudProjectProxy,
   ctrl.deletionPreview,
 );
 
@@ -410,7 +403,6 @@ r.post(
     body: SetOptionsBody,
     mcp: { description: "Set build/deploy options for a project." },
   },
-  cloudProjectProxy,
   ctrl.setOptions,
 );
 r.post(
@@ -422,7 +414,6 @@ r.post(
       description: "Live port-reachability check for the project's active deployment (advisory).",
     },
   },
-  cloudProjectProxy,
   ctrl.portCheck,
 );
 r.post(
@@ -435,7 +426,6 @@ r.post(
         "Live static-output check for the project's active deployment (advisory; static apps).",
     },
   },
-  cloudProjectProxy,
   ctrl.outputCheck,
 );
 r.post(
@@ -443,13 +433,13 @@ r.post(
   {
     auditHandledByOperation: true,
     tag: "project:admin",
+    instanceAdmin: true,
     localOnly: true,
     mcp: {
       description:
         "Clear all unused Docker build cache on the project's self-hosted Docker server. Build cache is host-wide, so other projects on that server may rebuild dependencies on their next deployment. Returns reclaimed bytes.",
     },
   },
-  requireInstanceAdmin(),
   ctrl.clearBuildCache,
 );
 
@@ -461,7 +451,6 @@ r.post(
     tag: "project:write",
     mcp: { description: "Enable a project (allow deploys / bring online)." },
   },
-  cloudProjectProxy,
   ctrl.enable,
 );
 r.post(
@@ -471,11 +460,18 @@ r.post(
     tag: "project:write",
     mcp: { description: "Disable a project (pause deploys / take offline)." },
   },
-  cloudProjectProxy,
   ctrl.disable,
 );
 
 /* ─── Retry routing and domain checks (no rebuild) ──────────────────────── */
+r.get(
+  "/:id/routing/retry/stream",
+  {
+    tag: "project:read",
+    mcpExcluded: "Read-only SSE replay of an existing routing repair session.",
+  },
+  ctrl.retryRoutingStream,
+);
 r.post(
   "/:id/routing/retry/stream",
   {
@@ -484,7 +480,6 @@ r.post(
     mcpExcluded:
       "SSE transport for live progress. Use the resource’s JSON status/log tools over MCP, or an authenticated HTTP client for streaming.",
   },
-  cloudProjectProxy,
   ctrl.retryRoutingStream,
 );
 
@@ -498,7 +493,6 @@ r.post(
         "Repair project routes and verify pending domains and HTTPS without rebuilding; clears the routing warning only when all checks succeed.",
     },
   },
-  cloudProjectProxy,
   ctrl.retryRouting,
 );
 
@@ -536,6 +530,19 @@ r.post(
 );
 
 /* ─── Environment variables ────────────────────────────────────────────── */
+r.get("/:id/previews", { tag: "project:read", mcp: { description: "List managed pull request previews, URLs, lifecycle state, and configuration." } }, ctrl.listPreviews);
+r.post("/:id/previews", { tag: "project:write", body: ProjectControlSchemas.configurePreviews.input,
+  mcp: { description: "Enable or disable isolated same-repository pull request previews. Preview Environment values are used; disabling cleans up managed previews." },
+}, ctrl.configurePreviews);
+r.post("/:id/build-cache/migration", {
+  tag: "project:write", body: ProjectControlSchemas.buildCacheMigration.input,
+  mcp: { description: "Inspect manual build cache mounts and migrate selected mounts after a successful managed-cache deployment. Cached volume data is retained." },
+}, ctrl.buildCacheMigration);
+r.post("/:id/env/migrate-commands", {
+  tag: "project:write",
+  body: ProjectControlSchemas.migrateCommandEnvironment.input,
+  mcp: { description: "Atomically move literal command variables into encrypted project or service Environment. Refuses changed commands, shell expressions, and conflicting values." },
+}, ctrl.migrateCommandEnvironment);
 // Project-scoped bulk routes (no per-env_var id in the URL) → gate on the
 // project, matching what the controllers already assert (permission.assert
 // project:read/write) and how /:id/options works. The previous
@@ -549,7 +556,6 @@ r.get(
     mcp: { description: "List a project's environment variables (secret values masked)." },
     query: ProjectControlSchemas.listEnvVars.input,
   },
-  cloudProjectProxy,
   ctrl.listEnvVars,
 );
 // Project env edits go through the MERGE path (PATCH) only — the old destructive
@@ -567,7 +573,6 @@ r.patch(
       description: "Merge env var changes (upserts + deletes); untouched vars are preserved.",
     },
   },
-  cloudProjectProxy,
   ctrl.mergeEnvVars,
 );
 
@@ -579,7 +584,6 @@ r.get(
     mcpExcluded:
       "Git credential management is kept in the authenticated dashboard; MCP deploys through the configured credentials.",
   },
-  cloudProjectProxy,
   ctrl.getCloneToken,
 );
 r.patch(
@@ -591,7 +595,6 @@ r.patch(
     mcpExcluded:
       "Git credential management is kept in the authenticated dashboard; MCP deploys through the configured credentials.",
   },
-  cloudProjectProxy,
   ctrl.updateCloneToken,
 );
 
@@ -599,7 +602,6 @@ r.patch(
 r.get(
   "/:id/git",
   { tag: "project:read", mcp: { description: "Get the project's linked git repository info." } },
-  cloudProjectProxy,
   ctrl.getGitInfo,
 );
 r.get(
@@ -608,7 +610,6 @@ r.get(
     tag: "project:read",
     mcp: { description: "Compare the deployed commit against the remote HEAD." },
   },
-  cloudProjectProxy,
   ctrl.getCommitStatus,
 );
 
@@ -622,7 +623,6 @@ r.get(
         "What is waiting on a human for this project, and how to resolve each item. Covers a deploy blocked on a named cause (e.g. a port already in use), a deploy HELD right now on a decision (answer it with the build-respond tool — the exact action id and body are in the item's resolveWith, and `expiresAt` is when the deploy gives up), a partial-failure release awaiting keep/reject, unsynced routing, unverified domains, and failed/expired certificates. Each item carries `resolveWith`, an array of concrete {method, path, body} calls — use those rather than guessing. Call this after starting a deploy that seems stuck, and whenever a project reads as Action Required. This covers deploy/domain/routing items only — for container-runtime health (crash loops, unhealthy or down containers) read the project's incidents instead. Scoped to ONE project: to ask what is broken across the whole installation (these items for every project, plus runtime incidents, unreachable servers and edge/mail state, ranked by severity), read the issues feed instead.",
     },
   },
-  cloudProjectProxy,
   ctrl.getPendingActions,
 );
 r.post(
@@ -633,7 +633,6 @@ r.post(
     body: LinkRepoBody,
     mcp: { description: "Link a git repository to the project." },
   },
-  cloudProjectProxy,
   ctrl.linkRepo,
 );
 r.put(
@@ -647,7 +646,6 @@ r.put(
         "Atomically configure this single-app project to track and deploy a prebuilt container image from GitHub releases or a version URL.",
     },
   },
-  cloudProjectProxy,
   ctrl.setReleaseImageSource,
 );
 r.get(
@@ -657,7 +655,6 @@ r.get(
     mcp: { description: "List the linked repository's branches." },
     query: ProjectControlSchemas.listBranches.input,
   },
-  cloudProjectProxy,
   ctrl.listBranches,
 );
 r.post(
@@ -668,7 +665,6 @@ r.post(
     body: SetAutoDeployBody,
     mcp: { description: "Enable/disable auto-deploy on push." },
   },
-  cloudProjectProxy,
   ctrl.setAutoDeploy,
 );
 r.post(
@@ -682,7 +678,6 @@ r.post(
     },
     body: ProjectControlSchemas.setWebhookDomain.input,
   },
-  cloudProjectProxy,
   ctrl.setWebhookDomain,
 );
 r.post(
@@ -693,7 +688,6 @@ r.post(
     body: SetBranchBody,
     mcp: { description: "Set the project's deploy branch." },
   },
-  cloudProjectProxy,
   ctrl.setBranch,
 );
 
@@ -704,7 +698,6 @@ r.get(
     tag: "project:read",
     mcp: { description: "List a project's incoming webhooks (dynamic trigger URLs)." },
   },
-  cloudProjectProxy,
   incomingWebhooks.list,
 );
 r.post(
@@ -717,7 +710,6 @@ r.post(
       description: "Create an incoming webhook that fires a deploy or job when its URL is called.",
     },
   },
-  cloudProjectProxy,
   incomingWebhooks.create,
 );
 r.patch(
@@ -728,7 +720,6 @@ r.patch(
     body: UpdateIncomingWebhookBody,
     mcp: { description: "Update an incoming webhook (name/enabled/action/auth)." },
   },
-  cloudProjectProxy,
   incomingWebhooks.update,
 );
 r.post(
@@ -738,7 +729,6 @@ r.post(
     auditHandledByOperation: true,
     mcp: { description: "Rotate an incoming webhook's token / HMAC secret." },
   },
-  cloudProjectProxy,
   incomingWebhooks.rotate,
 );
 r.delete(
@@ -748,7 +738,6 @@ r.delete(
     auditHandledByOperation: true,
     mcp: { description: "Delete an incoming webhook." },
   },
-  cloudProjectProxy,
   incomingWebhooks.remove,
 );
 r.get(
@@ -758,7 +747,6 @@ r.get(
     mcp: { description: "List one incoming webhook's recent deliveries (paginated)." },
     query: WebhookPageInputSchema,
   },
-  cloudProjectProxy,
   incomingWebhooks.hookDeliveries,
 );
 r.get(
@@ -771,7 +759,6 @@ r.get(
     },
     query: WebhookPageInputSchema,
   },
-  cloudProjectProxy,
   incomingWebhooks.deliveries,
 );
 
@@ -785,7 +772,6 @@ r.post(
         "Invoke an enabled incoming webhook with the current and saved actor's permissions.",
     },
   },
-  cloudProjectProxy,
   incomingWebhooks.invoke,
 );
 
@@ -1082,7 +1068,6 @@ r.post(
 r.get(
   "/:id/resources",
   { tag: "project:read", mcp: { description: "Get the project's CPU/RAM/disk resource config." } },
-  cloudProjectProxy,
   ctrl.getResources,
 );
 r.get(
@@ -1094,7 +1079,6 @@ r.get(
         "Get the rollback retention window in force (explicit or disk-sized), the measured per-release size, and the deploy host's free disk.",
     },
   },
-  cloudProjectProxy,
   ctrl.getRollbackCapacity,
 );
 r.patch(
@@ -1105,7 +1089,6 @@ r.patch(
     body: UpdateResourcesBody,
     mcp: { description: "Update the project's CPU/RAM/disk, sleep mode, or port." },
   },
-  cloudProjectProxy,
   ctrl.updateResources,
 );
 r.post(
@@ -1115,7 +1098,6 @@ r.post(
     tag: "project:write",
     mcpExcluded: "Compatibility alias; use PATCH /api/projects/:id/resources.",
   },
-  cloudProjectProxy,
   ctrl.updateResources,
 );
 
@@ -1128,7 +1110,6 @@ r.post(
     body: SetSleepModeBody,
     mcp: { description: "Set the project's sleep mode (auto_sleep / always_on)." },
   },
-  cloudProjectProxy,
   ctrl.setSleepMode,
 );
 
@@ -1140,7 +1121,6 @@ r.get(
     mcp: { description: "List a project's deployments (history, statuses)." },
     query: ProjectControlSchemas.listDeployments.input,
   },
-  cloudProjectProxy,
   ctrl.listDeployments,
 );
 r.post(
@@ -1151,7 +1131,6 @@ r.post(
     mcpExcluded:
       "Browser deployment-session handoff. MCP starts deployments through /api/deployments/build/access.",
   },
-  cloudProjectProxy,
   ctrl.deploymentSession,
 );
 
@@ -1167,11 +1146,28 @@ r.post(
         "Attach a custom domain to this project, with optional www alias or external ingress. Inspect the returned routing status and pending actions; attaching a hostname does not prove DNS or HTTPS readiness.",
     },
   },
-  cloudProjectProxy,
   ctrl.connectDomain,
 );
 
+/* ─── Runtime role configuration ───────────────────────────────────────── */
+r.get("/:id/roles/configuration", { tag: "project:read", readOnly: true,
+  mcp: { description: "Read editable runtime role settings from the active Docker release." } }, ctrl.runtimeRoleConfiguration);
+r.post("/:id/roles/configuration", { tag: "project:write", body: ProjectControlSchemas.configureRuntimeRoles.input,
+  mcp: { description: "Apply runtime role settings using the active image without rebuilding or restarting web. Expected release and project revision prevent stale edits." } }, ctrl.configureRuntimeRoles);
+
 /* ─── Runtime logs ─────────────────────────────────────────────────────── */
+r.get(
+  "/:id/roles",
+  {
+    tag: "project:read",
+    readOnly: true,
+    mcp: {
+      description:
+        "Read the active deployment's runtime roles, replicas, live status, and restart counts.",
+    },
+  },
+  ctrl.runtimeRoles,
+);
 r.get(
   "/:id/logs",
   {
@@ -1179,17 +1175,16 @@ r.get(
     mcp: { description: "Fetch the project's runtime logs (non-streaming)." },
     query: ProjectControlSchemas.runtimeLogs.input,
   },
-  cloudProjectProxy,
   ctrl.runtimeLogs,
 );
 r.get(
   "/:id/logs/stream",
   {
     tag: "project:read",
+    query: ProjectControlSchemas.runtimeLogs.input,
     mcpExcluded:
       "SSE transport for live progress. Use the resource’s JSON status/log tools over MCP, or an authenticated HTTP client for streaming.",
   },
-  cloudProjectProxy,
   ctrl.runtimeLogStream,
 );
 
@@ -1201,7 +1196,6 @@ r.get(
     mcp: { description: "Fetch recent HTTP request logs for the project." },
     query: RecentServerLogsInputSchema,
   },
-  cloudProjectProxy,
   ctrl.recentServerLogs,
 );
 r.get(
@@ -1211,7 +1205,6 @@ r.get(
     mcpExcluded:
       "Browser streaming credential. MCP reads the bounded server-logs endpoint with its own bearer.",
   },
-  cloudProjectProxy,
   ctrl.serverLogStreamToken,
 );
 r.get(
@@ -1221,7 +1214,6 @@ r.get(
     mcpExcluded:
       "SSE transport for live progress. Use the resource’s JSON status/log tools over MCP, or an authenticated HTTP client for streaming.",
   },
-  cloudProjectProxy,
   ctrl.serverLogStream,
 );
 

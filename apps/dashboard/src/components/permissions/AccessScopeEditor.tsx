@@ -1,5 +1,7 @@
 "use client";
 
+import { useAccessCopy } from "./access-copy";
+
 import { Icon as UiIcon } from "@repo/ui/icons";
 
 /**
@@ -31,7 +33,6 @@ import {
 } from "./mcp-access-templates";
 import type { LevelsConfig } from "./ResourcePicker";
 import type { CatalogEntry, PickerGrant, ResourceType } from "@/lib/api";
-import { useI18n } from "@/components/i18n-provider";
 
 export function AccessScopeEditor({
   selection,
@@ -39,6 +40,7 @@ export function AccessScopeEditor({
   orgKey,
   disabled,
   showCreateCapability = true,
+  showCapabilities = true,
   onCatalogLoaded,
   suppressWildcardTypes = ["project"],
   onPickerChange,
@@ -52,14 +54,15 @@ export function AccessScopeEditor({
   /** Member grants hide it: the grants API's permission whitelist has no "create",
    *  so the switch would offer a capability the server drops. */
   showCreateCapability?: boolean;
+  /** Per-resource capability toggles (`domains:delete`). Token grants only. */
+  showCapabilities?: boolean;
   onCatalogLoaded?: (type: ResourceType, entries: CatalogEntry[]) => void;
   /** Defaults to ["project"] — see the picker call below. */
   suppressWildcardTypes?: ResourceType[];
   onPickerChange: (grants: PickerGrant[]) => void;
   onCreateChange: (on: boolean) => void;
 }) {
-  const { t } = useI18n();
-  const m = t.misc.mcpAuthorize;
+  const m = useAccessCopy();
 
   // read/write/admin shown as the three named levels. This is the ONLY place a
   // level is set — the summary rail states it, it doesn't edit it.
@@ -145,6 +148,7 @@ export function AccessScopeEditor({
         // project wildcard.
         suppressWildcardTypes={suppressWildcardTypes}
         levels={levels}
+        capabilities={showCapabilities}
         onCatalogLoaded={onCatalogLoaded}
         disabled={disabled}
       />

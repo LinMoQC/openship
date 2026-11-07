@@ -141,19 +141,20 @@ paths return **400**, missing paths **404**.
 
 | Operation | SDK | REST API |
 | --- | --- | --- |
+| First-run check — is any server configured yet? | `instance.onboardingStatus()`<br />Remote client | `GET /api/system/onboarding`<br />`Handler authentication` · Self-hosted |
+| First-run setup; persists settings and creates the first server. Returns 403 once configured. | `instance.configureOnboarding(input)`<br />Remote client | `POST /api/system/onboarding`<br />`Handler authentication` · Self-hosted |
+| Promote a zero-auth instance to email/password login. | `instance.upgradeToAuth(input)`<br />Remote client | `POST /api/system/upgrade-to-auth`<br />`Handler authentication` · Self-hosted |
 | Create the initial administrator during authorized bootstrap. | HTTP only | `POST /api/system/bootstrap-admin`<br />`Internal operator` · Self-hosted |
+| Exchange the private installation credential for a temporary local CLI admin session; requires X-Internal-Token and refuses Cloud/browser callers. | HTTP only | `POST /api/system/cli-session`<br />`Internal operator` · Self-hosted |
 | Begin the installation's Cloud account connection. | HTTP only | `POST /api/system/cloud-connect`<br />`Internal operator` · Self-hosted |
 | Read the installation's Cloud connection status. | HTTP only | `GET /api/system/cloud-status`<br />`Internal operator` · Self-hosted |
 | Read installation health. | HTTP only | `GET /api/system/health`<br />`Internal operator` · Self-hosted |
 | Create an account from an eligible self-hosted invitation. | HTTP only | `POST /api/system/invite-signup`<br />`Handler authentication` · Self-hosted |
-| First-run check — is any server configured yet? | HTTP only | `GET /api/system/onboarding`<br />`Handler authentication` · Self-hosted |
-| First-run setup; persists settings and creates the first server. Returns 403 once configured. | HTTP only | `POST /api/system/onboarding`<br />`Handler authentication` · Self-hosted |
 | Test a connection during initial onboarding. | HTTP only | `POST /api/system/onboarding/test-connection`<br />`Handler authentication` · Self-hosted |
 | Reset the administrator password through the local recovery boundary. | HTTP only | `POST /api/system/reset-admin-password`<br />`Internal operator` · Self-hosted |
 | Register the Openship installation as a managed application. | HTTP only | `POST /api/system/self-register`<br />`Internal operator` · Self-hosted |
 | Stream installation registration progress. | HTTP only | `GET /api/system/self-register/stream`<br />`Internal operator` · Self-hosted |
 | Read instance config for the desktop app. | HTTP only | `GET /api/system/setup`<br />`Internal operator` · Self-hosted |
 | Push instance config from the desktop app. | HTTP only | `POST /api/system/setup`<br />`Internal operator` · Self-hosted |
-| Promote a zero-auth instance to email/password login. | HTTP only | `POST /api/system/upgrade-to-auth`<br />`Handler authentication` · Self-hosted |
 
 {/* api-operations:end */}

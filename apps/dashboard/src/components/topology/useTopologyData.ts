@@ -1,11 +1,13 @@
 "use client";
 
+import { observedAllSettled } from "@repo/core/diagnostics";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getApiErrorMessage } from "@/lib/api/client";
 import { servicesApi, type ServiceContainer } from "@/lib/api/services";
 import { CONNECTIONS_CHANGED, connectionsApi, type ProjectConnection } from "@/lib/api/connections";
 import type { ProjectCluster } from "@repo/contracts";
 import { projectClusterApi } from "@/lib/api/project-cluster";
+import { useRuntimeRoles } from "@/hooks/useRuntimeRoles";
 
 /** Status and bindings are refreshed separately from the shared service definitions. */
 export function useTopologyData(
@@ -15,6 +17,7 @@ export function useTopologyData(
   clusterTarget = false,
   activeDeploymentId?: string | null,
 ) {
+  const roles = useRuntimeRoles(projectId, activeDeploymentId, deployed && !clusterTarget);
   const [containers, setContainers] = useState<ServiceContainer[] | null>(null);
   const [connections, setConnections] = useState<ProjectConnection[]>([]);
   const [errors, setErrors] = useState<string[]>([]);
@@ -28,14 +31,14 @@ export function useTopologyData(
     const revision = ++request.current;
     inFlight.current = true;
     setLoading(true);
-    const results = await Promise.allSettled([
+    const results = await observedAllSettled([
       deployed && !clusterTarget
         ? servicesApi.containers(projectId)
         : Promise.resolve({ success: true, containers: [] as ServiceContainer[] }),
       connectionsApi.list(projectId),
       refreshServices(),
       clusterTarget ? projectClusterApi.get(projectId) : Promise.resolve(null),
-    ]);
+    ], "dashboard/components/topology/useTopologyData");
     if (revision !== request.current) return;
     const problems: string[] = [];
     const runtime = results[0];
@@ -86,5 +89,19 @@ export function useTopologyData(
       window.removeEventListener(CONNECTIONS_CHANGED, changed);
     };
   }, [refresh, clusterTarget]);
-  return { containers, connections, errors, loading, ready, refresh, cluster, setCluster };
+  const refreshAll = useCallback(
+    () => Promise.all([refresh(), roles.refresh()]),
+    [refresh, roles.refresh],
+  );
+  return {
+    containers,
+    connections,
+    errors: [...errors, ...(roles.error ? [roles.error] : [])],
+    loading: loading || roles.loading,
+    ready,
+    refresh: refreshAll,
+    cluster,
+    setCluster,
+    roles: roles.data,
+  };
 }

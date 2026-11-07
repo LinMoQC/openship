@@ -1,14 +1,18 @@
 "use client";
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { Icon as UiIcon } from "@repo/ui/icons";
 
 import React, { useState, useRef, useCallback } from "react";
+import { usePlatform } from "@/context/PlatformContext";
+import ServerSelector from "@/components/shared/ServerSelector";
 import { useRouter } from "next/navigation";
 import { buildFolderTarGz, collectFolderFiles } from "@/utils/tarGz";
 import { encodeUploadSlug } from "@/utils/repoSlug";
 import { folderApi } from "@/lib/api/folder";
 import { frameworks, type FrameworkConfig } from "@/components/import-project/Frameworks";
 import { useI18n, interpolate } from "@/components/i18n-provider";
+import { useCloudDeployPricing } from "@/hooks/useCloudDeployPricing";
 
 type Phase = "idle" | "packing" | "uploading";
 
@@ -37,6 +41,11 @@ function detectPackageManager(paths: Set<string>): string {
 export function FolderUpload() {
   const { t } = useI18n();
   const router = useRouter();
+  const { selfHosted } = usePlatform();
+  const [serverId, setServerId] = useState<string>();
+  const [workspaceId, setWorkspaceId] = useState<string>();
+  const [destinationReady, setDestinationReady] = useState(selfHosted);
+  const showCloudPricing = useCloudDeployPricing(workspaceId);
   const fileRef = useRef<HTMLInputElement>(null);
   const [stack, setStack] = useState<FrameworkConfig | null>(null);
   const [picked, setPicked] = useState<Picked | null>(null);
@@ -63,7 +72,8 @@ export function FolderUpload() {
       try {
         const pkg = JSON.parse(await pkgEntry.file.text());
         if (typeof pkg?.name === "string") name = pkg.name;
-      } catch {
+      } catch (diagnosticFailure) {
+        observeCaughtError(diagnosticFailure, "dashboard/app/(dashboard)/library/components/FolderUpload");
         /* ignore malformed package.json */
       }
     }
@@ -76,7 +86,7 @@ export function FolderUpload() {
   }, []);
 
   const handleDeploy = async () => {
-    if (!picked || !stack) return;
+    if (!picked || !stack || busy || (!selfHosted && !destinationReady)) return;
     setError("");
     try {
       setPhase("packing");
@@ -84,6 +94,7 @@ export function FolderUpload() {
 
       setPhase("uploading");
       const session = await folderApi.createSession({
+        serverId,
         stack: stack.id,
         packageManager: picked.packageManager,
         name: picked.name,
@@ -93,8 +104,11 @@ export function FolderUpload() {
       const params = new URLSearchParams({ stack: stack.id, name: picked.name });
       router.push(`/deploy/${encodeUploadSlug(session.sessionId)}?${params.toString()}`);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : t.library.folderUpload.uploadError);
+      observeCaughtError(err, "dashboard/app/(dashboard)/library/components/FolderUpload");
       setPhase("idle");
+      if (!showCloudPricing(err)) {
+        setError(err instanceof Error ? err.message : t.library.folderUpload.uploadError);
+      }
     }
   };
 
@@ -157,6 +171,21 @@ export function FolderUpload() {
       </div>
 
       <div className="px-5 py-4">
+        {!selfHosted && (
+          <div className="mb-4">
+            <ServerSelector
+              label={t.billing.workspaces.destination}
+              value={serverId}
+              onSelect={(server) => {
+                setServerId(server?.id);
+                setWorkspaceId(server?.raw.managed?.id);
+              }}
+              onReadyChange={setDestinationReady}
+              forDeployment
+              disabled={busy}
+            />
+          </div>
+        )}
         {!picked ? (
           <div
             onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
@@ -212,7 +241,7 @@ export function FolderUpload() {
 
             <button
               onClick={handleDeploy}
-              disabled={busy}
+              disabled={busy || (!selfHosted && !destinationReady)}
               className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
             >
               {busy ? <UiIcon name="spinner" className="size-4 animate-spin" /> : <UiIcon name="arrow-right" className="size-4 rtl:rotate-180" />}

@@ -1,6 +1,6 @@
 Desktop updates require both a SHA-256 sidecar and a publisher signature. The
 updater verifies the downloaded bytes, installer name and release version against
-the public key embedded from `src/main/update-trust.json`. Missing or invalid
+the public key embedded from `packages/core/src/updates/signing-public-key.json`. Missing or invalid
 proofs stop installation, including for unsigned legacy release assets.
 
 The GitHub release workflow runs `scripts/sign-updates.mjs` with the encrypted
@@ -19,3 +19,22 @@ signing key. Changing only the repository secret will fail the release check.
 
 Run `bun run test test/update-signature.test.ts test/preload-sandbox.test.ts`
 from `apps/desktop` to check the signer/updater contract and bundled preload.
+
+macOS release work is checkpointed in three jobs: build and sign the DMGs,
+submit each architecture to Apple, then wait for acceptance and staple the
+ticket. The signed DMGs and submission receipts are retained as workflow
+artifacts for seven days, separate from published release assets. Receipts
+identify the installer checksum, source commit and workflow run; a mismatch
+stops notarization.
+
+If Apple polling or stapling fails, use **Re-run failed jobs** on the original
+Release run. Successful builds and Apple submissions are reused. Temporary
+network failures are retried automatically; a processing timeout leaves the
+submission at Apple running, so another attempt resumes that submission.
+Rejected submissions and invalid tickets block publication. If Apple's report
+requires changing application code, release a new version once any artifacts
+of the current version have been published; do not move a published tag.
+
+Run `bun test scripts/macos-notarization.test.ts` from the repository root to
+verify checkpoint binding, failure recovery and the publication gate. These
+tests simulate Apple responses without using signing credentials.

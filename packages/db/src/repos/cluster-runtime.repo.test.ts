@@ -30,6 +30,9 @@ beforeEach(async () => {
   await db.delete(schema.clusterRuntime);
   await db.delete(schema.computeCluster);
   await db.delete(schema.serverCluster);
+  await db.delete(schema.project);
+  await db.delete(schema.servers);
+  await db.delete(schema.cloudWorkspace);
   await db.delete(schema.organization);
   await db.insert(schema.organization).values([
     { id: "org", name: "Org" },
@@ -96,7 +99,7 @@ describe("project cluster binding", () => {
     expect((await clusters.get("org", cluster.id)).scaling).toBeNull();
     expect((await clusters.list("org"))[0]?.scaling).toBeNull();
     const runtime = await readyRuntime();
-    const expected = { status: "ready", verifiedAt: runtime.verifiedAt };
+    const expected = { provider: "k3s", status: "ready", verifiedAt: runtime.verifiedAt };
     expect((await clusters.get("org", cluster.id)).scaling).toEqual(expected);
     expect((await clusters.list("org"))[0]?.scaling).toEqual(expected);
     expect(await clusters.list("other")).toEqual([]);
@@ -185,9 +188,11 @@ describe("project cluster binding", () => {
         project.updatedAt.toISOString(),
       ),
     ).rejects.toThrow("between 1 and 100");
+    await db.insert(schema.cloudWorkspace).values({ id: "cloud-workspace", name: "Managed", organizationId: "org" });
+    await db.insert(schema.servers).values({ id: "cloud-server", name: "Managed", organizationId: "org", workspaceId: "cloud-workspace" });
     await db
       .update(schema.project)
-      .set({ cloudWorkspaceId: "cloud-workspace" })
+      .set({ serverId: "cloud-server" })
       .where(eq(schema.project.id, project.id));
     await expect(
       runtimes.bindProject(
@@ -252,6 +257,7 @@ describe("durable cluster runtime", () => {
   });
   it("keeps cluster and network ownership after failure until verified removal", async () => {
     const { row } = await start();
+    const networkId = cluster.networkId!;
     await runtimes.finish(row.id, 1, plan(), "setup", "Download failed");
     await expect(clusters.remove("org", cluster.id, cluster.revision)).rejects.toThrow(
       "Remove the cluster runtime first",
@@ -259,11 +265,11 @@ describe("durable cluster runtime", () => {
     await expect(
       clusters.update("org", cluster.id, 1, {
         name: "Changed",
-        networkId: cluster.networkId,
+        networkId,
         serverIds: ["a"],
       }),
     ).rejects.toThrow("runtime");
-    await expect(networks.remove("org", cluster.networkId, 1)).rejects.toMatchObject({
+    await expect(networks.remove("org", networkId, 1)).rejects.toMatchObject({
       code: "NETWORK_IN_USE",
     });
     const failed = (await runtimes.get("org", cluster.id))!;
@@ -275,6 +281,6 @@ describe("durable cluster runtime", () => {
       ];
     await runtimes.finish(row.id, removing.row.generation, cleaned, "remove", null);
     await clusters.remove("org", cluster.id, cluster.revision);
-    expect((await networks.get("org", cluster.networkId)).members).toHaveLength(3);
+    expect((await networks.get("org", networkId)).members).toHaveLength(3);
   });
 });

@@ -2,24 +2,30 @@
 
 import { useState } from "react";
 
-/** Keep the normal sidebar preference separate from a canvas page's temporary override. */
-export function useSidebarCollapse(autoCollapse: boolean) {
+/** Keep the normal sidebar preference separate from each section's temporary override. */
+export function useSidebarCollapse(autoCollapseScope: string | null, autoCollapse = true) {
   const [state, setState] = useState({
-    autoCollapse,
+    autoCollapseScope,
     preferredCollapsed: false,
     override: null as boolean | null,
   });
 
-  // Reset on entering or leaving the canvas, before children paint at the old width.
-  if (state.autoCollapse !== autoCollapse) {
-    setState({ ...state, autoCollapse, override: null });
+  // Reset between sections, before children paint at the previous section's width.
+  if (state.autoCollapseScope !== autoCollapseScope) {
+    setState({ ...state, autoCollapseScope, override: null });
   }
 
-  const collapsed = autoCollapse ? (state.override ?? true) : state.preferredCollapsed;
+  const collapsed =
+    autoCollapseScope !== null
+      ? (state.override ?? (autoCollapse || state.preferredCollapsed))
+      : state.preferredCollapsed;
   const toggleCollapsed = () => {
     setState((current) =>
-      autoCollapse
-        ? { ...current, override: !(current.override ?? true) }
+      autoCollapseScope !== null
+        ? {
+            ...current,
+            override: !(current.override ?? (autoCollapse || current.preferredCollapsed)),
+          }
         : { ...current, preferredCollapsed: !current.preferredCollapsed },
     );
   };

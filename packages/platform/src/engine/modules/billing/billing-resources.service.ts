@@ -1,13 +1,14 @@
 /** Display telemetry is independent of checkout, entitlements and provisioning. */
+import { observedAllSettled, diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import { z } from "zod";
 import { Oblien } from "@repo/adapters";
-import { AppError, type PlanTierId } from "@repo/core";
+import { type PlanTierId } from "@repo/core";
 import type { BillingResources } from "@repo/contracts";
-import { repos } from "@repo/db";
 import { env } from "../../config/env";
 import { getOblienClient } from "../../lib/oblien-client";
 import { buildMinutePeriod } from "../../lib/plan-guard";
 import { CLOUD_EDGE_BANDWIDTH_GB } from "./billing-catalog";
+import { cloudBillingOwner, type CloudWorkspaceScope } from "../../lib/cloud-workspace-scope";
 
 const amount = z.number().finite().nonnegative();
 const computeSchema = z.object({ success: z.literal(true), data: z.object({
@@ -74,9 +75,8 @@ async function readEdge(namespace: string, from: Date, to: Date, signal: AbortSi
   return totals;
 }
 
-export async function getBillingResources(organizationId: string): Promise<BillingResources> {
-  const org = await repos.organization.findById(organizationId);
-  if (!org) throw new AppError("Organization not found", 404, "ORGANIZATION_NOT_FOUND");
+export async function getBillingResources(organizationId: string, workspaceId?: CloudWorkspaceScope): Promise<BillingResources> {
+  const org = await cloudBillingOwner(organizationId, workspaceId);
   const now = new Date();
   const tier = (org.planTierId ?? "free") as PlanTierId;
   const monthly = buildMinutePeriod(org.currentPeriodStart ?? org.createdAt, now);
@@ -91,8 +91,8 @@ export async function getBillingResources(organizationId: string): Promise<Billi
   };
   // No namespace is not evidence of metered zero usage. This endpoint never
   // creates resources or updates their policies merely to display a dashboard.
-  if (!org.oblienNamespace) return empty;
-  const namespace = org.oblienNamespace;
+  if (!org.namespace) return empty;
+  const namespace = org.namespace;
   const key = JSON.stringify([organizationId, namespace, tier, period, edgePeriod]);
   const existing = cache.get(key);
   if (existing && existing.until > now.getTime()) return structuredClone(await existing.value);
@@ -100,7 +100,7 @@ export async function getBillingResources(organizationId: string): Promise<Billi
     const signal = AbortSignal.timeout(12_000);
     const computeTo = new Date(Math.min(now.getTime(), end.getTime()));
     const edgeTo = new Date(Math.min(now.getTime(), monthly.to.getTime()));
-    const [compute, edge] = await Promise.allSettled([
+    const [compute, edge] = await observedAllSettled([
       (async () => {
         getOblienClient();
         const client = timedClient({ clientId: env.OBLIEN_CLIENT_ID!, clientSecret: env.OBLIEN_CLIENT_SECRET!, baseUrl: env.OBLIEN_API_URL }, signal);
@@ -110,12 +110,12 @@ export async function getBillingResources(organizationId: string): Promise<Billi
         return { cpuHours: totals.vcpu_hours, memoryGbHours: totals.gb_hours, diskIoGb: totals.disk_io_gb, networkGb: totals.network_gb };
       })(),
       readEdge(namespace, monthly.from, edgeTo, signal),
-    ]);
+    ], "platform/engine/modules/billing/billing-resources.service");
     if (compute.status === "fulfilled") empty.compute = { ...empty.compute, status: "available", ...compute.value };
     if (edge.status === "fulfilled") empty.edge = { ...empty.edge, status: "available", ...edge.value };
     for (const [name, result] of [["compute", compute], ["edge", edge]] as const) {
       // Provider errors may contain tokens or customer data. Log no raw payload.
-      if (result.status === "rejected") console.warn(`[billing:resources] ${name} metrics unavailable`, { organizationId });
+      if (result.status === "rejected") errorDiagnostics.warn("platform/engine/modules/billing/billing-resources.service", `[billing:resources] ${name} metrics unavailable`, { organizationId });
     }
     return empty;
   })();

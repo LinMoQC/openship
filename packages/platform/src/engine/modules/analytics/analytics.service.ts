@@ -1,3 +1,4 @@
+import { observedAllSettled, reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { findActiveDeployment } from "@repo/platform/engine/lib/active-deployment";
 import { trackBackgroundWork } from "../../lib/background-work";
 import { authorization } from "../../lib/authorization";
@@ -39,6 +40,7 @@ interface CloudAnalyticsBucket {
   requests: number;
   bandwidth_in: number;
   bandwidth_out: number;
+  /** Total request duration in seconds, not a per-request average. */
   response_time_sum: number;
   unique_visitors: number;
 }
@@ -54,6 +56,7 @@ interface MgmtAnalyticsBucket {
   unique_requests: number;
   bandwidth_in: number;
   bandwidth_out: number;
+  /** Total request duration in seconds, not a per-request average. */
   response_time: number;
 }
 
@@ -93,7 +96,7 @@ async function fetchLiveBucketsBounded(
   });
   try {
     return await Promise.race([
-      trackBackgroundWork(fetchLiveBuckets(serverId, domain, fromMinute, toMinute)).catch(() => []),
+      trackBackgroundWork(fetchLiveBuckets(serverId, domain, fromMinute, toMinute)).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/analytics/analytics.service"); return []; }),
       capped,
     ]);
   } finally {
@@ -120,6 +123,10 @@ function toMgmtBucket(b: {
   };
 }
 
+function averageResponseTimeMs(totalSeconds: number, requests: number): number {
+  return requests > 0 ? (totalSeconds / requests) * 1000 : 0;
+}
+
 /** Reduce an array of buckets into a summary. */
 export function summariseBuckets(
   buckets: MgmtAnalyticsBucket[],
@@ -129,14 +136,14 @@ export function summariseBuckets(
   const totalUnique = buckets.reduce((s, b) => s + b.unique_requests, 0);
   const totalIn = buckets.reduce((s, b) => s + b.bandwidth_in, 0);
   const totalOut = buckets.reduce((s, b) => s + b.bandwidth_out, 0);
-  const weightedRt = buckets.reduce((s, b) => s + b.response_time * b.requests, 0);
+  const totalResponseTimeSeconds = buckets.reduce((s, b) => s + b.response_time, 0);
   return {
     totalRequests: totalReqs,
     pageRequests: totalUnique,
     uniqueVisitors: null,
     bandwidthIn: totalIn,
     bandwidthOut: totalOut,
-    avgResponseTimeMs: totalReqs > 0 ? Math.round((weightedRt / totalReqs) * 1000) : 0,
+    avgResponseTimeMs: averageResponseTimeMs(totalResponseTimeSeconds, totalReqs),
     lastUpdated,
   };
 }
@@ -149,7 +156,10 @@ function summariseCloudBuckets(
   const totalUnique = buckets.reduce((sum, bucket) => sum + bucket.unique_visitors, 0);
   const totalIn = buckets.reduce((sum, bucket) => sum + bucket.bandwidth_in, 0);
   const totalOut = buckets.reduce((sum, bucket) => sum + bucket.bandwidth_out, 0);
-  const totalResponseTime = buckets.reduce((sum, bucket) => sum + bucket.response_time_sum, 0);
+  const totalResponseTimeSeconds = buckets.reduce(
+    (sum, bucket) => sum + bucket.response_time_sum,
+    0,
+  );
 
   return {
     totalRequests: totalReqs,
@@ -159,7 +169,7 @@ function summariseCloudBuckets(
     uniqueVisitors: totalUnique,
     bandwidthIn: totalIn,
     bandwidthOut: totalOut,
-    avgResponseTimeMs: totalReqs > 0 ? Math.round(totalResponseTime / totalReqs) : 0,
+    avgResponseTimeMs: averageResponseTimeMs(totalResponseTimeSeconds, totalReqs),
     lastUpdated,
   };
 }
@@ -177,7 +187,7 @@ export function buildHourlyPeriods(
       uniqueVisitors: number;
       bandwidthIn: number;
       bandwidthOut: number;
-      responseTimeWeighted: number;
+      responseTimeSeconds: number;
     }
   >();
 
@@ -188,14 +198,14 @@ export function buildHourlyPeriods(
       uniqueVisitors: 0,
       bandwidthIn: 0,
       bandwidthOut: 0,
-      responseTimeWeighted: 0,
+      responseTimeSeconds: 0,
     };
 
     current.requests += bucket.requests;
     current.uniqueVisitors += bucket.unique_requests;
     current.bandwidthIn += bucket.bandwidth_in;
     current.bandwidthOut += bucket.bandwidth_out;
-    current.responseTimeWeighted += bucket.response_time * bucket.requests;
+    current.responseTimeSeconds += bucket.response_time;
     hourly.set(hourKey, current);
   }
 
@@ -215,10 +225,10 @@ export function buildHourlyPeriods(
       uniqueVisitors: current?.uniqueVisitors ?? 0,
       bandwidthIn: current?.bandwidthIn ?? 0,
       bandwidthOut: current?.bandwidthOut ?? 0,
-      avgResponseTimeMs:
-        current && current.requests > 0
-          ? Math.round((current.responseTimeWeighted / current.requests) * 1000)
-          : 0,
+      avgResponseTimeMs: averageResponseTimeMs(
+        current?.responseTimeSeconds ?? 0,
+        current?.requests ?? 0,
+      ),
       topPaths: [],
       trafficByHour: {},
     });
@@ -263,8 +273,10 @@ function buildCloudHourlyPeriods(
       uniqueVisitors: bucket?.unique_visitors ?? 0,
       bandwidthIn: bucket?.bandwidth_in ?? 0,
       bandwidthOut: bucket?.bandwidth_out ?? 0,
-      avgResponseTimeMs:
-        bucket && bucket.requests > 0 ? Math.round(bucket.response_time_sum / bucket.requests) : 0,
+      avgResponseTimeMs: averageResponseTimeMs(
+        bucket?.response_time_sum ?? 0,
+        bucket?.requests ?? 0,
+      ),
       topPaths: [],
       trafficByHour: {},
     });
@@ -472,8 +484,8 @@ export async function getAnalyticsOverview(
     // upstream outage look identical to "no traffic" (zeros with a 200). Settle
     // per-domain: use whatever succeeded, but if EVERY cloud fetch failed,
     // surface a real upstream error so the client can tell "broken" from "idle".
-    const settled = await Promise.allSettled(
-      sources.map((source) => fetchCloudTimeseries(ctx.organizationId, source.domain, params)),
+    const settled = await observedAllSettled(
+      sources.map((source) => fetchCloudTimeseries(ctx.organizationId, source.domain, params)), "platform/engine/modules/analytics/analytics.service",
     );
     const ok = settled.filter(
       (r): r is PromiseFulfilledResult<CloudTimeseriesResponse | null> => r.status === "fulfilled",
@@ -527,7 +539,9 @@ export async function getAnalyticsOverview(
   // continuously running scheduler is not guaranteed. Start after the snapshot
   // reads, and reuse the scraper's per-server throttle and in-flight request.
   for (const serverId of new Set(selfHostedSources.map((source) => source.serverId))) {
-    void trackBackgroundWork(scrapeServerIfStale(serverId)).catch(() => {});
+    void trackBackgroundWork(scrapeServerIfStale(serverId)).catch((diagnosticFailure) => {
+      observeCaughtError(diagnosticFailure, "platform/engine/modules/analytics/analytics.service");
+    });
   }
   if (allBuckets.length === 0) return { summary: EMPTY_SUMMARY, periods: [] };
   return {

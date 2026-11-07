@@ -28,7 +28,7 @@ export interface TransferProject {
   slug: string;
   environmentName: string;
   serverId: string | null;
-  cloudWorkspaceId: string | null;
+  workspaceId: string | null;
   localPath: string | null;
 }
 
@@ -92,8 +92,10 @@ export interface ImportPreview {
   availableServers: TransferServer[];
   history: Record<ExportHistoryCategory, number>;
   rows: number;
+  /** Destination-only records removed by an explicit project overwrite. */
+  rowsRemoved?: number;
   hasSecrets: boolean;
-  /** False for plain project exports; absent on older APIs that sealed all secrets. */
+  /** False for plaintext exports; absent on older APIs that sealed all secrets. */
   requiresPassphrase?: boolean;
   warnings: string[];
   blockers: string[];

@@ -1,3 +1,4 @@
+import { reportCaughtError as observeCaughtError, diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import { lookup as dnsLookup } from "node:dns/promises";
 import nodemailer, { type Transporter } from "nodemailer";
 import { env } from "../config/env";
@@ -34,6 +35,13 @@ export type SendMailOptions = {
   subject: string;
   html: string;
   text?: string;
+  /** Validated by the caller; never used as the SMTP envelope sender. */
+  replyTo?: string;
+  /** Stable identity for durable deliveries retried after a process restart. */
+  messageId?: string;
+  /** Cloud customer alias, falling back to the transport's configured sender.
+   * Never forwarded through the Cloud mail relay. */
+  customerSender?: "support" | "billing";
   /**
    * Preferred transport source. Default "auto" — uses the platform
    * mailbox when provisioned, otherwise falls back to env-configured
@@ -62,6 +70,10 @@ const envTransport: Transporter | null = envSmtpConfigured
       host: env.SMTP_HOST,
       port: env.SMTP_PORT ?? 587,
       secure: (env.SMTP_PORT ?? 587) === 465,
+      requireTLS: (env.SMTP_PORT ?? 587) !== 465,
+      connectionTimeout: 10_000,
+      greetingTimeout: 10_000,
+      socketTimeout: 30_000,
       auth: {
         user: env.SMTP_USER,
         pass: env.SMTP_PASS,
@@ -124,7 +136,8 @@ async function resolveContainerReachableSmtpHost(reportedHost: string): Promise<
     const { address } = await dnsLookup(reportedHost);
     const isLoopback = address === "::1" || address.startsWith("127.");
     if (!isLoopback) return reportedHost;
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "platform/engine/lib/mail");
     // Unresolvable - fall through and let nodemailer's own lookup fail with
     // its normal error rather than silently substituting a guess.
     return reportedHost;
@@ -144,6 +157,9 @@ async function getPlatformTransport(options?: { rotate?: boolean }): Promise<{
   transport: Transporter;
   from: string;
 } | null> {
+  // Hosted Cloud uses its configured SMTP sender. Local mail-server records
+  // must never bring the self-hosted SSH/provisioning path into this process.
+  if (env.CLOUD_MODE) return null;
   const generation = platformTransportGeneration;
   // `@repo/db` is universal (every controller / service / repo consumer
   // already loads it eagerly at boot via `db = await createDb()`), so
@@ -158,7 +174,7 @@ async function getPlatformTransport(options?: { rotate?: boolean }): Promise<{
       installedAt: Date | null;
     }>;
   } catch (err) {
-    console.warn("[mail] mail-server lookup failed:", err);
+    errorDiagnostics.warn("platform/engine/lib/mail", "[mail] mail-server lookup failed:", err);
     return null;
   }
   // ONLY a finished install can have a platform mailbox. Falling back to the
@@ -196,6 +212,7 @@ async function getPlatformTransport(options?: { rotate?: boolean }): Promise<{
       host: smtpHost,
       port: creds.smtpPort,
       secure: creds.secure,
+      requireTLS: !creds.secure,
       auth: {
         user: creds.email,
         pass: creds.password,
@@ -224,9 +241,9 @@ async function getPlatformTransport(options?: { rotate?: boolean }): Promise<{
     if (generation === platformTransportGeneration) {
       platformTransportFailures.set(cacheKey, Date.now());
     }
-    console.warn(
+    errorDiagnostics.warn("platform/engine/lib/mail",
       `[mail] platform mailbox unavailable on ${installed.serverId}; using the next transport ` +
-        `(retrying in ${PLATFORM_TRANSPORT_FAILURE_TTL_MS / 1000}s): ${safeErrorMessage(err)}`,
+        `(retrying in ${PLATFORM_TRANSPORT_FAILURE_TTL_MS / 1000}s): ${safeErrorMessage(err)}`, err,
     );
     return null;
   }
@@ -284,7 +301,7 @@ async function getInstanceTransport(): Promise<{
   try {
     settings = await repos.instanceSettings.get();
   } catch (err) {
-    console.warn("[mail] instance-settings lookup failed:", err);
+    errorDiagnostics.warn("platform/engine/lib/mail", "[mail] instance-settings lookup failed:", err);
     return null;
   }
 
@@ -297,7 +314,7 @@ async function getInstanceTransport(): Promise<{
   try {
     pass = decrypt(sealed);
   } catch (err) {
-    console.warn(
+    errorDiagnostics.warn("platform/engine/lib/mail",
       "[mail] instance SMTP password failed to decrypt - disabling instance transport:",
       err,
     );
@@ -309,6 +326,7 @@ async function getInstanceTransport(): Promise<{
     host,
     port,
     secure: port === 465,
+    requireTLS: port !== 465,
     auth: { user, pass },
   });
   const resolved = { transport, from: settings?.smtpFrom?.trim() || user };
@@ -443,6 +461,7 @@ async function getTransportChain(
  * throw here would have changed behaviour for all eight call sites at once.
  */
 export async function sendMail(opts: SendMailOptions): Promise<boolean> {
+  if (opts.customerSender && !env.CLOUD_MODE) throw new Error("Customer mail is Cloud-only");
   const preferSource = opts.preferSource ?? "auto";
 
   // Cloud relay branch — only meaningful on a local self-hosted instance.
@@ -450,7 +469,7 @@ export async function sendMail(opts: SendMailOptions): Promise<boolean> {
   // normal transport selection (the SaaS has its own infra mailer).
   if (preferSource === "cloud" && !env.CLOUD_MODE) {
     if (!opts.organizationId) {
-      console.warn(
+      errorDiagnostics.warn("platform/engine/lib/mail",
         "[mail] preferSource=cloud requires organizationId - skipping email to",
         opts.to,
       );
@@ -469,7 +488,7 @@ export async function sendMail(opts: SendMailOptions): Promise<boolean> {
       text: opts.text ?? stripHtmlForText(opts.html),
     });
     if (!result.ok) {
-      console.warn(
+      errorDiagnostics.warn("platform/engine/lib/mail",
         `[mail] cloud invitation relay failed for org=${opts.organizationId}: ${result.error}`,
       );
       return false;
@@ -479,7 +498,7 @@ export async function sendMail(opts: SendMailOptions): Promise<boolean> {
 
   const chain = await getTransportChain(preferSource);
   if (chain.length === 0) {
-    console.warn(
+    errorDiagnostics.warn("platform/engine/lib/mail",
       `[mail] no transport configured (preferSource=${preferSource}) - skipping email to`,
       opts.to,
     );
@@ -489,16 +508,28 @@ export async function sendMail(opts: SendMailOptions): Promise<boolean> {
   // Try each transport in priority order; fail over to the next on a send
   // error so one broken source (e.g. wrong instance-SMTP creds) doesn't block
   // delivery when another can carry it. Throw only when every source fails.
+  // A mailbox address alone does not grant SMTP send-as permission. Use an
+  // explicitly configured alias or retain the sender authorized for this source.
+  const customerFrom = opts.customerSender
+    ? { support: env.SMTP_SUPPORT_FROM, billing: env.SMTP_BILLING_FROM }[
+        opts.customerSender
+      ]?.trim() || undefined
+    : undefined;
+  const message = {
+    to: opts.to,
+    subject: opts.subject,
+    html: opts.html,
+    ...(opts.text ? { text: opts.text } : {}),
+    ...(opts.replyTo ? { replyTo: opts.replyTo } : {}),
+    ...(opts.messageId ? { messageId: opts.messageId } : {}),
+  };
   let lastErr: unknown = null;
   for (let i = 0; i < chain.length; i++) {
     const active = chain[i];
     try {
       await active.transport.sendMail({
-        from: active.from,
-        to: opts.to,
-        subject: opts.subject,
-        html: opts.html,
-        ...(opts.text ? { text: opts.text } : {}),
+        from: active.source === "env" ? customerFrom ?? active.from : active.from,
+        ...message,
       });
       return true;
     } catch (err) {
@@ -515,20 +546,17 @@ export async function sendMail(opts: SendMailOptions): Promise<boolean> {
           try {
             await repaired.transport.sendMail({
               from: repaired.from,
-              to: opts.to,
-              subject: opts.subject,
-              html: opts.html,
-              ...(opts.text ? { text: opts.text } : {}),
+              ...message,
             });
             return true;
           } catch (retryErr) {
             lastErr = retryErr;
-            console.warn("[mail] send via repaired platform transport failed:", retryErr);
+            errorDiagnostics.warn("platform/engine/lib/mail", "[mail] send via repaired platform transport failed:", retryErr);
           }
         }
       }
       const more = i < chain.length - 1;
-      console.warn(
+      errorDiagnostics.warn("platform/engine/lib/mail",
         `[mail] send via ${active.source} transport failed${more ? " - trying next source" : ""}:`,
         err,
       );

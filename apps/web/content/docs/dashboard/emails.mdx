@@ -246,6 +246,10 @@ actual values when something's off.
 
 ### Health
 
+If Openship cannot read the server, **Mail status unavailable** offers **Retry status**. Saved details
+remain visible when available, and current health is unknown until a check succeeds. A failed
+connection does not offer setup or engine repair, or start and stop mail services.
+
 The single "is everything working?" screen. A banner at the top aggregates a verdict across four sections:
 
 - **Daemons** — live systemd status of each mail process (Postfix, Dovecot, anti-spam, etc.), refreshed on a

@@ -27,6 +27,7 @@
  * never widen access to a repo the org no longer has installed.
  */
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { repos } from "@repo/db";
 import type { ResourceGrant } from "@repo/db";
 import {
@@ -135,13 +136,14 @@ export async function canMintInstallationToken(
   ctx: RequestContext,
   owner: string,
   repos?: string[],
+  access: GitHubAccessOp = "read",
 ): Promise<boolean> {
   const named = (repos ?? []).map((r) => r.trim()).filter(Boolean);
   if (!named.length) {
-    return canUseGitHubRepo(ctx, { owner }, "read", { ownerLevel: "authority" });
+    return canUseGitHubRepo(ctx, { owner }, access, { ownerLevel: "authority" });
   }
   const results = await Promise.all(
-    named.map((repo) => canUseGitHubRepo(ctx, { owner, repo }, "read")),
+    named.map((repo) => canUseGitHubRepo(ctx, { owner, repo }, access)),
   );
   return results.every(Boolean);
 }
@@ -194,7 +196,8 @@ export async function canUseGitHubRepo(
     }
 
     return false;
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github-access");
     return false;
   }
 }
@@ -316,7 +319,8 @@ export async function resolveSourceAccess(
       readPaths: permits(grant.permissions, "read") ? (grant.scope?.read?.paths ?? []) : [],
       writePaths: permits(grant.permissions, "write") ? (grant.scope?.write?.paths ?? []) : [],
     };
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github-access");
     return NO_SOURCE_ACCESS;
   }
 }
@@ -465,7 +469,8 @@ export async function filterAllowedRepos<T>(
       if (grantedRepos.has(`${ownerLc}/${k.repo.toLowerCase()}`)) return true;
       return false;
     });
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github-access");
     return [];
   }
 }
@@ -512,7 +517,8 @@ export async function filterAllowedAccounts<T>(
       const loginLc = loginOf(item).toLowerCase();
       return grantedOwners.has(loginLc) || repoGrantOwners.has(loginLc);
     });
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github-access");
     return [];
   }
 }

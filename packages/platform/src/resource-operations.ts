@@ -1,3 +1,4 @@
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import {
   AppError,
   NotFoundError,
@@ -65,6 +66,7 @@ async function executeResourceOperation(
     resourceType,
     resourceId: authorizationScope === "organization" ? "*" : id,
     action: spec.action,
+    capability: spec.capability,
     scope: spec.scope,
     projectCreate: spec.projectCreate,
   });
@@ -83,7 +85,8 @@ export function presentOperationOutput(spec: ResourceOperationSchema, result: un
   let data: unknown;
   try {
     data = JSON.parse(JSON.stringify(result));
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "platform/resource-operations");
     throw new AppError(
       `Invalid ${name} response`,
       500,

@@ -2,7 +2,9 @@
  * SSL service - certificate status checks and renewal via platform adapters.
  */
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { repos } from "@repo/db";
+import type { SslRenewOutcome } from "@repo/contracts";
 import { NotFoundError, safeErrorMessage, wwwSiblingHostname } from "@repo/core";
 import { assertResourceInOrg } from "@repo/platform/engine/lib/resource-access";
 import { manageDomainSsl } from "@repo/platform/engine/lib/domain-ssl";
@@ -29,14 +31,7 @@ export async function getStatus(hostname: string, organizationId: string, assert
   };
 }
 
-export interface SslRenewOutcome {
-  success: boolean;
-  domain: string;
-  status: string;
-  expiresAt?: string;
-  issuer?: string;
-  message?: string;
-}
+export type { SslRenewOutcome } from "@repo/contracts";
 
 /**
  * Renew (or provision) the certificate for ONE hostname.
@@ -62,9 +57,10 @@ async function renewOne(hostname: string, organizationId: string, assertAccess?:
   // ACME error), so reaching here with no expiresAt means a no-op provider or
   // an unreadable cert — report it as still-provisioning, NOT "renewed", so the
   // UI doesn't show a green toast over a domain that's still on HTTP.
-  const issued = Boolean(result.expiresAt);
+  const issued = result.verified === true && Boolean(result.expiresAt) && Date.parse(result.expiresAt) > Date.now();
   return {
     success: issued,
+    ...(result.reason === "pending" ? { pending: true } : {}),
     domain: hostname,
     status: issued ? "active" : "provisioning",
     expiresAt: result.expiresAt,
@@ -73,7 +69,7 @@ async function renewOne(hostname: string, organizationId: string, assertAccess?:
       ? {}
       : {
           message:
-            `No certificate was issued for ${hostname} yet. Confirm its DNS points to this server and the domain is reachable over HTTP (port 80), then try again.`,
+            result.detail ?? `No usable certificate was confirmed for ${hostname} yet. Check its certificate status and retry.`,
         }),
   };
 }
@@ -107,12 +103,12 @@ export async function renew(
     // pointed here, or may be externally-certed. None of that is a reason to
     // fail the renewal the caller actually asked for.
     results.push(
-      await renewOne(www, organizationId, assertAccess).catch((err) => ({
+      await renewOne(www, organizationId, assertAccess).catch((err) => { observeCaughtError(err, "platform/engine/modules/deployments/ssl.service"); return ({
         success: false,
         domain: www,
         status: "error",
         message: safeErrorMessage(err),
-      })),
+      }); }),
     );
   }
 

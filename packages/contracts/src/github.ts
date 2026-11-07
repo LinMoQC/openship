@@ -1,6 +1,7 @@
 import { Type, type Static } from "@sinclair/typebox";
 import { OwnerRepoParams, CreateRepoBody, WebhookDeleteBody, GitHubSourceManifestBody, GitHubSourceManifestConvertBody, GitHubSourceManualBody, GitHubSourceUpdateBody } from "./github-inputs";
 import { SourceScanSchema } from "./sources";
+import { PublishRepositoryChangeInput, PublishedRepositoryChange } from "./repository-changes";
 import type { ResourceOperationSchema, ScopedOperations, ResourceOperations } from "./resource-operations";
 import type { MappedRepository, MappedAccount, RepositoryDetail, GitHubBranch, GitHubFileContent, GitHubWebhook, GitHubConnectionState, GitHubRepository } from "./github-types";
 export * from "./github-inputs";
@@ -18,11 +19,12 @@ export const GitHubRepoListInput = Type.Object({
   visibility: Type.Optional(Type.Union([Type.Literal("all"), Type.Literal("public"), Type.Literal("private")])),
   sort: Type.Optional(Type.Union([Type.Literal("updated"), Type.Literal("name"), Type.Literal("stars")])),
 });
+const readTarget = { serverId: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })) };
 const branch = Type.Optional(Type.String({ minLength: 1, maxLength: 200 }));
-const RepoBranchInput = Type.Object({ ...OwnerRepoParams.properties, branch });
-const FileInput = Type.Object({ ...OwnerRepoParams.properties, branch, path: Type.Optional(Type.String({ maxLength: 4096 })) });
+const RepoBranchInput = Type.Object({ ...OwnerRepoParams.properties, ...readTarget, branch });
+const FileInput = Type.Object({ ...OwnerRepoParams.properties, ...readTarget, branch, path: Type.Optional(Type.String({ maxLength: 4096 })) });
 export const GitHubBranchSchema = Type.Unsafe<GitHubBranch>(Type.Object({ name: Type.String(), commit: Type.Object({ sha: Type.String(), url: Type.String() }), protected: bool }));
-export const BranchPageInput = Type.Object({ page: Type.Optional(Type.Integer({ minimum: 1 })) });
+export const BranchPageInput = Type.Object({ ...readTarget, page: Type.Optional(Type.Integer({ minimum: 1 })) });
 export const BranchPaginationSchema = Type.Object({
   page: Type.Integer({ minimum: 1 }),
   perPage: Type.Integer({ minimum: 1 }),
@@ -33,7 +35,7 @@ export const GitHubRepositorySchema = Type.Unsafe<MappedRepository>(Type.Object(
   html_url: Type.String(), private: bool, visibility: Type.String(), default_branch: Type.String(),
   language: nullableString, size: Type.Number(), forks: Type.Number(), watchers: Type.Number(), stars: Type.Number(),
   license: Type.Unknown(), created_at: Type.String(), updated_at: Type.String(), pushed_at: Type.String(),
-  source: Type.Optional(Type.Union([Type.Literal("app"), Type.Literal("cli"), Type.Literal("both")])),
+  source: Type.Optional(Type.Union([Type.Literal("app"), Type.Literal("cli"), Type.Literal("both"), Type.Literal("token")])),
 }));
 export const GitHubAccountSchema = Type.Unsafe<MappedAccount>(Type.Object({
   login: Type.String(), id: Type.Number(), avatar_url: Type.String(), type: Type.String(), source: optionalString,
@@ -42,15 +44,19 @@ export const GitHubStateSchema = Type.Unsafe<GitHubConnectionState>(Type.Object(
   sources: Type.Object({
     openshipApp: Type.Object({ connected: bool, login: optionalString, avatarUrl: optionalString, hasInstallations: Type.Optional(bool) }),
     ghCli: Type.Object({ available: bool, login: optionalString, avatarUrl: optionalString, method: optionalString, problem: optionalString, checkedAt: optionalString }),
+    personalToken: Type.Optional(Type.Object({ connected: bool, login: optionalString, avatarUrl: optionalString, problem: optionalString })),
   }),
-  primary: Type.Union([Type.Literal("openship-app"), Type.Literal("gh-cli"), Type.Null()]),
+  primary: Type.Union([Type.Literal("openship-app"), Type.Literal("gh-cli"), Type.Literal("personal-token"), Type.Null()]),
 }));
 const methodKind = Type.Union([Type.Literal("device"), Type.Literal("token"), Type.Literal("app"), Type.Literal("ssh-key"), Type.Literal("forwarding")]);
 export const GitHubCapabilitiesSchema = Type.Object({
   platform: Type.Union([Type.Literal("saas"), Type.Literal("selfhosted")]), desktop: bool,
   primary: Type.Union([methodKind, Type.Null()]),
-  methods: Type.Array(Type.Object({ kind: methodKind, available: bool, configured: bool, requiresCloud: Type.Optional(bool), unavailableReason: optionalString })),
+  methods: Type.Array(Type.Object({ kind: methodKind, available: bool, configured: bool,
+    credentialScope: Type.Optional(Type.Union([Type.Literal("user"), Type.Literal("instance")])),
+    requiresCloud: Type.Optional(bool), unavailableReason: optionalString })),
 });
+export type GitHubCapabilities = Static<typeof GitHubCapabilitiesSchema>;
 const connection = {
   state: GitHubStateSchema, accounts: Type.Array(GitHubAccountSchema), installUrl: Type.String(), cloudUnreachable: bool,
   capabilities: Type.Union([GitHubCapabilitiesSchema, Type.Null()]),
@@ -80,7 +86,18 @@ export const GitHubSourceSchema = Type.Object({
 });
 const sourceCreated = Type.Object({ data: GitHubSourceSchema, installUrl: Type.String() });
 const repoList = Type.Object({ data: Type.Array(GitHubRepositorySchema), page: Type.Number(), perPage: Type.Number(), count: Type.Number(), total: Type.Number(), publicCount: Type.Number(), privateCount: Type.Number(), totalPages: Type.Number() });
-export const GitHubConnectInput = Type.Object({ source: Type.Optional(Type.Union([Type.Literal("oauth"), Type.Literal("cli")])) });
+export const GitHubConnectInput = Type.Object({
+  source: Type.Optional(Type.Union([Type.Literal("oauth"), Type.Literal("cli")])),
+  state: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })),
+});
+export const GitHubInstallationSelectionSchema = Type.Object({
+  connected: Type.Literal(false), flow: Type.Literal("installations"), state: Type.String(), installUrl: Type.String(),
+  installations: Type.Array(Type.Object({
+    id: Type.Integer({ minimum: 1 }), login: Type.String(), avatarUrl: Type.String(),
+    type: Type.Union([Type.Literal("User"), Type.Literal("Organization")]), connected: Type.Boolean(),
+  })),
+});
+export type GitHubInstallationSelection = Static<typeof GitHubInstallationSelectionSchema>;
 export const GitHubDisconnectInput = Type.Object({ source: Type.Optional(Type.Union([Type.Literal("oauth"), Type.Literal("cli"), Type.Literal("all")])) });
 export const GitHubTokenInput = Type.Object({ token: Type.String({ minLength: 1, maxLength: 4096 }) });
 export const GitHubPollSchema = Type.Object({ status: Type.Union([Type.Literal("none"), Type.Literal("waiting"), Type.Literal("complete"), Type.Literal("error")]), error: optionalString });
@@ -89,18 +106,19 @@ export const GitHubCollectionSchemas = {
   getHome: { action: "read", output: Type.Object({ ...connection, repos: Type.Array(GitHubRepositorySchema), errors: Type.Optional(Type.Record(Type.String(), Type.String())) }) },
   connect: { action: "write", input: GitHubConnectInput, optionalInput: true, output: Type.Union([
     Type.Object({ connected: Type.Literal(true) }),
-    Type.Object({ connected: Type.Literal(false), flow: Type.Literal("redirect"), url: optionalString, state: optionalString, step: optionalString }),
+    GitHubInstallationSelectionSchema,
+    Type.Object({ connected: Type.Literal(false), flow: Type.Literal("redirect"), url: optionalString, state: optionalString, step: optionalString, completion: Type.Optional(Type.Literal("attempt")) }),
     Type.Object({ connected: Type.Literal(false), flow: Type.Literal("device_code"), userCode: Type.String(), verificationUri: Type.String(), expiresIn: Type.Number(), interval: Type.Number() }),
     Type.Object({ connected: Type.Literal(false), flow: Type.Union([Type.Literal("token"), Type.Literal("terminal")]), command: Type.String(), message: Type.String() }),
   ]) },
   claimInstallation: { action: "write", input: Type.Object({ state: Type.String({ minLength: 1, maxLength: 256 }), installationId: Type.Union([Type.String({ minLength: 1, maxLength: 30 }), Type.Integer({ minimum: 1 })]), setupAction: optionalString }), output: Type.Object({ ok: Type.Literal(true), pendingApproval: Type.Optional(bool), installation: Type.Optional(Type.Object({ id: Type.Number(), login: Type.String(), type: Type.String() })) }) },
   getLocalStatus: { action: "read", output: Type.Object({ available: bool, activeMode: Type.String(), method: Type.Optional(nullableString), login: optionalString, id: Type.Optional(Type.Number()), avatar_url: optionalString, problem: optionalString, checkedAt: optionalString }) },
-  pollConnect: { action: "read", output: GitHubPollSchema },
+  pollConnect: { action: "read", input: Type.Object({ state: Type.Optional(Type.String({ minLength: 1, maxLength: 256 })) }), optionalInput: true, output: GitHubPollSchema },
   setInstanceToken: { action: "write", input: GitHubTokenInput, output: Type.Object({ connected: Type.Literal(true), login: Type.String(), warning: optionalString }) },
   disconnect: { action: "write", input: GitHubDisconnectInput, optionalInput: true, output: Type.Object({ success: Type.Literal(true), source: Type.Union([Type.Literal("oauth"), Type.Literal("cli"), Type.Literal("all")]) }) },
   listRepos: { action: "read", input: GitHubRepoListInput, optionalInput: true, output: repoList },
   listOrgRepos: { action: "read", input: Type.Object({ ...GitHubRepoListInput.properties, org: OwnerRepoParams.properties.owner }), output: repoList },
-  getRepo: { action: "read", input: Type.Object({ ...OwnerRepoParams.properties, branches: Type.Optional(bool) }), output: RepoDetail },
+  getRepo: { action: "read", input: Type.Object({ ...OwnerRepoParams.properties, ...readTarget, branches: Type.Optional(bool) }), output: RepoDetail },
   createRepo: { action: "write", input: CreateRepoBody, output: CreatedRepository },
   deleteRepo: { action: "admin", input: OwnerRepoParams, output: success },
   listBranches: {
@@ -113,6 +131,7 @@ export const GitHubCollectionSchemas = {
   listFiles: { action: "read", input: FileInput, output: Type.Union([Type.Array(FileEntry), FileEntry]) },
   listTree: { action: "read", input: RepoBranchInput, output: Type.Array(Type.Object({ path: Type.String(), type: Type.Union([Type.Literal("file"), Type.Literal("dir")]) })) },
   getFile: { action: "read", input: Type.Object({ ...RepoBranchInput.properties, file: Type.String({ minLength: 1, maxLength: 4096 }) }), output: Type.Object({ sha: Type.String(), size: Type.Number(), content: Type.String(), download_url: nullableString }) },
+  publishChange: { action: "write", input: PublishRepositoryChangeInput, output: PublishedRepositoryChange },
   listWebhooks: { action: "read", input: OwnerRepoParams, output: Type.Array(Webhook) },
   registerWebhook: { action: "write", input: OwnerRepoParams, output: Webhook },
   deleteWebhook: { action: "admin", input: Type.Object({ ...OwnerRepoParams.properties, ...WebhookDeleteBody.properties }), output: success },

@@ -1,3 +1,4 @@
+import { isCustomerServer } from "../billing/management.service";
 /**
  * Apps catalog + one-click installer.
  *
@@ -8,12 +9,22 @@
  * aren't projects — the installer just returns the wizard route to hand off to.
  */
 
+import { reportCaughtError as observeCaughtError, diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import { randomBytes, createHmac } from "node:crypto";
+export { installServicePorts, serviceRoutingPatch, type InstallAppRoute } from "@repo/core";
 import {
   getAppManagement,
+  appGpuRequirement,
+  resolveAppGpuMode,
+  appServiceGpuConfig,
+  appGpuEnvironment,
   getAppEndpoints,
   declaredServiceRoutes,
   defaultAppRouteLabel,
+  installServicePorts,
+  serviceRoutingPatch,
+  type InstallAppRoute,
+  type AppInstallEndpoint as PlannedEndpoint,
   fitsCapacity,
   hasMinResources,
   normalizeCustomHostname,
@@ -21,16 +32,18 @@ import {
   resolveServiceHostnameLabel,
   slugify,
   ConflictError,
+  AppError,
   UNKNOWN_CAPACITY,
   type AppConfigField,
-  type AppMinResources,
   type AppTemplate,
-  type HostCapacity,
-  type ResourceFit,
   type TemplateServiceSpec,
   type TemplateServiceBuild,
 } from "@repo/core";
 import { getRuntimeCatalog, getTemplateForOrg, listOrgCustomApps } from "./catalog-source";
+import { appCloudConfiguration } from "./app-cloud-configuration";
+import type { AppHostFit, InstallAppInput } from "@repo/contracts";
+export type { InstallAppInput } from "@repo/contracts";
+import { cloudDockerResources } from "../../lib/resources";
 import { repos } from "@repo/db";
 import { env } from "../../config/index";
 import { decrypt, encrypt } from "../../lib/encryption";
@@ -38,9 +51,14 @@ import type { ExecutionContext as RequestContext } from "@repo/platform";
 import { isLocalHostRow } from "../../lib/box-org";
 import { parseServicePort } from "../../lib/deployable-service";
 import { requireCloud } from "../../lib/cloud/require-cloud";
-import { assertPlanAllowsServices } from "../../lib/plan-guard";
+import {
+  assertCloudDeploymentLimits,
+  assertPlanAllowsServices,
+  PlanUpgradeRequiredError,
+} from "../../lib/plan-guard";
 import { getTrustedHostCapacity } from "../../lib/host-capacity";
 import { createProject } from "../projects/project-crud.service";
+import { resolveCloudProjectServer, workspaceForServer } from "../../lib/cloud-workspace-scope";
 import { createService, updateService, setServiceEnvVars } from "../services/service.service";
 
 /**
@@ -100,8 +118,10 @@ export async function getAppCatalog(ctx: RequestContext) {
     // Hosting model for the catalog badge + wizard notice (self-hosted default).
     hosting: t.hosting ?? "self-hosted",
     // What the app needs from the machine — the wizard shows it against the
-    // chosen destination's real capacity, and deploy preflight enforces it.
+    // chosen destination's real capacity as an advisory recommendation.
     minResources: t.minResources,
+    gpu: appGpuRequirement(t),
+    supportsCloud: t.supportsCloud ?? true,
     // A per-org user-uploaded app — always unverified; dashboard shows the warning.
     custom: !!t.custom,
     // Not installable this version → dashboard dims it + blocks the click.
@@ -127,34 +147,17 @@ export async function getAppCatalog(ctx: RequestContext) {
   }));
 }
 
-/** One app's declared minimum vs. what a chosen destination actually has. */
-export interface AppHostFitView {
-  /** What the app says it needs. Null when it declares nothing (most apps). */
-  minResources: AppMinResources | null;
-  /** What the machine reported. `source: "unknown"` = we couldn't ask, which is
-   *  never a refusal — see `fitsCapacity`. */
-  capacity: HostCapacity;
-  fit: ResourceFit;
-}
+export type AppHostFitView = AppHostFit;
 
-/**
- * Match an app's declared `minResources` against a destination BEFORE anything is
- * created, so the install wizard can say "PostHog wants 8 GB; this server has 4"
- * next to the picker instead of letting the operator find out from a failed
- * deploy.
- *
- * ADVISORY ONLY. The gate is deploy preflight's `host-capacity` check, reading the
- * same declaration through the same `fitsCapacity` verdict on the same probed
- * numbers — so the notice and the refusal cannot disagree. Same split as the
- * free-domain cloud requirement: the wizard pre-checks, the API enforces.
- */
+/** Read-only guidance before installation. Host recommendations never prevent
+ * deployment. Cloud previews use the same defaults and plan checks as deploy. */
 export async function getAppHostFit(
   ctx: RequestContext,
   templateId: string,
   /** The destination as the wizard has it: cloud, or a server row (none = this box,
    *  which is what an unbound project derives). "This machine" is NOT taken from
    *  here — see below. */
-  target: { deployTarget?: string; serverId?: string },
+  target: { deployTarget?: string; serverId?: string; projectId?: string },
 ): Promise<AppHostFitView> {
   const template = await getTemplateForOrg(ctx.organizationId, templateId);
   const minResources = template?.minResources ?? null;
@@ -164,8 +167,38 @@ export async function getAppHostFit(
     fit: { ok: true },
   };
 
-  // Nothing declared → nothing to match. Cloud is sized from the tier table, not
-  // from host hardware, so there is no machine to compare against either.
+  if (env.CLOUD_MODE && template?.kind === "template" && !await isCustomerServer(ctx.organizationId, target.serverId)) {
+    const configuration = await appCloudConfiguration(
+      ctx.organizationId,
+      template,
+      target.projectId,
+      target.serverId,
+    );
+    const resources = cloudDockerResources({
+      ...configuration,
+      // This preview describes the runtime. A source build uses the provider's
+      // available headroom when queued, rather than a fixed extra machine.
+      services: configuration.services.map((service) => ({
+        enabled: service.enabled,
+        resources: service.advanced.resources,
+      })),
+    });
+    try {
+      await assertCloudDeploymentLimits(ctx.organizationId, configuration);
+      return { ...unchecked, cloud: { resources, status: "ready" } };
+    } catch (error) {
+      observeCaughtError(error, "platform/engine/modules/apps/app-install.service");
+      return {
+        ...unchecked,
+        cloud: {
+          resources,
+          status: error instanceof PlanUpgradeRequiredError ? "upgrade" : "unavailable",
+          ...(error instanceof PlanUpgradeRequiredError ? { message: error.message } : {}),
+        },
+      };
+    }
+  }
+  // A self-hosted instance never probes a Cloud destination's hardware.
   if (!hasMinResources(minResources) || target.deployTarget === "cloud") return unchecked;
 
   // A serverId off a query string is read ORG-SCOPED, and an id this org doesn't
@@ -176,12 +209,12 @@ export async function getAppHostFit(
   // the API host's own `os.*` — trusted, so a caller claiming it for a remote
   // server would have matched the app against the orchestrator's RAM and reported
   // a shortfall about the wrong machine. `isLocalHostRow` is the same test the
-  // deploy path uses, so the notice and the refusal describe one box.
+  // deploy path uses, so both checks describe one box.
   let isLocalTarget = !target.serverId && !env.CLOUD_MODE;
   if (target.serverId) {
     const server = await repos.server
       .getInOrganization(target.serverId, ctx.organizationId)
-      .catch(() => null);
+      .catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/apps/app-install.service"); return null; });
     if (!server) return unchecked;
     isLocalTarget = await isLocalHostRow(server);
   }
@@ -206,124 +239,6 @@ export async function findOpenAppDraft(
 ): Promise<{ projectId: string; slug: string; name: string } | null> {
   const draft = await repos.project.findDraftByAppTemplate(ctx.organizationId, templateId);
   return draft ? { projectId: draft.id, slug: draft.slug, name: draft.name } : null;
-}
-
-/** One endpoint's routing choice, exactly as the install wizard asked it. */
-export interface InstallAppRoute {
-  /** Template service name. */
-  service: string;
-  /** Container port this choice routes. */
-  port: number;
-  /** port = no public route (published host port only). */
-  mode: "port" | "free" | "custom";
-  /** free mode: subdomain slug. Blank = the template's default label. */
-  domain?: string;
-  /** custom mode: the hostname the operator owns (required). */
-  customDomain?: string;
-}
-
-export interface InstallAppInput {
-  templateId: string;
-  name?: string;
-  config?: Record<string, string>;
-  /** Per-endpoint routing the operator CHOSE. A service with no entry gets no
-   *  public route — see planInstallRouting. */
-  routes?: InstallAppRoute[];
-}
-
-/**
- * Turn one catalog-authored port spec into the deliberate public binding that
- * an install-wizard `mode:"port"` choice promises.
- *
- * Docker runtime ports default to loopback in Openship (a bare `8080:80` must
- * not bypass the edge accidentally), so the all-interface address has to be
- * explicit here. A template that already pins an interface made a stronger
- * author decision and is preserved verbatim.
- */
-function publicInstallPortSpec(spec: string, containerPort: number): string {
-  const slash = spec.lastIndexOf("/");
-  const protocol = slash >= 0 ? spec.slice(slash) : "";
-  const mapping = (slash >= 0 ? spec.slice(0, slash) : spec).trim();
-  const parts = mapping.split(":");
-  if (parts.length >= 3) return spec;
-
-  const authoredHostPort = parts.length === 2 ? parts[0]?.trim() : undefined;
-  const hostPort = authoredHostPort || String(containerPort);
-  return `0.0.0.0:${hostPort}:${containerPort}${protocol}`;
-}
-
-/**
- * Compose port specs for one installed service after applying the operator's
- * explicit HTTP endpoint choices.
- *
- * `routes` / `exposedPort` say what a container SERVES; they do not create a
- * Docker host binding. Domain mode is fronted by the edge, while port-only mode
- * needs a fixed public binding so both the advertised URL and
- * `{{publicUrl:service}}` are truthful.
- *
- * On an adopted failed draft, `storedPorts` may contain bindings written by an
- * earlier attempt. Reconciliation is reversible: switching an endpoint back to
- * domain mode restores its catalog-authored spec, or removes the exact
- * same-port binding this helper generated when the catalog declared none. Other
- * mappings are never touched.
- */
-export function installServicePorts(
-  serviceName: string,
-  templatePorts: readonly string[] | null | undefined,
-  routes: readonly InstallAppRoute[] | undefined,
-  storedPorts: readonly string[] | null | undefined = templatePorts,
-): string[] {
-  const choices = (routes ?? []).filter((route) => route.service === serviceName);
-  let next = [...(storedPorts ?? templatePorts ?? [])];
-  if (choices.length === 0) return next;
-
-  for (const choice of choices) {
-    const authored = (templatePorts ?? []).filter((spec) => parseServicePort(spec) === choice.port);
-
-    if (choice.mode === "port") {
-      let covered = false;
-      next = next.map((spec) => {
-        if (parseServicePort(spec) !== choice.port) return spec;
-        covered = true;
-        return publicInstallPortSpec(spec, choice.port);
-      });
-      if (!covered) next.push(`0.0.0.0:${choice.port}:${choice.port}`);
-      continue;
-    }
-
-    // Undo only transformations this helper can prove it owns. An arbitrary
-    // operator-authored remap remains intact; without ownership metadata,
-    // guessing here could close an unrelated port.
-    const restorations = new Map<string, string[]>();
-    for (const spec of authored) {
-      const published = publicInstallPortSpec(spec, choice.port);
-      if (published === spec) continue;
-      const originals = restorations.get(published) ?? [];
-      originals.push(spec);
-      restorations.set(published, originals);
-    }
-    const generated = authored.length === 0 ? `0.0.0.0:${choice.port}:${choice.port}` : null;
-    next = next.flatMap((spec) => {
-      if (parseServicePort(spec) !== choice.port) return [spec];
-      const originals = restorations.get(spec);
-      const original = originals?.shift();
-      if (original) return [original];
-      if (generated === spec) return [];
-      return [spec];
-    });
-  }
-
-  // A restored authored spec can already coexist with the old copy on a
-  // partially edited draft. Exact duplicates have no Docker meaning and can
-  // produce duplicate PortBindings, so make this pure reconciliation idempotent.
-  return [...new Set(next)];
-}
-
-interface PlannedEndpoint {
-  port: number;
-  domainType: "free" | "custom";
-  domain?: string;
-  customDomain?: string;
 }
 
 /** Container ports a template service actually serves on — the only ports a
@@ -447,42 +362,6 @@ export function planInstallRouting(
   return plan;
 }
 
-/**
- * One plan entry as an `updateService` patch.
- *
- * Exists because the array is not optional. A patch carrying only `domainType` loses to
- * the stored `publicEndpoints`, which is how a corrected custom domain came back as the
- * old free route — so every writer has to send the FULL array, and a rule that every
- * writer has to remember belongs in one place instead. Both the install path and the
- * webmail re-apply path spelled this out separately.
- */
-export function serviceRoutingPatch(routing: {
-  exposed: boolean;
-  publicEndpoints: PlannedEndpoint[];
-}): {
-  exposed: boolean;
-  publicEndpoints: PlannedEndpoint[];
-  domainType?: "free" | "custom";
-  domain?: null;
-  customDomain?: null;
-} {
-  const primary = routing.publicEndpoints[0];
-  return {
-    exposed: routing.exposed,
-    publicEndpoints: routing.publicEndpoints,
-    ...(primary
-      ? // The scalar column mirrors entry[0] — the template's primary route.
-        { domainType: primary.domainType }
-      : // An empty plan is a DECISION, not an absence — the webmail proxy variant's
-        // deliberate no-hostname. Omitting the scalars made it unsayable: for an
-        // existing row `mergeServiceRoutingPatch` resolves an absent `domainType`
-        // from `stored`, so `"custom"` survived, and `customDomain` then resolved
-        // from `stored` too. The array cleared while the row kept the hostname it
-        // was redeployed to drop — alive in its derived domain row.
-        { domainType: "free" as const, domain: null, customDomain: null }),
-  };
-}
-
 export type InstallAppResult =
   | { kind: "flow"; flowHref: string }
   | { kind: "template"; projectId: string; slug: string };
@@ -517,11 +396,32 @@ export async function installApp(
 
   assertInstallRoutes(template, input.routes);
 
+  let workspaceId: string | undefined;
+  // Linked Cloud servers retain their workspace on self-hosted control planes
+  // too. Draft adoption must use the same owner as project creation.
+  const customerTarget = await isCustomerServer(ctx.organizationId, input.serverId);
+  const localPlacement = input.serverId
+    ? await workspaceForServer(ctx.organizationId, input.serverId)
+    : null;
+  const cloudTarget = (env.CLOUD_MODE && !customerTarget) || !!localPlacement?.workspace;
+  // Default Cloud placement may create the initial workspace. Refuse unsupported
+  // apps and GPU requests before invoking that write path.
+  if (template.supportsCloud === false && cloudTarget)
+    throw new AppError("This app supports self-hosted servers only. Choose a connected self-hosted server.", 400, "APP_CLOUD_UNSUPPORTED");
+  const useGpu = resolveAppGpuMode(template, input.useGpu, cloudTarget);
+  const placement = env.CLOUD_MODE && !customerTarget
+    ? await resolveCloudProjectServer(ctx.organizationId, input.serverId)
+    : localPlacement;
+  if (placement?.workspace) {
+    workspaceId = placement.workspace.id;
+    input = { ...input, serverId: placement.server!.id };
+  }
+
   // Plan gate, before anything is written. Every catalog app becomes a
   // `services` project with image-backed service rows, so it can never be
   // static — a static-only tier is refused here, at the moment the operator
   // clicks Install, rather than at the deploy that follows.
-  await assertPlanAllowsServices(ctx.organizationId);
+  await assertPlanAllowsServices(ctx.organizationId, workspaceId, input.serverId);
 
   // Gate the operator's CHOSEN routing before the first row is written: a free
   // *.opsh.io hostname only resolves behind the Cloud edge, so a disconnected
@@ -548,7 +448,10 @@ export async function installApp(
     ctx.organizationId,
     template.id,
     slugify(baseName),
+    workspaceId ?? null,
   );
+  if (existingDraft && input.serverId && existingDraft.serverId !== input.serverId)
+    throw new AppError("This app draft belongs to another Cloud workspace. Open that draft or choose a different app name.", 409, "CLOUD_WORKSPACE_TARGET_CONFLICT");
 
   // Reuse the standard create path (owns slug/group/route state + the
   // isApp/appTemplateId marker). Auto-suffix the name until its slug is free so
@@ -566,6 +469,7 @@ export async function installApp(
         created = await createProject(
           {
             name,
+            serverId: input.serverId,
             framework: template.framework ?? "docker-compose",
             projectType: "services",
             hasBuild: false,
@@ -574,6 +478,7 @@ export async function installApp(
           },
           ctx.organizationId,
           ctx.tokenScope ?? undefined,
+          ctx,
         );
         break;
       } catch (err) {
@@ -680,15 +585,20 @@ export async function installApp(
     if (existingRow) {
       // No `routes` in the request = no decision expressed; leave the draft's
       // stored routing alone rather than silently unrouting it.
-      if ((input.routes ?? []).length > 0) {
+      if ((input.routes ?? []).length > 0 || (svc.gpus && input.useGpu !== undefined)) {
         await updateService(ctx, project.id, existingRow.id, {
-          ...serviceRoutingPatch(routing),
-          ports: installServicePorts(
+          ...((input.routes ?? []).length > 0 ? serviceRoutingPatch(routing) : {}),
+          ...(svc.gpus && input.useGpu !== undefined ? {
+            advanced: useGpu ? appServiceGpuConfig(svc, true) : { gpus: null },
+            environment: appGpuEnvironment(svc, useGpu, existingRow.environment as Record<string, string>),
+          } : {}),
+          ...((input.routes ?? []).length > 0 ? { ports: installServicePorts(
             svc.name,
             svc.ports,
             input.routes,
             existingRow.ports as string[] | null,
-          ),
+            workspaceId ? "cloud" : "server",
+          ) } : {}),
         });
       }
       continue;
@@ -712,9 +622,15 @@ export async function installApp(
     await createService(ctx, project.id, {
       name: svc.name,
       image: svc.image,
-      ports: installServicePorts(svc.name, svc.ports, input.routes),
+      ports: installServicePorts(
+        svc.name,
+        svc.ports,
+        input.routes,
+        svc.ports,
+        workspaceId ? "cloud" : "server",
+      ),
       dependsOn: svc.dependsOn ? [...svc.dependsOn] : [],
-      environment: plainEnv,
+      environment: appGpuEnvironment({ ...svc, environment: plainEnv }, useGpu),
       volumes: svc.volumes ? [...svc.volumes] : [],
       command: svc.command,
       // Structured argv bypasses the `sh -c` wrap resolveComposeCmd applies to a
@@ -722,12 +638,26 @@ export async function installApp(
       commandArgv: svc.commandArgv ? [...svc.commandArgv] : undefined,
       restart: svc.restart,
       advanced: {
+        ...appServiceGpuConfig(svc, useGpu),
+        ...(svc.shmSize !== undefined ? { shmSize: svc.shmSize } : {}),
+        ...(svc.entrypointArgv ? { entrypoint: [...svc.entrypointArgv] } : {}),
         ...(svc.healthcheck ? { healthcheck: svc.healthcheck } : {}),
         ...(filesByService.get(svc.name)?.length
           ? { files: filesByService.get(svc.name) }
           : {}),
         ...(svc.build ? { build: resolveBuild(svc.build) } : {}),
         ...(svc.stopGracePeriod ? { stopGracePeriod: svc.stopGracePeriod } : {}),
+        // Advisory CPU/disk sizing is deliberately NOT installed, but swap
+        // behavior is a runtime guarantee rather than a recommendation — and
+        // Docker requires the memory cap that makes it enforceable.
+        ...(svc.resources?.swapDisabled
+          ? {
+              resources: {
+                memoryMb: svc.resources.memoryMb,
+                swapDisabled: true,
+              },
+            }
+          : {}),
       },
       // Routing is exactly what the operator chose — never the template's
       // `exposed` flag turned into a hostname.
@@ -882,13 +812,13 @@ export async function ensureGeneratedAppSecrets(
       if (Object.hasOwn(stored, field.key) || Object.hasOwn(storedAtProject, field.key)) continue;
       const group = field.generateGroup ?? field.jwtSecretGroup;
       if (group && blockedGroups.has(group)) {
-        console.warn(
+        errorDiagnostics.warn("platform/engine/modules/apps/app-install.service",
           `[apps] ${template.id}: ${serviceName}.${field.key} is missing, but its group "${group}" already has a value elsewhere that cannot be read — leaving it alone rather than writing a value the rest of the group would not match.`,
         );
         continue;
       }
       if (inlined.has(field.key)) {
-        console.warn(
+        errorDiagnostics.warn("platform/engine/modules/apps/app-install.service",
           `[apps] ${template.id}: ${serviceName}.${field.key} is missing and is inlined elsewhere in the template — not minting a value that its existing copies would contradict.`,
         );
         continue;
@@ -909,7 +839,7 @@ export async function ensureGeneratedAppSecrets(
   }
 
   if (written.length > 0) {
-    console.warn(
+    errorDiagnostics.warn("platform/engine/modules/apps/app-install.service",
       `[apps] ${template.id}: backfilled generated config on ${projectId}: ${written.join(", ")}`,
     );
   }
@@ -940,7 +870,8 @@ function resolveGeneratedGroups(
     if (!raw || groupValue.has(group)) continue;
     try {
       groupValue.set(group, decrypt(raw));
-    } catch {
+    } catch (diagnosticFailure) {
+      observeCaughtError(diagnosticFailure, "platform/engine/modules/apps/app-install.service");
       blockedGroups.add(group);
     }
   }

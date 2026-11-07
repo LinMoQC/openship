@@ -1,5 +1,6 @@
 "use client";
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { Icon as UiIcon } from "@repo/ui/icons";
 
 /**
@@ -36,6 +37,9 @@ import { Skeleton } from "../_components/admin/_shared/skeleton";
 import { interpolate, useI18n } from "@/components/i18n-provider";
 import { mailApi } from "@/lib/api";
 import { needsMailServerChoice, pickActiveMailServer } from "@/lib/mail-active-server";
+import { usePlatform } from "@/context/PlatformContext";
+import { canManageMailServers } from "@/lib/mail-availability";
+import { CloudMailClient } from "../_components/cloud-mail-client";
 
 type MailServerRow = Awaited<
   ReturnType<typeof mailApi.listMailServers>
@@ -58,6 +62,12 @@ type WebmailView =
   | { kind: "install"; server: MailServerRow; runningUrl: string | null; runningHost: string };
 
 export default function WebmailPage() {
+  const platform = usePlatform();
+  if (!canManageMailServers(platform)) return <CloudMailClient />;
+  return <WebmailInner />;
+}
+
+function WebmailInner() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const { t } = useI18n();
@@ -74,7 +84,7 @@ export default function WebmailPage() {
       const servers = await mailApi
         .listMailServers()
         .then((r) => r.servers)
-        .catch(() => [] as MailServerRow[]);
+        .catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "dashboard/app/(dashboard)/emails/webmail/page"); return [] as MailServerRow[]; });
       if (cancelled) return;
 
       if (servers.length === 0) {
@@ -100,7 +110,7 @@ export default function WebmailPage() {
       // A failed read returns the "no install" shape (the API swallows an
       // unreachable box), so this falls through to the install offer — the same
       // thing the overview tab's webmail CTA does on an unreachable server.
-      const status = await mailApi.getStatus(server.id).catch(() => null);
+      const status = await mailApi.getStatus(server.id).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "dashboard/app/(dashboard)/emails/webmail/page"); return null; });
       if (cancelled) return;
       const webmail = status?.webmail;
 

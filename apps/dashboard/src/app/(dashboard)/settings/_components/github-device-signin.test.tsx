@@ -12,6 +12,7 @@ const api = vi.hoisted(() => ({
   pollConnect: vi.fn(),
   getUserHome: vi.fn(),
   getStatusDeduped: vi.fn(),
+  getStatus: vi.fn(),
   invalidateStatus: vi.fn(),
   showToast: vi.fn(),
   setInstanceToken: vi.fn(),
@@ -57,6 +58,14 @@ const deviceResponse = {
   expiresIn: 899,
   interval: 5,
 };
+const capabilities = {
+  platform: "selfhosted", desktop: false, primary: "device",
+  methods: [
+    { kind: "device", available: true, configured: true },
+    { kind: "token", available: true, configured: false, credentialScope: "instance" },
+    { kind: "app", available: true, configured: false, requiresCloud: true },
+  ],
+};
 
 let container: HTMLDivElement;
 let root: Root;
@@ -68,6 +77,7 @@ beforeEach(() => {
   api.connect.mockResolvedValue(deviceResponse);
   api.pollConnect.mockResolvedValue({ status: "pending" });
   api.getStatusDeduped.mockResolvedValue({ state: disconnected });
+  api.getStatus.mockResolvedValue({ state: disconnected, capabilities });
   api.getUserHome.mockResolvedValue({ state: disconnected });
   api.setInstanceToken.mockResolvedValue({ connected: true, login: "new-account" });
   api.disconnect.mockResolvedValue({ success: true });
@@ -181,6 +191,51 @@ describe("Settings repairs the stored GitHub token (#944)", () => {
     expect(container.textContent).toContain("GitHub rejected this replacement token");
     expect(container.querySelector<HTMLInputElement>('input[type="password"]')?.value).toBe("ghp_invalid");
     expect(api.disconnect).not.toHaveBeenCalled();
+  });
+});
+
+describe("selecting a detected host CLI identity", () => {
+  it("offers explicit CLI selection even with a connected Cloud App and no device client", async () => {
+    const state: GitHubConnectionState = {
+      primary: "openship-app",
+      sources: {
+        openshipApp: { connected: true, login: "app-user", hasInstallations: true },
+        ghCli: { available: true, login: "operator", method: "host-cli" },
+      },
+    };
+    const status = {
+      state,
+      capabilities: {
+        ...capabilities,
+        methods: capabilities.methods.map((method) => method.kind === "device"
+          ? { ...method, available: false, configured: false } : method),
+      },
+    };
+    api.getStatusDeduped.mockResolvedValue(status);
+    api.getStatus.mockResolvedValue(status);
+    api.getUserHome.mockResolvedValue({ state });
+    api.connect.mockResolvedValue({ connected: true });
+    await render(state);
+    await click("Change method");
+    expect(container.textContent).toContain("Use gh CLI");
+    expect(container.textContent).toContain("Logged in as @operator");
+    expect(container.textContent).not.toContain("Browser sign-in with a device code");
+    expect(api.connect).not.toHaveBeenCalled();
+    await click("Use gh CLI");
+    expect(api.connect).toHaveBeenCalledExactlyOnceWith("cli");
+    expect(api.push).not.toHaveBeenCalled();
+  });
+
+  it.each(["device", "token"] as const)("does not label a saved %s credential as a host CLI", async (method) => {
+    const state: GitHubConnectionState = {
+      ...connected,
+      sources: { ...connected.sources, ghCli: { ...connected.sources.ghCli, method } },
+    };
+    api.getStatusDeduped.mockResolvedValue({ state, capabilities });
+    await render(state);
+    await click("Change method");
+    expect(container.textContent).not.toContain("Use gh CLI");
+    expect(api.connect).not.toHaveBeenCalled();
   });
 });
 

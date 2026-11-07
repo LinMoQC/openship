@@ -1,4 +1,7 @@
+import { ActionCollectionSchemas, ActionResourceSchemas } from "@repo/contracts";
 /** Node worker entry, never imported by the public host facade. No HTTP application or listener. */
+import { observedAllSettled, reportCaughtError as observeCaughtError, reportError, errorReporter, diagnosticId, type ErrorContext } from "@repo/core/diagnostics";
+import { installNodeErrorReporting, withErrorContext } from "@repo/core/diagnostics/node";
 import { parentPort, workerData } from "node:worker_threads";
 import type { NativePlatformOptions } from "./native-config";
 import type { ExecutionContext } from "./context";
@@ -15,13 +18,14 @@ import { TokenCollectionSchemas, TokenResourceSchemas } from "@repo/contracts";
 import { PermissionCollectionSchemas, PermissionResourceSchemas } from "@repo/contracts";
 import { GitHubCollectionSchemas, GitHubResourceSchemas } from "@repo/contracts";
 import { NoticeCollectionSchemas } from "@repo/contracts";
-import { BillingPublicSchemas, BillingOperationSchemas } from "@repo/contracts";
+import { AffiliateOperationSchemas, BillingPublicSchemas, BillingOperationSchemas } from "@repo/contracts";
 import { SystemOperationSchemas } from "@repo/contracts";
 import { BackupProjectSchemas, BackupPolicySchemas, BackupRunSchemas, BackupRestoreSchemas } from "@repo/contracts";
 import { AppCollectionSchemas, AppResourceSchemas, BackupDestinationCollectionSchemas, BackupDestinationResourceSchemas } from "@repo/contracts";
 import { OperationError, ProjectControlSchemas, ServiceCollectionSchemas, ServiceResourceSchemas, DomainCollectionSchemas, DomainResourceSchemas, DomainScopedSchemas, DnsOperationSchemas, CredentialCollectionSchemas, CredentialResourceSchemas, ServerCollectionSchemas, ServerResourceSchemas, type ServerLogsInput, type InstallServerComponentsInput, type ServerInstallSessionInput } from "@repo/contracts";
 
 if (!parentPort) throw new Error("The native engine must run in an owned worker");
+installNodeErrorReporting("worker");
 const port = parentPort;
 const { options } = workerData as { options: NativePlatformOptions };
 type Command = { id: number; operation: string; args: unknown[] };
@@ -50,7 +54,8 @@ try {
     // deliberately leaves them alone while other calls may still use them.
     for (const layer of new Set(Object.values(instance))) {
       if (layer && typeof layer === "object" && "dispose" in layer && typeof layer.dispose === "function") {
-        try { await layer.dispose(); } catch (error) { errors.push(error); }
+        try { await layer.dispose(); } catch (error) {
+          observeCaughtError(error, "platform/native-worker"); errors.push(error); }
       }
     }
     if (errors.length) throw new AggregateError(errors, "Native provider cleanup failed");
@@ -91,11 +96,16 @@ try {
         const [{ getJobRunner }, { backupOrchestrator }] = await Promise.all([
           import("./engine/lib/job-runner"), import("./engine/modules/backups/backup.orchestrator"),
         ]);
-        await (await getJobRunner()).start({ processRun: id => backupOrchestrator.execute(id) });
+        const { reconcileJobs, runScheduledJob } = await import("./engine/modules/jobs/job.service");
+        await (await getJobRunner()).start({
+          processRun: id => backupOrchestrator.execute(id),
+          processRecurring: runScheduledJob,
+        });
         const { reconcileAllSchedules } = await import("./engine/modules/backups/triggers/cron");
         await reconcileAllSchedules();
-        const { reconcileJobs } = await import("./engine/modules/jobs/job.service");
         await reconcileJobs();
+        (await import("./engine/modules/actions/lifecycle")).startActionController();
+        (await import("./engine/modules/ingress/lifecycle")).startIngressController();
         const { scheduleBillingAnniversary } = await import("./engine/modules/billing/billing-anniversary.cron");
         await scheduleBillingAnniversary();
         const { startNotificationRunner } = await import("./engine/lib/notification-workers");
@@ -108,10 +118,12 @@ try {
   async function close() {
     draining = true;
     return closePromise ??= (async () => {
-      await Promise.allSettled([...inFlight]);
+      await observedAllSettled([...inFlight], "platform/native-worker");
       const { stopNotificationRunner } = await import("./engine/lib/notification-workers");
       await stopNotificationRunner();
       const { shutdownJobRunner } = await import("./engine/lib/job-runner");
+      await (await import("./engine/modules/actions/lifecycle")).stopActionController();
+      await (await import("./engine/modules/ingress/lifecycle")).stopIngressController();
       await shutdownJobRunner(Infinity);
       const { stopAllContainerEventWatchers } = await import("./engine/modules/monitoring/container-events");
       await stopAllContainerEventWatchers({ closing: true });
@@ -124,9 +136,9 @@ try {
       const { drainBackgroundWork } = await import("./engine/lib/background-work");
       await drainBackgroundWork();
       finalizing = true;
-      await Promise.allSettled([...inFlight]);
+      await observedAllSettled([...inFlight], "platform/native-worker");
       for (const stream of streams.values()) stream.abort.abort();
-      await Promise.allSettled([...streams.values()].map(s => s.iterator.return?.()));
+      await observedAllSettled([...streams.values()].map(s => s.iterator.return?.()), "platform/native-worker");
       streams.clear();
       await drainBackgroundWork();
       const [{ closeSessionManager }, { shutdownCacheStores }, { sshManager }, { flushAudit }, { closeEncryption }, { takeAllFolderSessions }, { rm }] = await Promise.all([
@@ -147,10 +159,15 @@ try {
         async () => { for (const source of takeAllFolderSessions()) if (source.stagingDir) await rm(source.stagingDir, { recursive: true, force: true }); },
         async () => { closeEncryption(); }, database.closeDb,
       ]) {
-        try { await cleanup(); } catch (error) { cleanupErrors.push(error); }
+        try { await cleanup(); } catch (error) {
+          observeCaughtError(error, "platform/native-worker"); cleanupErrors.push(error); }
       }
       if (cleanupErrors.length) throw new AggregateError(cleanupErrors, "Native resource cleanup failed");
-    })().catch(error => { closePromise = undefined; throw error; });
+    })().catch(error => {
+      reportError(error, { component: "native-worker", operation: "close", handled: true });
+      closePromise = undefined;
+      throw error;
+    }).finally(() => errorReporter.flush(500));
   }
 
   async function dispatch(operation: string, args: unknown[]): Promise<unknown> {
@@ -168,6 +185,7 @@ try {
       ...Object.entries({ ...AppCollectionSchemas, ...AppResourceSchemas }).filter(([, spec]) => spec.action === "read").map(([name]) => `apps.${name}`),
       ...Object.entries({ ...BackupDestinationCollectionSchemas, ...BackupDestinationResourceSchemas }).filter(([, spec]) => spec.action === "read").map(([name]) => `backupDestinations.${name}`),
       ...Object.entries({ ...BackupProjectSchemas, ...BackupPolicySchemas, ...BackupRunSchemas, ...BackupRestoreSchemas }).filter(([, spec]) => spec.action === "read").map(([name]) => `backups.${name}`),
+      ...Object.entries({ ...ActionCollectionSchemas, ...ActionResourceSchemas }).filter(([, spec]) => spec.action === "read").map(([name]) => `actions.${name}`),
       ...Object.entries({ ...JobCollectionSchemas, ...JobResourceSchemas }).filter(([, spec]) => spec.action === "read").map(([name]) => `jobs.${name}`),
       ...Object.entries({ ...AnalyticsProjectSchemas, ...AnalyticsServerSchemas, ...AnalyticsCollectionSchemas }).filter(([, spec]) => spec.action === "read").map(([name]) => `analytics.${name}`),
       ...Object.entries({ ...IssueCollectionSchemas, ...IssueJobSchemas }).filter(([, spec]) => spec.action === "read").map(([name]) => `issues.${name}`),
@@ -180,6 +198,7 @@ try {
       ...Object.entries({ ...PermissionCollectionSchemas, ...PermissionResourceSchemas }).filter(([, spec]) => spec.action === "read").map(([name]) => `permissions.${name}`),
       ...Object.entries({ ...GitHubCollectionSchemas, ...GitHubResourceSchemas }).filter(([, spec]) => spec.action === "read").map(([name]) => `github.${name}`),
       ...Object.entries({ ...NoticeCollectionSchemas }).filter(([, spec]) => spec.action === "read").map(([name]) => `notices.${name}`),
+      ...Object.entries(AffiliateOperationSchemas).filter(([, spec]) => spec.action === "read").map(([name]) => `affiliates.${name}`),
       ...Object.entries({ ...BillingPublicSchemas, ...BillingOperationSchemas }).filter(([, spec]) => spec.action === "read").map(([name]) => `billing.${name}`),
       "backups.cancelRestore", "backups.listRuns", "backups.listPolicies",
     ].includes(operation))
@@ -273,7 +292,7 @@ try {
         : kind === "projects.streamRuntimeLogs"
           ? kernel.projects.streamRuntimeLogs(context as ExecutionContext, input[0] as string, input[1] as { tail?: number }, { signal: abort.signal })
         : kind === "projects.retryRoutingStream"
-          ? kernel.projects.retryRoutingStream(context as ExecutionContext, input[0] as string, { signal: abort.signal })
+          ? kernel.projects.retryRoutingStream(context as ExecutionContext, input[0] as string, { ...(input[1] as { sessionId?: string; idempotencyKey?: string }), signal: abort.signal })
         : kind === "services.streamLogs"
           ? kernel.services.streamLogs(context as ExecutionContext, input[0] as string, input[1] as string, input[2] as { tail?: number }, { signal: abort.signal })
           : kind === "domains.verifyStream"
@@ -326,7 +345,7 @@ try {
         return runWithOperationSource((args[0] as ExecutionContext).source ?? "api", () => fn(...args));
       }
     }
-    for (const [prefix, operations] of Object.entries({ releases: kernel.releases, domains: kernel.domains, dns: kernel.dns, credentials: kernel.credentials, servers: kernel.servers, system: kernel.system, apps: kernel.apps, backupDestinations: kernel.backupDestinations, backups: kernel.backups, billing: kernel.billing, notices: kernel.notices, github: kernel.github, permissions: kernel.permissions, tokens: kernel.tokens, webhooks: kernel.webhooks, updates: kernel.updates, audit: kernel.audit, settings: kernel.settings, notifications: kernel.notifications, issues: kernel.issues, analytics: kernel.analytics, jobs: kernel.jobs })) {
+    for (const [prefix, operations] of Object.entries({ releases: kernel.releases, domains: kernel.domains, dns: kernel.dns, credentials: kernel.credentials, servers: kernel.servers, system: kernel.system, apps: kernel.apps, backupDestinations: kernel.backupDestinations, backups: kernel.backups, billing: kernel.billing, affiliates: kernel.affiliates, notices: kernel.notices, github: kernel.github, permissions: kernel.permissions, tokens: kernel.tokens, webhooks: kernel.webhooks, updates: kernel.updates, audit: kernel.audit, settings: kernel.settings, notifications: kernel.notifications, issues: kernel.issues, analytics: kernel.analytics, jobs: kernel.jobs, actions: kernel.actions })) {
       if (!operation.startsWith(`${prefix}.`)) continue;
       const key = operation.slice(prefix.length + 1);
       if (key !== "verifyStream" && Object.hasOwn(operations, key)) {
@@ -340,17 +359,28 @@ try {
   port.on("message", (command: Command) => {
     // Close waits only for ordinary invocations; a subscription can intentionally wait forever.
     const tracked = !["close", "stream.next", "stream.close"].includes(command.operation);
-    const task = Promise.resolve().then(() => dispatch(command.operation, command.args));
+    const context: ErrorContext = { source: "worker", component: "native-worker", operation: command.operation, traceId: diagnosticId() };
+    const task = withErrorContext(context,
+      () => Promise.resolve().then(() => dispatch(command.operation, command.args)), true);
     if (tracked) inFlight.add(task);
-    task.then(data => port.postMessage({ id: command.id, data }), error => port.postMessage({ id: command.id, error: failure(error) }))
+    task.then(data => port.postMessage({ id: command.id, data }), error => {
+      reportError(error, { ...context, handled: true });
+      port.postMessage({ id: command.id, error: failure(error) });
+    })
       .finally(() => { inFlight.delete(task); });
   });
   port.postMessage({ event: "ready" });
 } catch (error) {
+  observeCaughtError(error, "platform/native-worker");
   // Import failures in the database factory already close partial connections.
   // A later provider/configuration failure must close the completed connection too.
-  await closeProviders?.().catch(() => {});
-  await import("@repo/db").then(db => db.closeDb()).catch(() => {});
+  await closeProviders?.().catch((diagnosticFailure) => {
+    observeCaughtError(diagnosticFailure, "platform/native-worker");
+  });
+  await import("@repo/db").then(db => db.closeDb()).catch((diagnosticFailure) => {
+    observeCaughtError(diagnosticFailure, "platform/native-worker");
+  });
+  await errorReporter.flush(500);
   port.postMessage({ event: "failed", error: failure(error) });
   port.close();
 }

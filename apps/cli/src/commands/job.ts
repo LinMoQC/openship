@@ -1,8 +1,10 @@
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { Command, Option } from "commander";
 import { readFileSync } from "node:fs";
 import type { CreateJobInput, UpdateJobInput } from "@repo/sdk";
+import type { JobRun } from "@repo/contracts";
 import { getShipClient } from "../lib/ship-client";
-import { fail } from "../lib/cmd-helpers";
+import { fail, printResult } from "../lib/cmd-helpers";
 import { isJsonMode, printJson, printTable, ok, err } from "../lib/output";
 
 function jobOptions(command: Command): Command {
@@ -13,7 +15,7 @@ function jobOptions(command: Command): Command {
     .addOption(new Option("--schedule <type>", "Schedule type").choices(["recurring", "once", "manual"]))
     .option("--cron <expression>", "Five-field cron expression")
     .option("--at <iso>", "Run time for a once schedule")
-    .option("--file <path>", "JSON API body (env, secrets, retry, etc.); flags override file values");
+    .option("--file <path>", "JSON API body (workflowId/inputs or command settings); flags override file values");
 }
 
 async function saveJob(opts: Record<string, string | boolean>, key?: string): Promise<void> {
@@ -42,15 +44,22 @@ async function saveJob(opts: Record<string, string | boolean>, key?: string): Pr
     const data = await (key === undefined ? jobs.create(body as CreateJobInput) : jobs.update(key, body as UpdateJobInput));
     printJson(data);
   } catch (e) {
+    observeCaughtError(e, "cli/commands/job");
     fail(e);
   }
+}
+
+function printRunOutput(run: JobRun): void {
+  if (run.kind === "workflow") {
+    process.stdout.write(`Actions run ${run.id} · ${run.status}\nOpen Actions → Runs in the dashboard for job and step output.\n`);
+  } else if (run.output) process.stdout.write(run.output + "\n");
 }
 
 async function followRun(runId: string): Promise<void> {
   for await (const event of getShipClient().jobs.streamRun(runId)) {
     const data = JSON.parse(event.data);
     if (isJsonMode()) printJson(data);
-    else if (data.type === "snapshot" && data.run.output) process.stdout.write(data.run.output + "\n");
+    else if (data.type === "snapshot") printRunOutput(data.run);
     else if (data.type === "log") process.stdout.write(data.line + "\n");
     if (data.type === "complete") {
       if (data.status !== "success") {
@@ -74,6 +83,7 @@ jobCommand.command("list")
       const data = await getShipClient().jobs.list();
       printTable(data, ["key", "label", "kind", "enabled", "scheduleType", "cronExpression", "nextRunAt"]);
     } catch (e) {
+      observeCaughtError(e, "cli/commands/job");
       fail(e);
     }
   });
@@ -85,11 +95,12 @@ jobCommand.command("get <key>")
       const data = await getShipClient().jobs.get(key);
       printJson(data);
     } catch (e) {
+      observeCaughtError(e, "cli/commands/job");
       fail(e);
     }
   });
 
-jobOptions(jobCommand.command("create").description("Create a custom job (name, server, command, and schedule required)"))
+jobOptions(jobCommand.command("create").description("Create a scheduled command or saved workflow job"))
   .action((opts) => saveJob(opts));
 
 jobOptions(jobCommand.command("update <key>").description("Update a job; built-ins accept schedule and enabled changes"))
@@ -107,6 +118,7 @@ jobCommand.command("delete <key>")
       if (isJsonMode()) printJson(result);
       else ok(`Deleted ${key}`);
     } catch (e) {
+      observeCaughtError(e, "cli/commands/job");
       fail(e);
     }
   });
@@ -120,6 +132,7 @@ jobCommand.command("run <key>")
       printJson(data);
       if (opts.follow && data.runId) await followRun(data.runId);
     } catch (e) {
+      observeCaughtError(e, "cli/commands/job");
       fail(e);
     }
   });
@@ -132,6 +145,7 @@ jobCommand.command("runs <key>")
       const data = await getShipClient().jobs.listRuns(key, opts.limit ? { limit: Number(opts.limit) } : undefined);
       printTable(data, ["id", "trigger", "status", "startedAt", "durationMs", "error"]);
     } catch (e) {
+      observeCaughtError(e, "cli/commands/job");
       fail(e);
     }
   });
@@ -148,10 +162,15 @@ jobCommand.command("logs <runId>")
       const data = await getShipClient().jobs.getRun(runId);
       if (isJsonMode()) printJson(data);
       else {
-        if (data.output) process.stdout.write(data.output + "\n");
+        printRunOutput(data);
         if (data.error) err(data.error);
       }
     } catch (e) {
+      observeCaughtError(e, "cli/commands/job");
       fail(e);
     }
   });
+jobCommand.command("events").description("List event types available as job triggers")
+  .action(() => printResult(() => getShipClient().jobs.triggerEvents()));
+jobCommand.command("backup-schedules").description("List scheduled backups with their next and last runs")
+  .action(() => printResult(() => getShipClient().jobs.backupSchedules()));

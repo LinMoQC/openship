@@ -10,26 +10,36 @@
  *                                          the API will not infer "no limits" from an empty list.
  *   revoke  DELETE /tokens/:id             → { data: { revoked: true } }
  */
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
+import { isCapability } from "@repo/core";
 import { Command } from "commander";
 import chalk from "chalk";
 import { getShipClient } from "../lib/ship-client";
 import { printJson, printTable, isJsonMode, ok, info } from "../lib/output";
 import { spin, fail } from "../lib/cmd-helpers";
+import { positiveInteger } from "../lib/command-input";
+import { TokenCollectionSchemas } from "@repo/contracts";
+import { confirmOrExit, printResult } from "../lib/cmd-helpers";
+import { jsonCommand } from "../lib/json-command";
 
 import type { TCreateTokenBody } from "@repo/sdk";
 type Grant = NonNullable<TCreateTokenBody["grants"]>[number];
 
-/** Parse a repeatable `--grant type:id:perm1,perm2` into the API's grant shape. */
-function collectGrant(value: string, acc: Grant[]): Grant[] {
-  const [resourceType, resourceId, permsRaw] = value.split(":");
+/**
+ * Parse a repeatable `--grant type:id:perm1,perm2` into the API's grant shape.
+ * Permissions are levels (read, write, admin, create) or capabilities, which carry
+ * their own colon (`project:proj_1:domains:read,domains:delete`).
+ */
+export function collectGrant(value: string, acc: Grant[]): Grant[] {
+  const [resourceType, resourceId, ...rest] = value.split(":");
+  const permsRaw = rest.join(":");
   if (!resourceType || !resourceId || !permsRaw) {
     throw new Error(`Invalid --grant "${value}". Expected type:id:perm1,perm2`);
   }
   const permissions = permsRaw.split(",").map((p) => p.trim()).filter(Boolean);
-  if (permissions.some(p => !["read", "write", "admin", "create"].includes(p)))
+  if (permissions.some(p => !["read", "write", "admin", "create"].includes(p) && !isCapability(p)))
     throw new Error(`Invalid permission in --grant "${value}"`);
-  acc.push({ resourceType, resourceId, permissions: permissions as Grant["permissions"] });
-  return acc;
+  return [...acc, { resourceType, resourceId, permissions: permissions as Grant["permissions"] }];
 }
 
 const listCmd = new Command("list")
@@ -55,6 +65,7 @@ const listCmd = new Command("list")
         ["id", "name", "prefix", "readOnly", "scoped", "expires", "lastUsed", "revoked"],
       );
     } catch (e) {
+      observeCaughtError(e, "cli/commands/token");
       fail(e);
     }
   });
@@ -63,10 +74,10 @@ const createCmd = new Command("create")
   .description("Mint a new personal access token (the secret is shown once)")
   .argument("<name>", "Human-readable token name")
   .option("--read-only", "Reject mutation methods (POST/PUT/PATCH/DELETE)", false)
-  .option("--expires <days>", "Expire after N days (1–365); omit for non-expiring", (v) => parseInt(v, 10))
+  .option("--expires <days>", "Expire after N days (1–365); omit for non-expiring", positiveInteger)
   .option(
     "--grant <type:id:perms>",
-    "Scope the token to a resource (repeatable), e.g. project:abc123:read,write",
+    "Scope the token to a resource (repeatable), e.g. project:abc123:read,write or project:abc123:domains:read,domains:write,domains:delete",
     collectGrant,
     [] as Grant[],
   )
@@ -109,6 +120,7 @@ const createCmd = new Command("create")
       info("  Copy this token now — it will not be shown again:");
       process.stdout.write(chalk.cyan(`  ${result.token}\n`));
     } catch (e) {
+      observeCaughtError(e, "cli/commands/token");
       sp?.fail("Create failed");
       fail(e);
     }
@@ -125,6 +137,7 @@ const revokeCmd = new Command("revoke")
       if (isJsonMode()) printJson({ id, revoked: true });
       else ok(`  Token ${id} revoked`);
     } catch (e) {
+      observeCaughtError(e, "cli/commands/token");
       sp?.fail("Revoke failed");
       fail(e);
     }
@@ -135,3 +148,18 @@ export const tokenCommand = new Command("token")
   .addCommand(listCmd)
   .addCommand(createCmd)
   .addCommand(revokeCmd);
+
+const mcp = new Command("mcp").description("Inspect and revoke MCP clients authorized by your account");
+mcp.command("list").description("List authorized MCP clients and their resource scopes")
+  .action(() => printResult(() => getShipClient().tokens.listMcpClients()));
+mcp.command("get").argument("<id>", "MCP client ID").description("Inspect this client's permissions")
+  .action((id: string) => printResult(() => getShipClient().tokens.getMcpClient(id)));
+jsonCommand(mcp.command("authorize").description("Authorize an MCP client with explicit resource grants or full access"),
+  TokenCollectionSchemas.authorizeMcpClient.input, input => getShipClient().tokens.authorizeMcpClient(input), "Authorize this MCP client with the specified access?");
+mcp.command("disconnect").argument("<id>", "MCP client ID").option("-y, --yes", "Confirm revocation")
+  .description("Revoke an MCP client's authorization")
+  .action((id: string, opts) => printResult(async () => {
+    await confirmOrExit(opts.yes, `Disconnect MCP client ${id}?`);
+    return getShipClient().tokens.disconnectMcpClient(id);
+  }));
+tokenCommand.addCommand(mcp);

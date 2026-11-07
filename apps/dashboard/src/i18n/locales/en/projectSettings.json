@@ -110,6 +110,10 @@
     "unmanaged": "This app has no configurable settings yet."
   },
   "appInstall": {
+    "configurationLoading": "Loading app configuration…",
+    "catalogLoadFailed": "Couldn't load app details. Try again before installing.",
+    "routingLoadFailed": "Couldn't load saved routing. Try again before installing.",
+    "retryConfiguration": "Try again",
     "install": "Install",
     "installing": "Installing…",
     "advanced": "Advanced deployment options",
@@ -123,6 +127,16 @@
     "domainNone": "No public URL",
     "domainNoneHint": "Internal only — no public address.",
     "customRequired": "Enter your domain, or pick another option.",
+    "withoutDomainsTitle": "Continue without domains?",
+    "withoutDomainsBody": "These web endpoints will only be reachable through their published ports. You can add domains later from the project.",
+    "withoutDomainsCloudBody": "These web endpoints won't have a public URL on Cloud. Other services in this app can still reach them. You can add domains later from the project.",
+    "addDomains": "Add domains",
+    "continueWithoutDomains": "Continue without domains",
+    "generatedDomainsTitle": "Use free domains?",
+    "generatedDomainsBody": "These endpoints will get free public URLs. You can choose the names before installing.",
+    "useGeneratedDomains": "Use free domains",
+    "editDomains": "Edit domains",
+    "routePortCloudDesc": "Private to this Cloud workspace. Add a domain for a public URL.",
     "progressPreparing": "Preparing…",
     "progressDeploying": "Deploying…",
     "progressLive": "Your app is live",
@@ -159,7 +173,12 @@
     "hostFitTitle": "This server is smaller than {app} needs",
     "hostFitMemory": "Needs {needed} of RAM — this one has {available}",
     "hostFitCpu": "Needs {needed} — this one has {available}",
-    "hostFitHint": "Install it on a bigger machine, or pick another destination.",
+    "hostFitHint": "You can continue. Performance may be limited on this machine.",
+    "cloudFitTitle": "This app needs a larger Cloud plan",
+    "upgradePlan": "Upgrade plan",
+    "checkingCapacity": "Checking capacity…",
+    "checkCapacityAgain": "Check again",
+    "cloudFitUnavailable": "Capacity couldn't be checked. It will be checked again when you deploy.",
     "routePortLabel": "Port only (no domain)",
     "routePortDesc": "Reachable at the host address and port — no domain or Cloud needed.",
     "routeFreeLabel": "Free subdomain",
@@ -169,7 +188,7 @@
     "routeCustomDesc": "Point a domain you own at this app.",
     "routeDomainLabel": "Domain",
     "routeDomainDesc": "Reach it on a domain — a free subdomain or your own.",
-    "exposeTitle": "Exposure",
+    "exposeTitle": "Domains & routing",
     "httpBadge": "Web",
     "tcpBadge": "Database",
     "tcpPublishLabel": "Publish port",
@@ -377,6 +396,10 @@
         "failed": "Couldn't update the internal hostname",
         "invalid": "Enter at least one letter or digit"
       }
+    },
+    "export": {
+      "title": "Export project",
+      "description": "Download all project settings, environment values, and credentials as plain JSON."
     }
   },
   "routeRules": {
@@ -645,6 +668,12 @@
       "repository": "Repository",
       "open": "Open"
     },
+    "branch": {
+      "label": "Deployment branch",
+      "description": "Used for future deployments in this environment. Saving does not redeploy the app.",
+      "saved": "Deployment branch saved",
+      "saveFailed": "Could not save the deployment branch"
+    },
     "webhookEndpoint": {
       "title": "Webhook Endpoint",
       "descriptionSet": "GitHub delivers push events directly to this domain",
@@ -652,6 +681,11 @@
       "updating": "Updating...",
       "select": "Select domain...",
       "clear": "Clear selection"
+    },
+    "buildQueue": {
+      "label": "Cancel obsolete builds",
+      "description": "Keep only the latest pending push. When enabled, a newer push also cancels an older automatic build before release steps start. Manual deployments and rollbacks are preserved.",
+      "saveFailed": "Could not save build cancellation preference"
     },
     "autoDeployCard": {
       "title": "Auto Deploy",
@@ -686,6 +720,8 @@
       "title": "Rollback history",
       "retentionHint": "Keep recent deployment artifacts for quick rollback.",
       "retentionDescription": "Maximum number of past releases to keep. Active and pinned releases are extra. Older artifacts are removed; deployment history stays available. Set to 0 to keep only active and pinned releases.",
+      "automaticValue": "Up to {count} versions",
+      "automaticDescription": "Keeps up to the default history limit. Under disk pressure, recoverable artifacts may be removed earlier. Active and pinned releases are extra. Commit and configuration history stays available; rollback may require a rebuild.",
       "defaultBadge": "instance default",
       "loadFailed": "Could not load rollback settings.",
       "valueOne": "{count} version",
@@ -696,7 +732,7 @@
       "increaseAria": "Increase rollback history",
       "sizeEach": "~{size} per image, including shared layers",
       "diskFree": "{size} free",
-      "autoBadge": "sized automatically",
+      "autoBadge": "Automatic",
       "manualBadge": "set manually",
       "kindFiles": "built files on disk",
       "kindImages": "images on the host",
@@ -763,7 +799,7 @@
   },
   "resources": {
     "title": "Machine Power",
-    "description": "CPU and memory limits for this project's containers.",
+    "description": "Projects share this server. Add CPU or memory limits only if needed.",
     "loading": "Reading the target machine…",
     "unavailable": "Machine power unavailable",
     "loadFailed": "Failed to load machine power",
@@ -773,9 +809,9 @@
     "appliesOnNextDeploy": "Limits are applied when the container is recreated — redeploy for a change to take effect.",
     "tiers": {
       "unlimited": {
-        "name": "No limits",
-        "description": "Use the whole machine (default)",
-        "spec": "Machine capacity"
+        "name": "Full capacity",
+        "description": "Use the server’s available CPU and RAM (default)",
+        "spec": "Shared with other projects"
       },
       "micro": {
         "name": "Micro",
@@ -817,6 +853,10 @@
       "updated": "Machine power updated",
       "updateFailed": "Failed to update machine power",
       "invalidValues": "CPU and memory must be 0 or a positive number"
+    },
+    "customized": {
+      "name": "Customized",
+      "description": "Choose a preset or set your own limits"
     }
   },
   "sleep": {
@@ -906,7 +946,8 @@
       "error": "Error",
       "inactive": "Inactive",
       "external": "External TLS",
-      "manual": "Manual cert"
+      "manual": "Manual cert",
+      "unknown": "Unknown"
     },
     "typeCustom": "Custom domain",
     "typeFree": "Free subdomain",
@@ -1124,7 +1165,8 @@
         "manual_certificate": "This domain uses an uploaded certificate. Upload a valid replacement, then recheck it. Openship does not renew it automatically.",
         "managed_certificate": "TLS is managed by your external proxy or Openship Cloud. Check that provider’s configuration.",
         "route_missing": "This configured route has not been applied. Retry routing to apply it. No automatic routing retry is scheduled.",
-        "manual_dns": "This certificate uses manual TXT verification. Open HTTPS setup to confirm a new TXT record, or choose a connected DNS provider for automatic renewal."
+        "manual_dns": "This certificate uses manual TXT verification. Open HTTPS setup to confirm a new TXT record, or choose a connected DNS provider for automatic renewal.",
+        "managed_owner": "This hostname and its certificate are managed by the owning service. Check that service’s domain settings."
       }
     },
     "wildcard": {
@@ -1163,6 +1205,12 @@
         "cancelled": "Challenge cancelled",
         "expired": "TXT challenge expired"
       }
+    },
+    "removeRoute": {
+      "title": "Remove route",
+      "description": "The app keeps running — only this route and its edge registration are removed. You can add it back at any time.",
+      "confirm": "Remove route",
+      "removing": "Removing…"
     }
   },
   "serviceEnvironment": {
@@ -1172,5 +1220,121 @@
     "buildArguments": "Build arguments are configured in the Compose file or source configuration and require a rebuild.",
     "projectLink": "Edit shared project environment",
     "loadFailed": "Could not load project variable names to check overrides."
+  },
+  "cloudStaticHosting": {
+    "title": "Static hosting",
+    "description": "Choose where the built files are served.",
+    "pages": "Cloud Pages (default)",
+    "pagesDescription": "Publish files to the Cloud edge. No running app container.",
+    "server": "Managed server",
+    "serverDescription": "Serve files from an nginx container on your managed server.",
+    "nextDeploy": "Saved hosting changes apply on the next deployment."
+  },
+  "deploymentChecks": {
+    "title": "GitHub deployment checks",
+    "description": "Report deployment and service results on the deployed commit.",
+    "customize": "Customize checks",
+    "deployment": "Deployment result",
+    "services": "All services, including new ones",
+    "selectedServices": "Choose services",
+    "includeErrors": "Include failure details",
+    "errorsHint": "Redacted error summaries are shared with people who can read this repository.",
+    "emptySelection": "Choose at least one check, or turn reporting off.",
+    "connectionHint": "Requires a GitHub App with Checks write access.",
+    "connection": "GitHub connection",
+    "deliveryFailed": "Checks could not be delivered",
+    "saveFailed": "Could not save GitHub check settings."
+  },
+  "runtimeUpdates": {
+    "options": "Redeploy options",
+    "refresh": "Refresh images & redeploy",
+    "refreshing": "Refreshing images…",
+    "check": "Check image updates",
+    "title": "Image updates",
+    "failed": "Could not start image refresh.",
+    "uncertain": "The request timed out. Check deployment history before trying again.",
+    "available": "Image updates available",
+    "current": "Image digests match the latest observed registry digests.",
+    "checkUnavailable": "Image comparison needs recorded digests and registry access.",
+    "checkFailed": "Could not check image updates.",
+    "pinned": "Images are pinned by digest. Edit the configured reference to update them."
+  },
+  "securityAdvisories": {
+    "checksEnabled": "Check security advisories",
+    "checksDescription": "When off, pauses runtime and host inspections, new advisory alerts and security patch actions for this workspace. Existing evidence and project refresh consent are retained.",
+    "checksDisabled": "Security advisory checks are disabled for this workspace.",
+    "manageChecks": "Manage advisory checks",
+    "retrySettings": "Try again",
+    "severity": {
+      "critical": "Critical",
+      "high": "High",
+      "moderate": "Moderate",
+      "low": "Low"
+    },
+    "bannerSettings": "Security banner settings",
+    "hideBanners": "Hide security banners",
+    "showBanners": "Show security banners",
+    "bannerDescription": "Show app and server security notices at the top of the dashboard in this browser and workspace. Advisory checks and notification channels are controlled separately.",
+    "openRuntimeConfiguration": "Review runtime configuration",
+    "sourceRedeployRequired": "Rebuild this app from its saved source before refreshing its runtime. The current image has no verified source revision. A source redeploy may include newer code; review it in Deployments, then check this advisory again.",
+    "openSourceRedeploy": "Open source redeploy",
+    "reviewApps": "Review affected apps ({count})",
+    "pendingApps": "Checks pending for {count} apps. Results will appear automatically.",
+    "checkAgain": "Check again",
+    "checking": "Checking…",
+    "title": "Security advisories",
+    "unavailable": "Security checks are unavailable or out of date. Existing notices remain visible.",
+    "affected": "Findings for apps and servers you can access in this workspace.",
+    "noMatches": "No matching advisories in the checked evidence. This is not a complete vulnerability scan.",
+    "partial": "Some runtimes could not be checked.",
+    "guidance": "Read advisory",
+    "automatic": "Automatically refresh verified security patches",
+    "automaticDescription": "Off by default. Only image services with a signed fix on their existing tag can update automatically. Source builds, pinned images and version changes require review. Normal deployment and health checks still apply.",
+    "notifications": "Security alerts are enabled on notification channels by default. You can change each channel in Settings → Notifications.",
+    "publicFeed": "View public feed",
+    "checked": "Evidence checked",
+    "possible": "Image tag matches; the deployed version needs verification.",
+    "tab": "Security",
+    "monitoring": "View in Monitoring",
+    "persistent": "Active findings stay here when the banner is dismissed.",
+    "otherApps": "Other apps ({count})",
+    "details": "Details & guidance"
+  },
+  "hostSecurity": {
+    "title": "Server security",
+    "reviewPatch": "Review patch",
+    "applyPatch": "Apply reviewed patch",
+    "patchDetails": "Review server patch",
+    "interruption": "This installs the listed packages and may restart services. Review all changes. Already running services may still need an operator restart.",
+    "rebootRequired": "Reboot required. The running kernel must be checked after reboot.",
+    "manual": "Manual review required",
+    "runs": "Runs",
+    "noRuns": "No security patch runs yet.",
+    "scanTask": "Advisory inspection task",
+    "scanHint": "Runs on the saved schedule. Observations expire and failed checks retry with backoff.",
+    "schedulerPaused": "Scheduled inspections are paused.",
+    "checkPending": "An inspection is pending. Cached evidence may be out of date.",
+    "verified": "Version check passed",
+    "needsReview": "Needs review",
+    "nextCheck": "Next inspection",
+    "notSupported": "Host patching is available for customer-operated Ubuntu hosts. Provider-managed infrastructure uses its own maintenance process.",
+    "package": "Package",
+    "current": "Installed",
+    "target": "Planned version",
+    "reviewResources": "Review affected resources ({count})",
+    "openRuns": "Open server runs",
+    "lastRun": "Last scan",
+    "appOpen": "Runs while Openship is open.",
+    "scanStates": {
+      "pending": "Pending",
+      "running": "Running",
+      "completed": "Completed",
+      "partial": "Partially checked",
+      "interrupted": "Interrupted"
+    },
+    "reviewReboot": "Review reboot",
+    "applyReboot": "Schedule reboot",
+    "rebooting": "Reboot scheduled; awaiting kernel verification",
+    "rebootInterruption": "This reboots the server in one minute and interrupts all its workloads. Openship will verify the running kernel when the host reconnects."
   }
 }

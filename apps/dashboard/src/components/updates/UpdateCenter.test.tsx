@@ -4,6 +4,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { I18nProvider } from "@/components/i18n-provider";
 import { UpdateCenter } from "./UpdateCenter";
 
+vi.mock("next/navigation", () => ({
+  usePathname: () => "/",
+  useRouter: () => ({ push: vi.fn() }),
+}));
+
 vi.mock("./useUpdates", () => ({
   useUpdates: () => ({
     state: {

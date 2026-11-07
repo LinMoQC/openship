@@ -9,6 +9,7 @@
  * URL is encrypted at rest and saved atomically with its link.
  */
 
+import { reportCaughtError as observeCaughtError, diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import { findActiveDeployment } from "@repo/platform/engine/lib/active-deployment";
 import { repos, type Project } from "@repo/db";
 import {
@@ -31,13 +32,45 @@ import { sharedServiceAlias, ensureSharedServiceNetwork, disconnectSharedService
 import { encrypt, decrypt } from "../../lib/encryption";
 import { listAuthorizedProjects } from "../../lib/authorized-projects";
 import { withProjectRuntimeLock } from "../../lib/project-runtime-lock";
+import { withCloudWorkspaceActivity } from "../../lib/cloud-workspace-lock";
+import {
+  requireNativeDatabaseConnection,
+  reconcileNativeDatabaseConnections,
+} from "./cluster-database-connections";
 
 const ENVIRONMENT = "production";
 
 /** Match service/project deletion locks; a stable order also allows reciprocal links. */
-function withConnectionLocks<T>(sourceId: string, targetId: string, run: () => Promise<T>): Promise<T> {
-  const [first, second] = [sourceId, targetId].sort();
-  return withProjectRuntimeLock(first, () => withProjectRuntimeLock(second, run));
+async function withConnectionLocks<T>(
+  sourceId: string,
+  targetId: string,
+  run: () => Promise<T>,
+): Promise<T> {
+  // Include previous sources so replacing a binding can revoke its old native grant.
+  const links = await repos.projectConnection.listByTarget(targetId);
+  const ids = [
+    ...new Set([sourceId, targetId, ...links.map((link) => link.sourceProjectId)]),
+  ].sort();
+  const projects = await Promise.all(ids.map((id) => repos.project.findById(id)));
+  const workspaces = [
+    ...new Set(projects.flatMap((project) => (project?.workspaceId ? [project.workspaceId] : []))),
+  ].sort();
+  const lockProjects = (index: number): Promise<T> =>
+    index === ids.length
+      ? (async () => {
+          const current = await repos.projectConnection.listByTarget(targetId);
+          if (current.some((link) => !ids.includes(link.sourceProjectId)))
+            throw new ValidationError("Connections changed. Refresh before trying again.");
+          return run();
+        })()
+      : withProjectRuntimeLock(ids[index], () => lockProjects(index + 1));
+  const acquire = (index: number): Promise<T> =>
+    index === workspaces.length
+      ? lockProjects(0)
+      : withCloudWorkspaceActivity(workspaces[index], () => acquire(index + 1), undefined, {
+          scope: `connection:${ids.join(":")}`,
+        });
+  return acquire(0);
 }
 
 /** Both connection pickers use the same uncapped, permission-filtered choices. */
@@ -48,7 +81,13 @@ export async function listConnectionCandidates(ctx: RequestContext, projectId: s
     if (project.id === projectId || !(await authorization.checkPermissionOnResource(
       { ...ctx, scopeMode: "fixed" }, { resourceType: "project", resourceId: project.id, action: "write" },
     ))) continue;
-    candidates.push({ id: project.id, name: project.name, description: project.environmentName, appTemplateId: project.appTemplateId });
+    candidates.push({
+      id: project.id,
+      name: project.name,
+      description: project.environmentName,
+      appTemplateId: project.appTemplateId,
+      clusterId: project.clusterId,
+    });
   }
   return candidates.sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -61,6 +100,7 @@ export interface ConnectionView {
   sourceName: string;
   sourceAppTemplateId: string | null;
   sourceServiceId: string | null;
+  sourceDatabaseId?: string | null;
   sourceServiceName: string | null;
   targetProjectId: string;
   outputId: string;
@@ -78,6 +118,7 @@ function toConnectionView(
     id: string;
     sourceProjectId: string;
     sourceServiceId?: string | null;
+    sourceDatabaseId?: string | null;
     targetProjectId: string;
     outputId: string;
     envKey: string;
@@ -92,6 +133,7 @@ function toConnectionView(
     sourceName: source?.name ?? "Unknown",
     sourceAppTemplateId: source?.appTemplateId ?? null,
     sourceServiceId: link.sourceServiceId ?? null,
+    sourceDatabaseId: link.sourceDatabaseId ?? null,
     sourceServiceName,
     targetProjectId: link.targetProjectId,
     outputId: link.outputId,
@@ -123,6 +165,7 @@ export async function listConnections(
 export interface ConnectionConsumerView {
   id: string;
   sourceServiceId: string | null;
+  sourceDatabaseId?: string | null;
   targetProjectId: string;
   targetName: string;
   targetSlug: string | null;
@@ -158,13 +201,14 @@ export async function listConsumers(
   const links = await repos.projectConnection.listBySource(sourceProjectId);
   const out: ConnectionConsumerView[] = [];
   for (const l of links) {
-    const target = await repos.project.findById(l.targetProjectId).catch(() => null);
+    const target = await repos.project.findById(l.targetProjectId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/projects/project-connection.service"); return null; });
     // Same-org only. A link can't be cross-org (createConnection enforces it), so
     // a mismatch here means data drift — skip rather than leak a foreign name.
     if (target && target.organizationId !== ctx.organizationId) continue;
     out.push({
       id: l.id,
       sourceServiceId: l.sourceServiceId ?? null,
+      sourceDatabaseId: l.sourceDatabaseId ?? null,
       targetProjectId: l.targetProjectId,
       targetName: target?.name ?? "Unknown",
       targetSlug: target?.slug ?? null,
@@ -196,16 +240,16 @@ async function applyConnectionToTarget(
   ctx: RequestContext,
   targetProjectId: string,
 ): Promise<void> {
-  const target = await repos.project.findById(targetProjectId).catch(() => null);
+  const target = await repos.project.findById(targetProjectId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/projects/project-connection.service"); return null; });
   if (!target?.activeDeploymentId) return;
   try {
     const { triggerDeployment } = await import("../deployments/build.service");
     await triggerDeployment(ctx, { projectId: targetProjectId, trigger: "service-connection" });
   } catch (err) {
-    console.warn(
+    errorDiagnostics.warn("platform/engine/modules/projects/project-connection.service",
       `[service-connection] apply-redeploy of ${targetProjectId} failed (non-fatal): ${
         err instanceof Error ? err.message : String(err)
-      }`,
+      }`, err,
     );
   }
 }
@@ -300,9 +344,9 @@ async function loadConnectionEnds(
  * `openship-<slug>` networks, so treating those as different machines refuses pairs
  * that are demonstrably co-located.
  */
-type ProjectHost = { kind: "cloud" } | { kind: "box" } | { kind: "server"; id: string };
+type ProjectHost = { kind: "cloud" } | { kind: "box" } | { kind: "server"; id: string } | { kind: "workspace"; id: string };
 
-const hostKey = (h: ProjectHost): string => (h.kind === "server" ? `server:${h.id}` : h.kind);
+const hostKey = (h: ProjectHost): string => (h.kind === "server" || h.kind === "workspace" ? `${h.kind}:${h.id}` : h.kind);
 
 /**
  * Resolve which machine a project's workload sits on.
@@ -313,11 +357,8 @@ const hostKey = (h: ProjectHost): string => (h.kind === "server" ? `server:${h.i
  * running container. (`resolveSnapshotTarget` and `countActiveByServer` deliberately
  * invert this — they answer "where would the NEXT deploy go", a different question.)
  *
- * Cloud is the UNION of both signals, mirroring project-resources.service: the
- * `cloudWorkspaceId` column alone is not enough, because a self-hosted instance
- * orchestrating a cloud deploy deliberately leaves it null to stay local-canonical
- * (deployment-lifecycle, `isLocalOrchestratedCloud`) — for that shape the snapshot is
- * the only cloud signal there is, and reading the column alone declares it local.
+ * Managed projects share private Docker networks only within the same owned
+ * server. An unbound Cloud snapshot cannot establish that co-location.
  *
  * A project bound to nothing and never deployed is NOT unknown: `resolveSnapshotTarget`
  * resolves exactly that shape to the host default, so its first deploy lands on this
@@ -326,33 +367,40 @@ const hostKey = (h: ProjectHost): string => (h.kind === "server" ? `server:${h.i
  * project that was about to deploy somewhere else entirely.
  */
 async function resolveProjectHost(project: Project): Promise<ProjectHost> {
+  if (project.workspaceId) {
+    const workspace = await repos.cloudWorkspace.findByIdInOrganization(project.workspaceId, project.organizationId);
+    if (!workspace) throw new Error("Managed server is unavailable");
+    return { kind: "workspace", id: workspace.id };
+  }
   const dep = project.activeDeploymentId
-    ? await findActiveDeployment(project).catch(() => null)
+    ? await findActiveDeployment(project).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/projects/project-connection.service"); return null; })
     : null;
   const meta = (dep?.meta ?? null) as { deployTarget?: string; serverId?: string } | null;
-  if (meta?.deployTarget === "cloud" || project.cloudWorkspaceId) return { kind: "cloud" };
+  if (meta?.deployTarget === "cloud") return { kind: "cloud" };
 
   const serverId = meta?.serverId ?? project.serverId ?? null;
   if (!serverId) return { kind: "box" };
 
   const row = await repos.server
     .getInOrganization(serverId, project.organizationId)
-    .catch(() => null);
+    .catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/projects/project-connection.service"); return null; });
   // A row we cannot read is not PROVABLY this box, so it stays its own machine — the
   // failure mode of guessing "local" here is a dead alias, which is what this check
   // exists to prevent.
-  return row && (await isLocalHostRow(row).catch(() => false))
+  return row && (await isLocalHostRow(row).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/projects/project-connection.service"); return false; }))
     ? { kind: "box" }
     : { kind: "server", id: serverId };
 }
 
 /** Also checked against the new deployment at network attachment, so moves cannot silently break a link. */
 export async function privateConnectionError(source: Project, target: Project): Promise<string | null> {
+  if (source.clusterId || target.clusterId)
+    return "Docker private networks cannot be used by native cluster applications. Choose a native database connection or a reachable endpoint.";
   const [sourceHost, targetHost, targetDeployment] = await Promise.all([
     resolveProjectHost(source), resolveProjectHost(target),
     target.activeDeploymentId ? findActiveDeployment(target) : null,
   ]);
-  if (sourceHost.kind === "cloud" || targetHost.kind === "cloud") return "Internal mode isn't available for a cloud-hosted app yet — use Public.";
+  if (sourceHost.kind === "cloud" || targetHost.kind === "cloud") return "Select a managed server for this Cloud project before creating a private connection.";
   if (hostKey(sourceHost) !== hostKey(targetHost)) return "Internal mode needs both projects on the same server — they're on different servers.";
   const runtimeMode = (targetDeployment?.meta as { runtimeMode?: string } | null)?.runtimeMode ?? target.runtimeMode;
   if (runtimeMode === "bare") return "Private service connections require a Docker deployment for the consuming project.";
@@ -378,6 +426,11 @@ async function resolveInternalValue(ends: ConnectionEnds): Promise<InternalResol
   // re-break the case that was reported, and resolving hosts costs queries this
   // path has no use for.
   if (!isNetworkUrl(output.value)) return { value: output.value };
+
+  if (output.sourceDatabaseId) {
+    await requireNativeDatabaseConnection(source, target, output.sourceDatabaseId);
+    return { value: output.value };
+  }
 
   // Everything below hands the consumer a HOST to reach east-west, which rides on
   // joining the source app's docker network at deploy (attachLinkedNetworks). Those
@@ -515,6 +568,7 @@ async function prepareConnection(
         organizationId: target.organizationId,
         sourceProjectId: source.id,
         sourceServiceId: output.sourceServiceId ?? null,
+        sourceDatabaseId: output.sourceDatabaseId ?? null,
         targetProjectId: target.id,
         outputId: output.id,
         envKey,
@@ -525,6 +579,39 @@ async function prepareConnection(
   };
 }
 
+async function revokeReplacedNativeConnections(
+  organizationId: string,
+  previous: Awaited<ReturnType<typeof repos.projectConnection.listByTarget>>,
+  bindings: Array<Awaited<ReturnType<typeof prepareConnection>>["binding"]>,
+) {
+  const replaced = previous.filter(
+    (link) =>
+      link.sourceDatabaseId &&
+      bindings.some(
+        (binding) =>
+          binding.connection.envKey === link.envKey &&
+          binding.connection.sourceDatabaseId !== link.sourceDatabaseId,
+      ),
+  );
+  const excluded = new Set(replaced.map((link) => link.id));
+  for (const [databaseId, sourceId] of new Map(
+    replaced.map((link) => [link.sourceDatabaseId!, link.sourceProjectId]),
+  ))
+    await reconcileNativeDatabaseConnections(organizationId, sourceId, databaseId, excluded);
+}
+
+async function reconcileNativeConnections(
+  organizationId: string,
+  rows: Awaited<ReturnType<typeof repos.projectConnection.listByTarget>>,
+) {
+  for (const [databaseId, sourceId] of new Map(
+    rows
+      .filter((link) => link.sourceDatabaseId)
+      .map((link) => [link.sourceDatabaseId!, link.sourceProjectId]),
+  ))
+    await reconcileNativeDatabaseConnections(organizationId, sourceId, databaseId);
+}
+
 export async function createConnection(
   ctx: RequestContext,
   targetProjectId: string,
@@ -532,8 +619,11 @@ export async function createConnection(
   opts?: { defer?: boolean },
 ): Promise<{ connection: ConnectionView; requiresRedeploy: true }> {
   const connection = await withConnectionLocks(input.sourceProjectId, targetProjectId, async () => {
+    const previous = await repos.projectConnection.listByTarget(targetProjectId);
     const prepared = await prepareConnection(ctx, targetProjectId, input);
+    await revokeReplacedNativeConnections(ctx.organizationId, previous, [prepared.binding]);
     const [row] = await repos.projectConnection.saveBindings(targetProjectId, ENVIRONMENT, [prepared.binding]);
+    await reconcileNativeConnections(ctx.organizationId, [row]);
     return toConnectionView(row, prepared.source, prepared.sourceServiceName);
   });
   if (!opts?.defer) await applyConnectionToTarget(ctx, targetProjectId);
@@ -560,11 +650,18 @@ export async function connectBundle(
   const keys = input.items.map(item => item.envKey.trim());
   if (new Set(keys).size !== keys.length) throw new ValidationError("Choose a different environment variable name for each connection value.");
   const connections = await withConnectionLocks(input.sourceProjectId, targetProjectId, async () => {
+    const previous = await repos.projectConnection.listByTarget(targetProjectId);
     const prepared: Array<Awaited<ReturnType<typeof prepareConnection>>> = [];
     for (const item of input.items) prepared.push(await prepareConnection(ctx, targetProjectId, {
       sourceProjectId: input.sourceProjectId, ...item, mode: input.mode,
     }));
+    await revokeReplacedNativeConnections(
+      ctx.organizationId,
+      previous,
+      prepared.map((item) => item.binding),
+    );
     const rows = await repos.projectConnection.saveBindings(targetProjectId, ENVIRONMENT, prepared.map(item => item.binding));
+    await reconcileNativeConnections(ctx.organizationId, rows);
     return rows.map((row, index) => toConnectionView(row, prepared[index].source, prepared[index].sourceServiceName));
   });
   await applyConnectionToTarget(ctx, targetProjectId);
@@ -592,16 +689,29 @@ export async function deleteConnection(
   await withConnectionLocks(existing.sourceProjectId, targetProjectId, async () => {
     const link = await repos.projectConnection.findInTarget(linkId, targetProjectId);
     if (!link || link.sourceProjectId !== existing.sourceProjectId) throw new ValidationError("This connection changed. Refresh the project before disconnecting.");
+    if (link.sourceDatabaseId)
+      await reconcileNativeDatabaseConnections(
+        ctx.organizationId,
+        link.sourceProjectId,
+        link.sourceDatabaseId,
+        new Set([link.id]),
+      );
     if (usesPrivateNetwork(link) && link.sourceServiceId) {
       const source = await repos.project.findById(link.sourceProjectId);
       assertResourceInOrg(source, "Project", target.organizationId, link.sourceProjectId);
       await disconnectSharedServiceNetwork(source, target, link.sourceServiceId, link.id);
     }
 
-    await mergeEnvVars(targetProjectId, target.organizationId, {
-      environment: ENVIRONMENT, upserts: [], deletes: [link.envKey],
-    });
-    await repos.projectConnection.delete(linkId);
+    if (link.sourceDatabaseId) {
+      await repos.projectConnection.deleteBinding(targetProjectId, ENVIRONMENT, linkId);
+    } else {
+      await mergeEnvVars(targetProjectId, target.organizationId, {
+        environment: ENVIRONMENT,
+        upserts: [],
+        deletes: [link.envKey],
+      });
+      await repos.projectConnection.delete(linkId);
+    }
   });
   // Refresh the running consumer so the removed env leaves the live container.
   if (!opts?.defer) await applyConnectionToTarget(ctx, targetProjectId);
@@ -615,8 +725,9 @@ export async function refreshConnectionEnv(
   environment: string,
 ): Promise<Record<string, string>> {
   if (environment !== ENVIRONMENT) return {};
-  const links = (await repos.projectConnection.listByTarget(targetProjectId))
-    .filter(link => !!link.sourceServiceId);
+  const links = (await repos.projectConnection.listByTarget(targetProjectId)).filter(
+    (link) => !!link.sourceServiceId || !!link.sourceDatabaseId,
+  );
   if (!links.length) return {};
   const resolved: Record<string, string> = {};
   const rows = await repos.project.listEnvVars(targetProjectId, environment, null);
@@ -673,7 +784,7 @@ export async function unlinkConsumersOfSource(
   const errors: string[] = [];
 
   for (const link of links) {
-    const target = await repos.project.findById(link.targetProjectId).catch(() => null);
+    const target = await repos.project.findById(link.targetProjectId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/projects/project-connection.service"); return null; });
     const name = target?.name ?? link.targetProjectId;
     try {
       // A target that's already gone leaves nothing to clean up — its own delete
@@ -693,6 +804,7 @@ export async function unlinkConsumersOfSource(
         envKey: link.envKey,
       });
     } catch (err) {
+      observeCaughtError(err, "platform/engine/modules/projects/project-connection.service");
       errors.push(
         `${link.envKey} on ${name}: ${err instanceof Error ? err.message : String(err)}`,
       );

@@ -77,8 +77,9 @@ A focused, verified, well-explained PR — AI-assisted or not — is exactly wha
 
 ## Prerequisites
 
-- [Bun 1.3.10](https://bun.sh/) (pinned in `.bun-version` and `package.json`)
+- [Bun 1.3.14](https://bun.sh/) (pinned in `.bun-version` and `package.json`)
 - [Node.js 22 or newer](https://nodejs.org/) (see `.nvmrc` and `package.json`)
+- OpenSSL on `PATH` for the API's TLS and WebSocket runtime regression tests
 - Docker, when using the Compose stack or testing Docker-based deployments
 
 ## Development Setup
@@ -143,6 +144,8 @@ maintain their own strict TypeScript configurations.
 - **Branches**: `feat/`, `fix/`, `docs/`, `chore/`
 - **Code style**: Prettier - run `bun format` before committing
 - **Types**: TypeScript strict mode everywhere
+- **Dashboard UI**: Follow the [dashboard design guide](docs/dashboard-design.md) for surfaces,
+  controls, typography, responsive layouts, and catalog forms.
 
 ## Localization
 

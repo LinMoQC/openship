@@ -5,6 +5,11 @@ import type { ResourceOperationSchema, ResourceOperations, ScopedOperations } fr
 
 const nullableString = Type.Union([Type.String(), Type.Null()]);
 const object = Type.Record(Type.String(), Type.Unknown());
+export const JobRunStepSchema = Type.Object({
+  id: Type.String(), label: Type.String(),
+  status: Type.Union((["pending", "running", "completed", "failed", "skipped"] as const).map(status => Type.Literal(status))),
+}, { additionalProperties: false });
+export type JobRunStep = Static<typeof JobRunStepSchema>;
 export const JobRunSchema = Type.Object({
   id: Type.String(), jobId: Type.String(), kind: Type.String(), trigger: Type.String(), status: Type.String(), serverId: nullableString,
   serverIds: Type.Optional(Type.Union([Type.Array(Type.String()), Type.Null()])),
@@ -12,6 +17,7 @@ export const JobRunSchema = Type.Object({
   summary: Type.Union([object, Type.Null()]), output: nullableString, error: nullableString, createdAt: Type.String(),
 }, { additionalProperties: false });
 const actionConfig = Type.Object({
+  workflowId: Type.Optional(Type.String()), inputs: Type.Optional(Type.Record(Type.String(), Type.String())),
   serverId: Type.Optional(Type.String()), serverIds: Type.Optional(Type.Array(Type.String())), command: Type.Optional(Type.String()),
   timeoutMs: Type.Optional(Type.Number()), retry: Type.Optional(Type.Object({ maxAttempts: Type.Number(), backoffSeconds: Type.Number() })),
   env: Type.Optional(Type.Record(Type.String(), Type.String())), secrets: Type.Optional(Type.Record(Type.String(), Type.Literal(""))),

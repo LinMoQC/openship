@@ -100,11 +100,20 @@ The request `Origin` isn't in the trusted-origins allowlist. Connect from the da
 
 ## Operations
 
+## SDK and CLI
+
+Use `client.terminal.openService(serviceId, { origin, onData })` for the same authenticated terminal
+protocol as server terminals. The session supports `write`, `resize`, `close`, and a `closed` promise
+with the confirmed exit result. See [terminal transport](/docs/api/terminal#sdk-and-cli).
+
+`openship service terminal <id> --project <project-id>` opens an interactive PTY. Use `openship service exec <id> "..." --project <project-id>`
+for scripts; it preserves the remote command's exit status.
+
 {/* api-operations:start */}
 
-| Operation | REST API |
-| --- | --- |
-| Mint a one-shot, short-lived WebSocket auth ticket for a service. | `POST /api/services/terminal/ticket`<br />`terminal:write` |
-| WebSocket upgrade — auth happens inside the handshake (ticket subprotocol or session cookie). | `GET /api/services/terminal/ws/:serviceId`<br />`Handler authentication` |
+| Operation | SDK | REST API |
+| --- | --- | --- |
+| Mint a one-shot, short-lived WebSocket auth ticket for a service. | `terminal.openService(id, options)`<br />Remote client | `POST /api/services/terminal/ticket`<br />`terminal:write` |
+| WebSocket upgrade — auth happens inside the handshake (ticket subprotocol or session cookie). | `terminal.openService(id, options)` | `GET /api/services/terminal/ws/:serviceId`<br />`Handler authentication` |
 
 {/* api-operations:end */}

@@ -1,8 +1,10 @@
 "use client";
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { Icon as UiIcon, type IconName } from "@repo/ui/icons";
+import { Input } from "@/components/ui/input";
 
-import React, { useCallback, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { ENV_MASK, isMaskedValue, looksLikeSecretKey } from "@repo/core";
 import { useOptionalDeployment } from "@/context/DeploymentContext";
 import { useToast } from "@/context/ToastContext";
@@ -36,7 +38,7 @@ interface EnvironmentVariablesPropsOptional {
   hasChanges?: boolean;
   isSaving?: boolean;
   showSettingsActions?: boolean;
-  /** When true, removes the outer card border and inner divider - for embedding inside another card. */
+  /** When true, removes the outer card surface and inner divider for embedding. */
   borderless?: boolean;
   /** When true, the body (paste zone + variable list) starts hidden and a
    *  chevron toggle is added to the header. Paste / upload actions
@@ -192,12 +194,12 @@ const EnvironmentVariables: React.FC<EnvironmentVariablesPropsOptional> = ({
   // header racing a row's eye — shares a request instead of re-asking the server
   // for the same secret. Rejects (after toasting) so callers bail without
   // surfacing a second error; resolves null when no reveal source is wired.
-  const inFlightRef = useRef<Map<string, Promise<Record<string, string>>>>(new Map());
+  const inFlightRef = useRef<Map<string, Promise<Record<string, string> | null>>>(new Map());
   const ensureRevealed = useCallback(
     async (keys: string[]): Promise<Record<string, string> | null> => {
       if (!onReveal) return null;
       const known: Record<string, string> = {};
-      const pending: Promise<Record<string, string>>[] = [];
+      const pending: Promise<Record<string, string> | null>[] = [];
       const toFetch: string[] = [];
       for (const key of keys) {
         // hasOwn, not `in`: an env var named `constructor` would otherwise "hit"
@@ -210,20 +212,28 @@ const EnvironmentVariables: React.FC<EnvironmentVariablesPropsOptional> = ({
         }
       }
       if (toFetch.length > 0) {
-        const request = onReveal(toFetch)
+        const request: Promise<Record<string, string> | null> = onReveal(toFetch)
           .then((vals) => {
-            setRevealedValues((prev) => ({ ...prev, ...vals }));
-            return vals;
+            const currentKeys = toFetch.filter((key) => inFlightRef.current.get(key) === request);
+            if (currentKeys.length === 0) return null;
+            const currentValues = Object.fromEntries(
+              currentKeys.filter((key) => Object.hasOwn(vals, key)).map((key) => [key, vals[key]]),
+            );
+            setRevealedValues((prev) => ({ ...prev, ...currentValues }));
+            return currentValues;
           })
           .catch((err) => {
+            if (!toFetch.some((key) => inFlightRef.current.get(key) === request)) return null;
             showToast(ev.reveal?.error ?? "Failed to reveal values", "error", ev.toast.title);
             throw err;
           })
           .finally(() => {
-            for (const key of toFetch) inFlightRef.current.delete(key);
+            const finished = toFetch.filter((key) => inFlightRef.current.get(key) === request);
+            if (finished.length === 0) return;
+            for (const key of finished) inFlightRef.current.delete(key);
             setRevealingKeys((prev) => {
               const next = new Set(prev);
-              for (const key of toFetch) next.delete(key);
+              for (const key of finished) next.delete(key);
               return next;
             });
           });
@@ -232,7 +242,9 @@ const EnvironmentVariables: React.FC<EnvironmentVariablesPropsOptional> = ({
         pending.push(request);
       }
       if (pending.length === 0) return known;
-      return Object.assign(known, ...(await Promise.all(pending)));
+      const results = await Promise.all(pending);
+      if (Object.keys(known).length === 0 && results.every((value) => value === null)) return null;
+      return Object.assign(known, ...results);
     },
     [revealedValues, onReveal, showToast, ev],
   );
@@ -242,7 +254,7 @@ const EnvironmentVariables: React.FC<EnvironmentVariablesPropsOptional> = ({
   // lie — and the operator gets the error toast.
   const revealAndShow = useCallback(
     async (keys: string[]) => {
-      const vals = await ensureRevealed(keys).catch(() => null);
+      const vals = await ensureRevealed(keys).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "dashboard/components/import-project/EnvironmentVariables"); return null; });
       if (!vals) return;
       const got = keys.filter((key) => Object.hasOwn(vals, key));
       if (got.length < keys.length) {
@@ -258,11 +270,35 @@ const EnvironmentVariables: React.FC<EnvironmentVariablesPropsOptional> = ({
   // it again re-fetches (per key) — one round trip is worth not holding it.
   const hideKeys = useCallback((keys: string[]) => {
     const dropped = new Set(keys);
+    for (const key of keys) inFlightRef.current.delete(key);
+    setRevealingKeys((prev) => new Set([...prev].filter((key) => !dropped.has(key))));
     setShownKeys((prev) => new Set([...prev].filter((key) => !dropped.has(key))));
     setRevealedValues((prev) =>
       Object.fromEntries(Object.entries(prev).filter(([key]) => !dropped.has(key))),
     );
   }, []);
+
+  // A revealed value belongs to the saved row it was fetched for. Editing,
+  // renaming, deleting, or replacing that row invalidates both its plaintext
+  // overlay and any pending lookup before a save can mask the new value again.
+  const revealRows = useRef(currentEnvVars);
+  useEffect(() => {
+    const current = new Map(currentEnvVars.map((row) => [row.key, row]));
+    const changed = revealRows.current.filter((previous) => {
+      const row = current.get(previous.key);
+      return (
+        !row ||
+        row.value !== previous.value ||
+        row.sourceId !== previous.sourceId ||
+        row.originalKey !== previous.originalKey ||
+        row.preserveValue !== previous.preserveValue
+      );
+    });
+    revealRows.current = currentEnvVars;
+    if (changed.length > 0) hideKeys(changed.map((row) => row.key));
+  }, [currentEnvVars, hideKeys]);
+
+  useEffect(() => () => { inFlightRef.current.clear(); }, []);
 
   // The per-row eye. A masked row holds only the sentinel, so showing it fetches
   // THAT key's real value (nothing else) into the overlay. A plaintext row (new /
@@ -497,7 +533,8 @@ const EnvironmentVariables: React.FC<EnvironmentVariablesPropsOptional> = ({
         // rows that just landed (no-op if not in collapsible mode).
         setExpanded(true);
       }
-    } catch {
+    } catch (diagnosticFailure) {
+      observeCaughtError(diagnosticFailure, "dashboard/components/import-project/EnvironmentVariables");
       showToast(ev.toast.clipboardBlocked, "error", ev.toast.title);
     }
   }, [applyEnvText, isEditingMode, showToast, ev]);
@@ -588,7 +625,8 @@ const EnvironmentVariables: React.FC<EnvironmentVariablesPropsOptional> = ({
         link.remove();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
       }
-    } catch {
+    } catch (diagnosticFailure) {
+      observeCaughtError(diagnosticFailure, "dashboard/components/import-project/EnvironmentVariables");
       showToast(ev.toast.downloadFailed, "error", ev.toast.title);
     } finally {
       downloadInFlight.current = false;
@@ -700,13 +738,13 @@ const EnvironmentVariables: React.FC<EnvironmentVariablesPropsOptional> = ({
     collapsible;
 
   return (
-    <div className={borderless ? "" : "bg-card rounded-2xl border border-border/50"}>
+    <div className={borderless ? "" : "bg-card rounded-2xl"}>
       {(!hideTitle || hasHeaderActions) && (
         <div className="flex flex-wrap items-center justify-between gap-3 px-5 py-4">
           {!hideTitle && (
             <div className="flex min-w-0 items-center gap-3">
-              <div className="size-9 shrink-0 rounded-xl bg-violet-500/10 flex items-center justify-center">
-                <UiIcon name="key" className="size-[18px] text-violet-500" />
+              <div className="size-9 shrink-0 rounded-xl bg-primary/10 flex items-center justify-center">
+                <UiIcon name="key" className="size-[18px] text-primary" />
               </div>
               <div className="min-w-0">
                 <p className="truncate text-sm font-medium text-foreground">{ev.title}</p>
@@ -886,25 +924,29 @@ const EnvironmentVariables: React.FC<EnvironmentVariablesPropsOptional> = ({
                   </div>
                 )}
                 <div className="flex flex-wrap items-center gap-2 sm:flex-nowrap">
-                  <input
+                  <Input
+                    dir="ltr"
+                    variant="filled"
                     type="text"
                     value={env.key}
                     onChange={(e) => handleKeyChange(index, e.target.value)}
                     placeholder="KEY"
                     readOnly={!isEditingMode || env.keyReadOnly}
-                    className={`w-full min-w-0 flex-none px-3.5 py-2.5 border border-border/50 rounded-lg text-sm font-mono text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all sm:w-auto sm:flex-1 ${
-                      !isEditingMode ? "cursor-default bg-muted/20" : "bg-muted/30"
+                    className={`min-w-0 flex-none font-mono sm:w-auto sm:flex-1 ${
+                      !isEditingMode ? "cursor-default" : ""
                     } ${inputStateClass}`}
                   />
                   <div className="relative min-w-0 flex-1">
-                    <input
+                    <Input
+                      dir="ltr"
+                      variant="filled"
                       type={showAsText ? "text" : "password"}
                       value={displayValue}
                       onChange={(e) => handleValueChange(index, e.target.value)}
                       placeholder={env.preserveValue ? ENV_MASK : ev.valuePlaceholder}
                       readOnly={!isEditingMode}
-                      className={`w-full px-3.5 py-2.5 pe-9 border border-border/50 rounded-lg text-sm font-mono text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all ${
-                        !isEditingMode ? "cursor-default bg-muted/20" : "bg-muted/30"
+                      className={`pe-9 font-mono ${
+                        !isEditingMode ? "cursor-default" : ""
                       } ${inputStateClass} ${demoMode ? "blur-[5px] select-none" : ""}`}
                     />
                     {canToggleValue && (
@@ -1081,7 +1123,7 @@ function getEnvResolutionState(
       icon: "warning" as const,
       label: res.needsValue,
       badgeClass: "bg-warning-bg text-warning",
-      inputClass: "border-warning-border bg-warning-bg focus:ring-warning-border",
+      inputClass: "ring-1 ring-inset ring-warning-border bg-warning-bg focus-visible:ring-warning-border",
     };
   }
 
@@ -1090,7 +1132,7 @@ function getEnvResolutionState(
       icon: "rotate-left" as const,
       label: res.fallbackDefault,
       badgeClass: "bg-info-bg text-info",
-      inputClass: "border-info-border bg-info-bg focus:ring-info-border",
+      inputClass: "ring-1 ring-inset ring-info-border bg-info-bg focus-visible:ring-info-border",
     };
   }
 
@@ -1099,7 +1141,7 @@ function getEnvResolutionState(
       icon: "file-text" as const,
       label: res.loadedFromEnv,
       badgeClass: "bg-success-bg text-success",
-      inputClass: "border-success-border bg-success-bg focus:ring-success-border",
+      inputClass: "ring-1 ring-inset ring-success-border bg-success-bg focus-visible:ring-success-border",
     };
   }
 
@@ -1108,7 +1150,7 @@ function getEnvResolutionState(
       icon: "rotate-left" as const,
       label: res.interpolated,
       badgeClass: "bg-muted text-muted-foreground",
-      inputClass: "border-border/70",
+      inputClass: "",
     };
   }
 

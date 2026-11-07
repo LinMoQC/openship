@@ -25,14 +25,17 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@sinclair/typebox": "^0.34.48",
+    "ws": "^8.21.3",
     "@repo/core": "workspace:*",
     "@repo/contracts": "workspace:*",
     "@repo/platform": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.13.0",
+    "@types/ws": "^8.18.1",
     "tsup": "^8.5.1",
     "typescript": "^5.9.3",
-    "vitest": "^4.0.18"
+    "vitest": "^4.1.12"
   }
 }

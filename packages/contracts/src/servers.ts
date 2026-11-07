@@ -1,12 +1,17 @@
+import { ServerSecuritySchemas } from "./server-security";
 import {
   NetworkCollectionSchemas,
   ComputeClusterCollectionSchemas,
+  ComputeClusterSchema,
   ServerInfrastructureSchema,
 } from "./infrastructure-resources";
 import { ClusterRuntimeCollectionSchemas } from "./cluster-runtime";
+import { SwarmInspectionInputSchema, SwarmInspectionSchema, ConnectSwarmInputSchema } from "./server-swarm";
 import { ClusterStorageCollectionSchemas } from "./cluster-storage";
+import { ManagedServerResourceSchemas } from "./server-managed";
 import { Type, type Static } from "@sinclair/typebox";
 import { AgentExecBody } from "./exec";
+import { CloudWorkspaceSchema, CloudWorkspaceUsageSchema, CloudWorkspaceResizePreviewSchema, CreateManagedServerInputSchema, ResizeManagedServerInputSchema, RemoveManagedServerInputSchema } from "./cloud-workspaces";
 import { ServerClusterCollectionSchemas, NetworkHostObservationSchema } from "./server-clusters";
 import {
   ServerTunnelSchema,
@@ -15,7 +20,7 @@ import {
   StartServerTunnelResultSchema,
 } from "./server-tunnels";
 import { AgentExecResultSchema } from "./services";
-import type { DeploymentEvent } from "./deployment-resources";
+import { ResourceIdSchema, type DeploymentEvent } from "./deployment-resources";
 import type {
   ResourceOperationSchema,
   ResourceOperations,
@@ -35,7 +40,29 @@ import {
   type ApplyServerContainerInput,
 } from "./server-containers";
 
+/** Default host stats remain compatible; usage is an opt-in managed resource sample. */
+export const ServerMonitorFormatSchema = Type.Union([Type.Literal("stats"), Type.Literal("usage")]);
+export interface ServerMonitorOptions {
+  signal?: AbortSignal;
+  format?: Static<typeof ServerMonitorFormatSchema>;
+}
+export const ResourceUsageSampleSchema = Type.Pick(CloudWorkspaceUsageSchema, [
+  "measuredAt", "cpuPercent", "memoryUsedMb", "memoryAvailableMb",
+  "diskUsedMb", "diskAvailableMb", "diskTotalMb",
+]);
+export type ResourceUsageSample = Static<typeof ResourceUsageSampleSchema>;
+
 const nullableString = Type.Union([Type.String(), Type.Null()]);
+export const ServerNetworkSettingsSchema = Type.Object({
+  internetAccess: Type.Union([Type.Boolean(), Type.Null()]),
+  ingressPorts: Type.Array(Type.Integer({ minimum: 1, maximum: 65535 })),
+  ingressAll: Type.Optional(Type.Boolean()),
+  egress: Type.Optional(Type.Union([Type.Array(Type.String()), Type.Null()])),
+  privateIp: Type.Optional(nullableString),
+  outboundIp: Type.Optional(nullableString),
+  outboundMode: Type.Optional(nullableString),
+  revision: Type.Optional(Type.String({ pattern: "^[a-f0-9]{64}$" })),
+}, { additionalProperties: false });
 const connectionFields = {
   name: Type.Optional(nullableString),
   sshHost: Type.Optional(nullableString),
@@ -65,9 +92,30 @@ export const CreateServerInputSchema = Type.Object(
   },
   { additionalProperties: false },
 );
-export const UpdateServerInputSchema = Type.Object(connectionFields, {
-  additionalProperties: false,
-});
+/** Manual GPU mark: "yes"/"no" override the probe, `null` goes back to following it. */
+export const GpuOverrideSchema = Type.Union([Type.Literal("yes"), Type.Literal("no"), Type.Null()]);
+export const UpdateServerInputSchema = Type.Object(
+  { ...connectionFields, gpuOverride: Type.Optional(GpuOverrideSchema) },
+  { additionalProperties: false },
+);
+
+/**
+ * Whether a server can hand a GPU to a container. `detected` is what the daemon reported, `override`
+ * is the operator's manual mark, and `available` is the answer that wins (manual beats probe in both
+ * directions). `probed: false` means the daemon could not be read (unreachable / cloud), so
+ * `detected` says nothing; the UI must not read it as "no GPU".
+ */
+export const ServerGpuSchema = Type.Object(
+  {
+    available: Type.Boolean(),
+    detected: Type.Boolean(),
+    count: Type.Union([Type.Integer({ minimum: 0 }), Type.Null()]),
+    override: GpuOverrideSchema,
+    probed: Type.Boolean(),
+  },
+  { additionalProperties: false },
+);
+export type ServerGpu = Static<typeof ServerGpuSchema>;
 export type CreateServerInput = Static<typeof CreateServerInputSchema>;
 export type UpdateServerInput = Static<typeof UpdateServerInputSchema>;
 
@@ -83,9 +131,16 @@ export const HostChannelSchema = Type.Object(
 
 const serverFields = {
   id: Type.String(),
+  source: Type.Optional(Type.Union([Type.Literal("local"), Type.Literal("cloud")])),
+  /** Canonical IDs for an explicitly linked destination, for UI selection only. */
+  cloudReference: Type.Optional(Type.Object({
+    serverId: Type.String(),
+    workspaceId: Type.String(),
+  }, { additionalProperties: false })),
+  purpose: Type.Optional(Type.Union([Type.Literal("deployment"), Type.Literal("migration_source")])),
   name: nullableString,
   isLocal: Type.Boolean(),
-  sshHost: Type.String(),
+  sshHost: nullableString,
   sshPort: Type.Union([Type.Number(), Type.Null()]),
   sshUser: nullableString,
   sshAuthMethod: nullableString,
@@ -96,6 +151,19 @@ const serverFields = {
   createdAt: Type.String(),
   country: nullableString,
   sshTransport: Type.Union([Type.Literal("direct"), Type.Literal("cloudflare")]),
+  connection: Type.Optional(Type.Union([Type.Literal("local"), Type.Literal("ssh"), Type.Literal("cloud")])),
+  managed: Type.Optional(Type.Union([CloudWorkspaceSchema, Type.Null()])),
+  terminalSessionLimit: Type.Optional(Type.Integer({ minimum: 0 })),
+  /** Absent on managed (cloud) servers, which have no GPU model. */
+  gpu: Type.Optional(ServerGpuSchema),
+  capabilities: Type.Optional(Type.Object({
+    monitor: Type.Boolean(),
+    terminal: Type.Boolean(),
+    exec: Type.Boolean(),
+    hostConfiguration: Type.Boolean(),
+    ssh: Type.Boolean(),
+    networkSettings: Type.Optional(Type.Boolean()),
+  }, { additionalProperties: false })),
 };
 /** Explicitly excludes password, private-key material and passphrase, including ciphertext. */
 export const ServerSchema = Type.Object(serverFields, { additionalProperties: false });
@@ -103,6 +171,7 @@ export const ServerDetailSchema = Type.Object(
   {
     ...serverFields,
     projectCount: Type.Integer({ minimum: 0 }),
+    edgeRequired: Type.Optional(Type.Boolean()),
     hostChannel: Type.Union([HostChannelSchema, Type.Null()]),
   },
   { additionalProperties: false },
@@ -355,7 +424,10 @@ export const ServerPortScanSchema = Type.Object({
 });
 
 export const ServerInstallSessionInputSchema = Type.Object(
-  { sessionId: Type.Optional(Type.String({ minLength: 1 })) },
+  {
+    sessionId: Type.Optional(Type.String({ minLength: 1 })),
+    serverId: Type.Optional(ResourceIdSchema),
+  },
   { additionalProperties: false },
 );
 export type ServerInstallSessionInput = Static<typeof ServerInstallSessionInputSchema>;
@@ -430,8 +502,12 @@ export const ServerCollectionSchemas = {
     optionalInput: true,
     output: ApplyAllServerContainersResultSchema,
   },
-  list: { action: "read", output: Type.Array(ServerDetailSchema) },
+  list: { action: "read", scope: "list", output: Type.Array(ServerDetailSchema) },
+  destinations: { action: "read", scope: "list", output: Type.Object({ servers: Type.Array(ServerDetailSchema) }) },
   create: { action: "write", input: CreateServerInputSchema, output: ServerSchema },
+  createManaged: { action: "admin", input: CreateManagedServerInputSchema, output: CloudWorkspaceSchema },
+  availableManaged: { action: "admin", scope: "list", output: Type.Object({ servers: Type.Array(ServerDetailSchema) }) },
+  connectManaged: { action: "admin", input: Type.Object({ serverId: Type.String({ minLength: 1, maxLength: 128, pattern: "^[A-Za-z0-9_-]+$" }) }, { additionalProperties: false }), output: CloudWorkspaceSchema },
   testConnection: {
     action: "write",
     input: CreateServerInputSchema,
@@ -439,7 +515,34 @@ export const ServerCollectionSchemas = {
   },
 } as const satisfies Record<string, ResourceOperationSchema>;
 export const ServerResourceSchemas = {
+  ...ServerSecuritySchemas,
+  ...ManagedServerResourceSchemas,
+  usage: { action: "read", output: CloudWorkspaceUsageSchema },
+  getNetworkSettings: {
+    action: "read",
+    input: Type.Object({ details: Type.Optional(Type.Boolean()) }, { additionalProperties: false }),
+    optionalInput: true,
+    output: ServerNetworkSettingsSchema,
+  },
+  updateNetworkSettings: {
+    action: "admin",
+    input: Type.Object({
+      internetAccess: Type.Boolean(),
+      expectedInternetAccess: Type.Boolean(),
+      egress: Type.Optional(Type.Array(Type.String({ minLength: 1, maxLength: 253, pattern: "^[^\\s/\\\\:@?#\\x00]+$" }), { minItems: 1, maxItems: 50 })),
+      expectedRevision: Type.Optional(Type.String({ pattern: "^[a-f0-9]{64}$" })),
+      confirm: Type.Literal(true),
+    }, { additionalProperties: false }),
+    output: ServerNetworkSettingsSchema,
+  },
+  ensure: { action: "write", output: CloudWorkspaceSchema },
+  previewResize: { action: "read", output: CloudWorkspaceResizePreviewSchema },
+  resize: { action: "admin", input: ResizeManagedServerInputSchema, output: CloudWorkspaceSchema },
+  retry: { action: "admin", output: CloudWorkspaceSchema },
+  removeManaged: { action: "admin", input: RemoveManagedServerInputSchema, output: CloudWorkspaceSchema },
   infrastructure: { action: "read", output: ServerInfrastructureSchema },
+  inspectSwarm: { action: "admin", input: SwarmInspectionInputSchema, optionalInput: true, output: SwarmInspectionSchema },
+  connectSwarm: { action: "admin", input: ConnectSwarmInputSchema, output: ComputeClusterSchema },
   inspectNetwork: { action: "admin", output: NetworkHostObservationSchema },
   githubStatus: {
     action: "read",
@@ -601,5 +704,6 @@ export interface ServerOperations
     input?: ServerInstallSessionInput,
     options?: { signal?: AbortSignal },
   ): AsyncIterable<DeploymentEvent>;
-  monitor(id: string, options?: { signal?: AbortSignal }): AsyncIterable<DeploymentEvent>;
+  securityRunEvents(id: string, runId: string, options?: { signal?: AbortSignal }): AsyncIterable<DeploymentEvent>;
+  monitor(id: string, options?: ServerMonitorOptions): AsyncIterable<DeploymentEvent>;
 }

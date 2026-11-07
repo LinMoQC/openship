@@ -1,30 +1,38 @@
 import { exitCommand, rethrowCommandExit } from "../lib/command-exit";
 /**
- * `openship server` — manage self-hosted SSH servers.
+ * `openship server` — manage registered and managed Cloud servers.
  *
- * Grounded in the API's system module (mounted at /api/system, localOnly):
+ * Grounded in the API's shared server operations (mounted at /api/system):
  *   list/add/rm       → GET|POST /system/servers, DELETE /system/servers/:id
  *   test-connection   → POST /system/test-connection   (ephemeral, no persist)
  *   check             → POST /system/check             (health vs saved server)
  *   install [--follow]→ POST /system/install | /system/install/stream (SSE)
  *   rate-limit        → GET|PATCH /system/servers/:id/rate-limit
  *   monitor           → GET  /system/monitor/stream    (SSE stats)
- *   ssh               → stubbed "coming soon" (interactive terminal needs ws)
+ *   ssh / terminal    → single-use terminal ticket + WebSocket PTY
  *
- * Every subcommand is [self-host] only: gated via caps.requireSelfHost.
+ * The API authorizes the selected server, including paid customer-owned hosts
+ * managed by Openship Cloud. Operator-host access remains unavailable in SaaS.
  */
-import { Command } from "commander";
+import { randomUUID } from "node:crypto";
+import { Command, Option } from "commander";
 import chalk from "chalk";
 import ora from "ora";
 import { getShipClient, ApiError, hasShipCredentials } from "../lib/ship-client";
 import type { CreateServerInput } from "@repo/sdk";
-import { fetchCaps, requireSelfHost } from "../lib/caps";
-import { isJsonMode, printJson, printTable, ok, err, info } from "../lib/output";
-
-const INSTALLABLE = ["docker", "git", "edge", "rsync"] as const;
+import { AgentExecBody, ServerResourceSchemas, ServerInstallerConfigSchema, UpdateServerInputSchema, parseInput, type DeploymentEvent } from "@repo/contracts";
+import { isJsonMode, printJson, printJsonLine, printTable, ok, err, info } from "../lib/output";
+import { managedServerCommand } from "./server-managed";
+import { networkCommand, clusterCommand } from "./server-infrastructure";
+import { serverGitHubCommand, tunnelCommand, containerCommand } from "./server-integrations";
+import { serverSecurityCommand } from "./server-security";
+import { confirmOrExit, printResult, reportExecResult } from "../lib/cmd-helpers";
+import { positiveInteger, readJsonInput, readSecret } from "../lib/command-input";
+import { timeoutMilliseconds } from "../lib/command-input";
+import { openTerminal } from "../lib/terminal";
 
 /**
- * Wrap a subcommand action: require a token, enforce self-host, and turn any
+ * Wrap a subcommand action: require a token and turn any
  * ApiError / network failure into a clean stderr message + exit(1) rather than
  * an unhandled rejection stack trace. Commander's own args (operands, options,
  * command) pass straight through to `fn`.
@@ -36,7 +44,6 @@ function guard<A extends unknown[]>(fn: (...args: A) => Promise<void>): (...args
       exitCommand(1);
     }
     try {
-      requireSelfHost(await fetchCaps());
       await fn(...args);
     } catch (e) {
       rethrowCommandExit(e);
@@ -53,7 +60,9 @@ interface ConnOpts {
   user: string;
   authMethod?: CreateServerInput["sshAuthMethod"];
   password?: string;
+  passwordFile?: string;
   keyPath?: string;
+  privateKeyFile?: string;
   keyPassphrase?: string;
   jumpHost?: string;
   sshArgs?: string;
@@ -62,14 +71,17 @@ interface ConnOpts {
 
 /** Map CLI connection flags to the API's ssh* request body. */
 function connBody(o: ConnOpts): CreateServerInput {
+  if (o.privateKeyFile && o.authMethod && o.authMethod !== "key")
+    throw new Error("--private-key-file requires key authentication.");
   return {
     name: o.name,
     sshHost: o.host,
     sshPort: Number(o.port),
     sshUser: o.user,
-    sshAuthMethod: o.authMethod ?? null,
-    sshPassword: o.password,
+    sshAuthMethod: o.authMethod ?? (o.privateKeyFile ? "key" : null),
+    sshPassword: o.passwordFile ? readSecret(o.passwordFile) : o.password,
     sshKeyPath: o.keyPath,
+    sshPrivateKey: o.privateKeyFile ? readSecret(o.privateKeyFile) : undefined,
     sshKeyPassphrase: o.keyPassphrase,
     sshJumpHost: o.jumpHost,
     sshArgs: o.sshArgs,
@@ -77,7 +89,64 @@ function connBody(o: ConnOpts): CreateServerInput {
   };
 }
 
-const server = new Command("server").description("Manage self-hosted SSH servers");
+const server = new Command("server").description("Manage Cloud and self-hosted deployment servers");
+server.addCommand(managedServerCommand);
+server.addCommand(networkCommand);
+server.addCommand(clusterCommand);
+server.addCommand(serverGitHubCommand);
+server.addCommand(tunnelCommand);
+server.addCommand(containerCommand);
+server.addCommand(serverSecurityCommand);
+server.command("swarm")
+  .description("Inspect an existing Docker Swarm without changing its services")
+  .argument("<id>", "Connected server ID; use a Swarm manager for stack inventory")
+  .option("--details", "Include stacks, services, ports, mounts and nodes")
+  .action((id: string, options: { details?: boolean }) => printResult(() => getShipClient().servers.inspectSwarm(id, { details: options.details ?? false })));
+server.command("connect-swarm")
+  .description("Use an existing Swarm manager for project deployments; preserves existing stacks")
+  .argument("<id>", "Connected Swarm manager server ID")
+  .requiredOption("--name <name>", "Cluster display name")
+  .option("--request-id <uuid>", "Reuse after a lost response for an idempotent retry")
+  .action((id: string, options: {name: string; requestId?: string}) => printResult(() => getShipClient().servers.connectSwarm(id, {name: options.name, requestId: options.requestId ?? randomUUID()})));
+server.command("destinations").description("List deployment destinations and their supported capabilities")
+  .action(() => printResult(() => getShipClient().servers.destinations()));
+for (const [name, method, description] of [
+  ["get", "get", "Read server details, its managed plan and lifecycle progress"],
+  ["reachability", "reachability", "Probe the controller's current connection to this server"],
+  ["usage", "usage", "Read current resource use and project allocations"],
+  ["infrastructure", "infrastructure", "Read network, compute-cluster and shared-storage membership"],
+  ["deletion-preview", "deletionPreview", "Inspect workloads and retained data before removing a server"],
+  ["scan-ports", "scanPorts", "Inspect listening ports on this server"],
+] as const) {
+  server.command(name).argument("<id>", "Server ID").description(description)
+    .action((id: string) => printResult(() => getShipClient().servers[method](id)));
+}
+server.command("configure").argument("<id>", "Server ID").argument("<file>", "JSON patch with the fields to change")
+  .description("Change a server's name or connection settings; omitted fields are preserved")
+  .action((id: string, file: string) => printResult(() => getShipClient().servers.update(id,
+    parseInput(UpdateServerInputSchema, readJsonInput(file)))));
+server.command("exec").argument("<id>", "Server ID").argument("<command>", "Shell command to run on this server")
+  .description("Execute a bounded command through the server's authorized connection")
+  .option("--cwd <path>", "Remote working directory")
+  .option("--timeout <ms>", "Command deadline in milliseconds", positiveInteger)
+  .option("--max-output <bytes>", "Maximum captured output", positiveInteger)
+  .action((id: string, command: string, opts) => printResult(async () => {
+    const result = await getShipClient().servers.exec(id, parseInput(AgentExecBody, {
+      command, cwd: opts.cwd, timeoutMs: opts.timeout, maxOutputBytes: opts.maxOutput,
+    }));
+    return result;
+  }, reportExecResult));
+const networkSettings = new Command("network-settings").description("Inspect or change this server's Internet-access policy");
+networkSettings.command("get").argument("<id>", "Server ID").description("Read Internet access and ingress ports")
+  .action((id: string) => printResult(() => getShipClient().servers.getNetworkSettings(id)));
+networkSettings.command("set").argument("<id>", "Server ID").argument("<file>", "JSON internetAccess, expectedInternetAccess and confirm fields")
+  .description("Apply a reviewed network policy, rejecting changes to stale state").option("-y, --yes", "Confirm the policy change")
+  .action((id: string, file: string, opts) => printResult(async () => {
+    const input = parseInput(ServerResourceSchemas.updateNetworkSettings.input, readJsonInput(file));
+    await confirmOrExit(opts.yes, `Change Internet access on ${id}?`);
+    return getShipClient().servers.updateNetworkSettings(id, input);
+  }));
+server.addCommand(networkSettings);
 
 /* ── list ───────────────────────────────────────────────────────── */
 // GET /system/servers returns a bare array (no pagination envelope).
@@ -94,12 +163,15 @@ server
         servers.map((s) => ({
           id: s.id,
           name: s.name ?? "-",
+          connection: s.connection ?? (s.managed ? "cloud" : s.isLocal ? "local" : "ssh"),
           host: s.sshHost,
           port: s.sshPort,
           user: s.sshUser,
           auth: s.sshAuthMethod ?? "-",
+          plan: s.managed?.planTierId ?? "-",
+          state: s.managed?.state ?? "-",
         })),
-        ["id", "name", "host", "port", "user", "auth"],
+        ["id", "name", "connection", "host", "plan", "state"],
       );
     }),
   );
@@ -115,7 +187,9 @@ server
   .option("--user <user>", "SSH user", "root")
   .option("--auth-method <method>", "Auth method (password|key|agent)")
   .option("--password <password>", "SSH password (password auth)")
-  .option("--key-path <path>", "Path to private key (key auth)")
+  .addOption(new Option("--password-file <file>", "SSH password file on this machine, or - for stdin").conflicts("password"))
+  .option("--key-path <path>", "Private key path on the controller host")
+  .addOption(new Option("--private-key-file <file>", "Read an SSH key from this machine, or - for stdin").conflicts("keyPath"))
   .option("--key-passphrase <passphrase>", "Private key passphrase")
   .option("--jump-host <host>", "SSH jump / bastion host")
   .option("--ssh-transport <transport>", "SSH transport (direct|cloudflare)")
@@ -153,7 +227,9 @@ server
   .option("--user <user>", "SSH user", "root")
   .option("--auth-method <method>", "Auth method (password|key|agent)")
   .option("--password <password>", "SSH password")
-  .option("--key-path <path>", "Path to private key")
+  .addOption(new Option("--password-file <file>", "SSH password file on this machine, or - for stdin").conflicts("password"))
+  .option("--key-path <path>", "Private key path on the controller host")
+  .addOption(new Option("--private-key-file <file>", "Read an SSH key from this machine, or - for stdin").conflicts("keyPath"))
   .option("--key-passphrase <passphrase>", "Private key passphrase")
   .option("--jump-host <host>", "SSH jump / bastion host")
   .option("--ssh-transport <transport>", "SSH transport (direct|cloudflare)")
@@ -188,6 +264,7 @@ server
       const spinner = isJsonMode() ? null : ora("Checking components…").start();
       const res = await getShipClient().servers.check(serverId, { components: o.component });
       spinner?.stop();
+      if (!res.ready) process.exitCode = 1;
       if (isJsonMode()) return printJson(res);
       printTable(
         res.components.map((c) => ({
@@ -211,10 +288,10 @@ server
   .description("Check for and apply native-module migrations (OpenResty, …)")
   .option("-c, --component <name...>", "Limit to specific modules")
   .option("--check", "Only report drift; don't apply")
+  .option("-y, --yes", "Confirm migrations that require consent")
   .action(
-    guard(async (serverId: string, o: { component?: string[]; check?: boolean }) => {
-      // Refresh the drift cache from the live box first (best-effort).
-      await getShipClient().servers.scanModules(serverId).catch(() => {});
+    guard(async (serverId: string, o: { component?: string[]; check?: boolean; yes?: boolean }) => {
+      await getShipClient().servers.scanModules(serverId);
       let mods = await getShipClient().servers.listModules(serverId);
       if (o.component?.length) mods = mods.filter((m) => o.component!.includes(m.moduleName));
 
@@ -235,7 +312,15 @@ server
       }
 
       const behind = mods.filter((m) => m.behind);
-      if (!behind.length) return ok("  All modules up to date.");
+      if (!behind.length) {
+        if (isJsonMode()) printJson([]);
+        else ok("  All modules up to date.");
+        return;
+      }
+      const pendingConsent = behind.flatMap(m => m.detail?.pendingConsent ?? []);
+      if (pendingConsent.length) await confirmOrExit(o.yes,
+        `Apply these consent migrations: ${pendingConsent.map(c => c.warning ?? c.id).join("; ")}?`);
+      const results = [];
       for (const m of behind) {
         const consent = m.detail?.pendingConsent ?? [];
         if (consent.length && !isJsonMode()) {
@@ -244,12 +329,51 @@ server
         const spinner = isJsonMode() ? null : ora(`Updating ${m.moduleName}…`).start();
         const res = await getShipClient().servers.applyModule(serverId, { module: m.moduleName });
         spinner?.stop();
-        if (isJsonMode()) { printJson(res); continue; }
+        results.push(res);
+        if (!res.ok) process.exitCode = 1;
+        if (isJsonMode()) continue;
         if (res.ok) ok(`  ${m.moduleName}: ${res.fromVersion} → ${res.toVersion} (${res.appliedSteps.length} step(s))`);
         else err(`  ${m.moduleName}: ${res.error ?? "update failed"}`);
       }
+      if (isJsonMode()) printJson(results);
     }),
   );
+
+async function followInstall(events: AsyncIterable<DeploymentEvent>): Promise<void> {
+  let failed = false;
+  let status: string | undefined;
+  let sessionId: string | undefined;
+  for await (const ev of events) {
+    if (ev.event === "ping") continue;
+    const payload = safeParse(ev.data);
+    if (ev.event === "session" && typeof payload.sessionId === "string") sessionId = payload.sessionId;
+    if (ev.event === "complete") status = typeof payload.status === "string" ? payload.status : undefined;
+    if (ev.event === "error") failed = true;
+    if (isJsonMode()) {
+      printJsonLine({ event: ev.event, data: payload });
+    } else if (ev.event === "log") {
+      const p = payload as { component?: string; message?: string; level?: string };
+      const line = `  ${chalk.dim(`[${p.component}]`)} ${p.message ?? ""}`;
+      process.stderr.write((p.level === "error" ? chalk.red(line) : line) + "\n");
+    } else if (ev.event === "progress") {
+      const p = payload as { component?: string | null; status?: string };
+      if (p.component) info(`  ${p.component}: ${p.status}`);
+    } else if (ev.event === "prompt") {
+      info(`  ${String(payload.title ?? "Installation needs a decision")}: ${String(payload.message ?? "")}`);
+      if (sessionId) info(`  Respond with openship server install-respond ${sessionId} --action <action>.`);
+    } else if (ev.event === "error") {
+      err(`  ${(payload as { error?: string }).error ?? "install error"}`);
+    }
+    if (ev.event === "end") break;
+  }
+  if (!status && sessionId) {
+    const session = await getShipClient().servers.getInstallSession({ sessionId });
+    if (session.active) status = session.status;
+  }
+  if (!status || status === "running") throw new Error("Installation stream ended before an outcome was confirmed.");
+  if (failed || status !== "completed") exitCommand(1);
+  if (!isJsonMode()) ok("  Install finished.");
+}
 
 /* ── install ────────────────────────────────────────────────────── */
 // Without --follow: POST /system/install once per component (JSON result).
@@ -257,52 +381,19 @@ server
 server
   .command("install <serverId>")
   .description("Install components on a server")
-  .requiredOption("-c, --component <name...>", `Components to install (${INSTALLABLE.join("|")})`)
+  .requiredOption("-c, --component <name...>", "Component names from server check (for example docker, git, edge, rsync)")
+  .option("--config <file>", "Installer configuration as JSON, or - for stdin")
+  .option("-y, --yes", "Confirm a reinstall or explicit edge takeover")
   .option("--follow", "Stream install logs live (SSE)")
   .action(
-    guard(async (serverId: string, o: { component: string[]; follow?: boolean }) => {
+    guard(async (serverId: string, o: { component: string[]; follow?: boolean; config?: string; yes?: boolean }) => {
       const components = o.component;
-      const invalid = components.filter((c) => !INSTALLABLE.includes(c as (typeof INSTALLABLE)[number]));
-      if (invalid.length) {
-        err(`  Unknown component(s): ${invalid.join(", ")}. Valid: ${INSTALLABLE.join(", ")}`);
-        exitCommand(1);
-      }
+      const config = o.config ? parseInput(ServerInstallerConfigSchema, readJsonInput(o.config)) : undefined;
+      if (config?.reinstall || config?.edgePolicy) await confirmOrExit(o.yes, "Apply the supplied reinstall or edge takeover settings?");
 
       if (o.follow) {
         info(`  Installing ${components.join(", ")} on ${serverId}… (Ctrl-C to stop)`);
-        let failed = false;
-        let status: string | undefined;
-        let sessionId: string | undefined;
-        for await (const ev of getShipClient().servers.installComponents(serverId, { components })) {
-          if (ev.event === "ping") continue;
-          const payload = safeParse(ev.data);
-          if (ev.event === "session" && typeof payload.sessionId === "string") sessionId = payload.sessionId;
-          if (ev.event === "complete") status = typeof payload.status === "string" ? payload.status : undefined;
-          if (ev.event === "error") failed = true;
-          if (isJsonMode()) {
-            printJson({ event: ev.event, ...payload });
-          } else if (ev.event === "log") {
-            const p = payload as { component?: string; message?: string; level?: string };
-            const line = `  ${chalk.dim(`[${p.component}]`)} ${p.message ?? ""}`;
-            process.stderr.write((p.level === "error" ? chalk.red(line) : line) + "\n");
-          } else if (ev.event === "progress") {
-            const p = payload as { component?: string | null; status?: string };
-            if (p.component) info(`  ${p.component}: ${p.status}`);
-          } else if (ev.event === "prompt") {
-            info(`  ${String(payload.title ?? "Installation needs a decision")}: ${String(payload.message ?? "")}`);
-            if (sessionId) info(`  Respond with openship server install-respond ${sessionId} --action <action>.`);
-          } else if (ev.event === "error") {
-            err(`  ${(payload as { error?: string }).error ?? "install error"}`);
-          }
-          if (ev.event === "end") break;
-        }
-        if (!status && sessionId) {
-          const session = await getShipClient().servers.getInstallSession({ sessionId });
-          if (session.active) status = session.status;
-        }
-        if (!status || status === "running") throw new Error("Installation stream ended before an outcome was confirmed.");
-        if (failed || status !== "completed") exitCommand(1);
-        if (!isJsonMode()) ok("  Install finished.");
+        await followInstall(getShipClient().servers.installComponents(serverId, { components, config }));
         return;
       }
 
@@ -311,7 +402,7 @@ server
       let failed = false;
       for (const component of components) {
         const spinner = isJsonMode() ? null : ora(`Installing ${component}…`).start();
-        const res = await getShipClient().servers.installComponent(serverId, { component });
+        const res = await getShipClient().servers.installComponent(serverId, { component, config });
         failed ||= !res.success;
         results.push(res);
         if (isJsonMode()) spinner?.stop();
@@ -325,8 +416,30 @@ server
 
 server.command("install-session [sessionId]")
   .description("Inspect a server installation session")
-  .action(guard(async (sessionId?: string) => {
-    printJson(await getShipClient().servers.getInstallSession({ sessionId }));
+  .option("--server <serverId>", "Select the server's current installation")
+  .action(guard(async (sessionId: string | undefined, opts: { server?: string }) => {
+    printJson(await getShipClient().servers.getInstallSession({ sessionId, serverId: opts.server }));
+  }));
+
+server.command("install-events [sessionId]")
+  .description("Reattach to installation logs and prompts without starting another install")
+  .option("--server <serverId>", "Select the server's current installation")
+  .action(guard(async (sessionId: string | undefined, opts: { server?: string }) => {
+    await followInstall(getShipClient().servers.installEvents({ sessionId, serverId: opts.server }));
+  }));
+
+server.command("uninstall <serverId> <component>")
+  .description("Remove a component through the server's shared installer")
+  .option("--config <file>", "Installer configuration as JSON, or - for stdin")
+  .option("-y, --yes", "Confirm component removal")
+  .action(guard(async (serverId: string, component: string, opts: { config?: string; yes?: boolean }) => {
+    const config = opts.config ? parseInput(ServerInstallerConfigSchema, readJsonInput(opts.config)) : undefined;
+    await confirmOrExit(opts.yes, `Remove ${component} from ${serverId}?`);
+    const result = await getShipClient().servers.removeComponent(serverId, { component, config });
+    if (!result.success) process.exitCode = 1;
+    if (isJsonMode()) printJson(result);
+    else if (result.success) ok(`${component} removed.`);
+    else err(result.error ?? `${component} removal failed.`);
   }));
 
 server.command("install-respond <sessionId>")
@@ -401,17 +514,14 @@ server
     }),
   );
 
-/* ── ssh (stub) ─────────────────────────────────────────────────── */
-// Interactive terminal needs a WebSocket client (ws dep) — deliberately out of
-// scope; the API side is a WS terminal, not SSE. Stubbed for now.
+/* ── terminal ──────────────────────────────────────────────────── */
 server
   .command("ssh <serverId>")
-  .description("Open an interactive SSH terminal (coming soon)")
-  .action(() => {
-    info("  `openship server ssh` is coming soon.");
-    info("  Interactive terminals require a WebSocket client that isn't bundled yet.");
-    exitCommand(1);
-  });
+  .alias("terminal")
+  .description("Open a Cloud or self-hosted server terminal through the selected controller")
+  .option("--origin <url>", "Trusted dashboard origin (defaults to the saved context dashboard)")
+  .option("--timeout <ms>", "Maximum time to open the terminal", timeoutMilliseconds, 30_000)
+  .action(guard(async (id: string, opts) => openTerminal({ kind: "server", id }, opts)));
 
 // ── helpers ──────────────────────────────────────────────────────
 function safeParse(data: string): Record<string, unknown> {

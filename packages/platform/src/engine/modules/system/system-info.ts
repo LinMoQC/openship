@@ -1,4 +1,5 @@
 /** Public deployment metadata shared by SDK clients and HTTP health. */
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { hostname, userInfo } from "node:os";
 import type { SystemInfo } from "@repo/contracts";
 import { cloudRuntimeTarget, env } from "../../config/env";
@@ -7,6 +8,7 @@ import { getAuthMode } from "../../lib/auth-mode";
 import { resolveProductMode } from "../../lib/product-mode";
 import { resolveHostControlEnabled } from "../../lib/host-control";
 import { configuredAuthProviders } from "../../lib/auth-providers";
+import { getCloudAnalyticsConfig } from "../cloud-analytics/config";
 
 /**
  * Best-effort friendly name for the local machine. On macOS with Bonjour
@@ -21,7 +23,8 @@ function resolveMachineName(): string | undefined {
   const raw = (() => {
     try {
       return hostname();
-    } catch {
+    } catch (diagnosticFailure) {
+      observeCaughtError(diagnosticFailure, "platform/engine/modules/system/system-info");
       return "";
     }
   })().trim();
@@ -33,7 +36,8 @@ function resolveMachineName(): string | undefined {
   try {
     const u = userInfo().username?.trim();
     if (u) return `${u[0].toUpperCase()}${u.slice(1)}`;
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "platform/engine/modules/system/system-info");
     /* fall through */
   }
   return undefined;
@@ -58,6 +62,7 @@ export async function getSystemInfo(): Promise<SystemInfo> {
   // itself required no login at all. This is the value that decides which login
   // flow the dashboard draws, so it has to agree with the API's real behaviour.
   const authMode = await getAuthMode();
+  const analyticsConfig = getCloudAnalyticsConfig();
 
   // productMode decides which SHELL the dashboard draws (full platform vs the
   // Openship Mail rail). Resolved here rather than from the raw env var below so
@@ -79,12 +84,14 @@ export async function getSystemInfo(): Promise<SystemInfo> {
     teamMode = settings?.teamMode ?? "single_user";
     migrationTargetUrl = settings?.migrationTargetUrl ?? null;
     migrationInProgress = settings?.migrationInProgress ?? false;
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "platform/engine/modules/system/system-info");
     // settings table may be unavailable mid-migration; defaults are safe.
   }
 
   return {
     selfHosted: !env.CLOUD_MODE,
+    ...(analyticsConfig && { cloudAnalytics: { dashboardOrigin: analyticsConfig.dashboardOrigin } }),
     deployMode: env.DEPLOY_MODE,
     // Server-host ("VPS") mode: OpenShip is installed ON a server (docker/bare
     // self-host, not the desktop app, not cloud SaaS). In this mode the host is

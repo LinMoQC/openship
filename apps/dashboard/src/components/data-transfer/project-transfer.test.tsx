@@ -21,7 +21,7 @@ vi.mock("@/components/ui/Modal", () => ({ Modal: ({ isOpen, children }: { isOpen
 
 const project = {
   id: "web", groupId: "group-web", organizationId: "org-source", name: "Web", slug: "web",
-  environmentName: "Production", serverId: "server-a", cloudWorkspaceId: null, localPath: null,
+  environmentName: "Production", serverId: "server-a", workspaceId: null, cloudWorkspaceId: null, localPath: null,
 };
 const manifest: TransferManifest = {
   projects: [project],
@@ -31,7 +31,7 @@ const manifest: TransferManifest = {
   warnings: [],
 };
 const fileReply: DataTransferFile = {
-  kind: "openship-project-export", envelopeVersion: 3, manifest,
+  kind: "openship-project-export", envelopeVersion: 4, manifest,
   secrets: { encoding: "plaintext", version: 1, entries: [{ value: "exported-env-value" }] },
 };
 const history = { analytics: 0, activity: 0, backups: 0, incidents: 0, migrations: 0 };
@@ -132,6 +132,69 @@ describe("project file transfer", () => {
     await act(async () => button("Download export").click());
     expect(host.textContent).toContain("Export downloaded");
     expect(h.export).toHaveBeenCalledTimes(2);
+  });
+
+  it("downloads an entire instance with credentials and all history without a password", async () => {
+    h.export.mockResolvedValue({ ...fileReply, kind: "openship-instance-export" });
+    await act(async () => root.render(<ExportPanel />));
+    await act(async () => vi.advanceTimersByTimeAsync(300));
+    expect(host.querySelector('input[type="password"]')).toBeNull();
+    await act(async () => button("Download export").click());
+    expect(h.export).toHaveBeenCalledExactlyOnceWith(undefined, expect.objectContaining({
+      scope: "instance", history: ALL_HISTORY, includeSecrets: true,
+    }));
+    const blob = h.objectUrl.mock.calls[0]![0] as Blob;
+    expect(await blob.text()).toContain("exported-env-value");
+  });
+
+  it("preserves instance scope and requires confirmation before replacement", async () => {
+    h.previewFile.mockResolvedValue({ ...importPreview, scope: "instance" });
+    const confirm = vi.fn().mockReturnValueOnce(false).mockReturnValue(true);
+    vi.stubGlobal("confirm", confirm);
+    const file = await chooseImportFile();
+    expect(host.querySelector<HTMLSelectElement>('[aria-label="Import scope"]')!.value).toBe("instance");
+    expect(host.querySelector<HTMLSelectElement>('[aria-label="Instance import mode"]')!.value).toBe("wipe");
+    expect(host.querySelector('input[type="password"]')).toBeNull();
+    await act(async () => button("Replace instance").click());
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(h.importFile).not.toHaveBeenCalled();
+    await act(async () => {
+      button("Replace instance").click();
+      button("Replace instance").click();
+    });
+    expect(h.importFile).toHaveBeenCalledExactlyOnceWith(file, undefined, "wipe", expect.any(Function),
+      expect.objectContaining({ scope: "instance", includeSecrets: true }));
+  });
+
+  it("requires a fresh review when the instance import mode changes", async () => {
+    h.previewFile.mockResolvedValue({ ...importPreview, scope: "instance" });
+    await chooseImportFile();
+    await act(async () => {
+      const select = host.querySelector<HTMLSelectElement>('[aria-label="Instance import mode"]')!;
+      select.value = "merge";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(button("Import selection").disabled).toBe(true);
+    await act(async () => button("Review selection").click());
+    expect(button("Import selection").disabled).toBe(false);
+  });
+
+  it("reviews an explicit project overwrite and shows destination-only record removal", async () => {
+    await chooseImportFile();
+    await act(async () => {
+      const select = host.querySelector<HTMLSelectElement>('[aria-label="Project conflict policy"]')!;
+      select.value = "overwrite";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(button("Import selection").disabled).toBe(true);
+    h.previewFile.mockResolvedValue({ ...importPreview, rowsRemoved: 3,
+      projects: [{ ...project, action: "overwrite", existingProjectId: "web" }],
+    });
+    await act(async () => button("Review selection").click());
+    expect(host.textContent).toContain("3 destination-only records will be removed");
+    await act(async () => button("Import selection").click());
+    expect(h.importFile).toHaveBeenCalledWith(expect.any(File), undefined, "merge", expect.any(Function),
+      expect.objectContaining({ conflictPolicy: "overwrite" }));
   });
 
   it("imports a plain project file with all credentials and no password field", async () => {

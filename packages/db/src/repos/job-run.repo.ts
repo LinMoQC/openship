@@ -5,7 +5,7 @@
  * Reads power the Jobs read-model (recent runs per job, last outcome).
  */
 
-import { and, desc, eq, isNull, lt } from "drizzle-orm";
+import { and, desc, eq, isNull, lt, sql, like } from "drizzle-orm";
 import { generateId } from "@repo/core";
 import type { Database } from "../client";
 import { jobRun } from "../schema/job-run";
@@ -13,32 +13,27 @@ import { jobRun } from "../schema/job-run";
 export type JobRun = typeof jobRun.$inferSelect;
 export type NewJobRun = typeof jobRun.$inferInsert;
 
+type RunStart = { jobId: string; kind?: string; trigger?: string; serverId?: string | null; serverIds?: string[]; attempt?: number };
+
 export function createJobRunRepo(db: Database) {
+  async function insertRun(data: RunStart, id: string): Promise<JobRun | undefined> {
+    return (await db.insert(jobRun).values({ id, jobId: data.jobId, kind: data.kind ?? "system",
+      trigger: data.trigger ?? "schedule", status: "running", serverId: data.serverId ?? null,
+      serverIds: data.serverIds ?? null, attempt: data.attempt ?? 1,
+    }).onConflictDoNothing().returning())[0];
+  }
   return {
     /** Open a running row for a job tick. */
-    async start(data: {
-      jobId: string;
-      kind?: string;
-      trigger?: string;
-      serverId?: string | null;
-      serverIds?: string[];
-      attempt?: number;
-    }): Promise<JobRun> {
-      const id = generateId("jrun");
-      const row: NewJobRun = {
-        id,
-        jobId: data.jobId,
-        kind: data.kind ?? "system",
-        trigger: data.trigger ?? "schedule",
-        status: "running",
-        serverId: data.serverId ?? null,
-        serverIds: data.serverIds ?? null,
-        attempt: data.attempt ?? 1,
-      };
-      await db.insert(jobRun).values(row);
-      return { ...row, startedAt: new Date(), createdAt: new Date() } as JobRun;
+    async start(data: RunStart): Promise<JobRun> {
+      return (await insertRun(data, generateId("jrun")))!;
     },
+    /** Dependency re-delivery must not execute an accepted command twice. */
+    startOnce: insertRun,
 
+    async progress(id: string, summary: Record<string, unknown>, output?: string) {
+      await db.update(jobRun).set({ summary, ...(output === undefined ? {} : { output }) })
+        .where(and(eq(jobRun.id, id), eq(jobRun.status, "running")));
+    },
     /** Close a run row with its outcome. */
     async finish(
       id: string,
@@ -69,9 +64,12 @@ export function createJobRunRepo(db: Database) {
     },
 
     /** Recent runs, optionally for a single job, newest first. */
-    async listRecent(opts?: { jobId?: string; limit?: number }): Promise<JobRun[]> {
+    async listRecent(opts?: { jobId?: string; serverId?: string; limit?: number; jobIdPrefix?: string; status?: string; startedBefore?: Date }): Promise<JobRun[]> {
       const limit = Math.max(1, Math.min(opts?.limit ?? 50, 200));
-      const where = opts?.jobId ? eq(jobRun.jobId, opts.jobId) : undefined;
+      const where = and(opts?.jobId ? eq(jobRun.jobId, opts.jobId) : undefined, opts?.serverId ? eq(jobRun.serverId, opts.serverId) : undefined,
+        opts?.jobIdPrefix ? like(jobRun.jobId, opts.jobIdPrefix + "%") : undefined,
+        opts?.status ? eq(jobRun.status, opts.status) : undefined,
+        opts?.startedBefore ? lt(jobRun.startedAt, opts.startedBefore) : undefined);
       return db
         .select()
         .from(jobRun)
@@ -99,7 +97,11 @@ export function createJobRunRepo(db: Database) {
       const rows = await db
         .update(jobRun)
         .set({ status: "failed", finishedAt: new Date(), error: reason })
-        .where(and(eq(jobRun.status, "running"), isNull(jobRun.finishedAt)))
+        .where(and(eq(jobRun.status, "running"), isNull(jobRun.finishedAt),
+          // An acknowledged external operation (e.g. reboot) resumes verification,
+          // never the mutation. Its owner reconciles the deadline and outcome.
+          sql`coalesce(${jobRun.summary}->>'resumePolicy', '') <> 'verify'`,
+        ))
         .returning();
       return rows.length;
     },

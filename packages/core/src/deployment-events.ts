@@ -15,12 +15,12 @@ export const BUILD_STEPS: readonly BuildStep[] = [
   "deploy",
 ] as const;
 
-export interface LogEntry {
+export interface LogEntry<Step extends string = BuildStep> {
   timestamp: string;
   message: string;
   level: "info" | "warn" | "error";
   /** When present, this entry is a step event for the stepper UI */
-  step?: BuildStep;
+  step?: Step;
   /** Step lifecycle status */
   stepStatus?: "running" | "completed" | "failed" | "skipped";
   /** Compose service name when this log belongs to one service. */
@@ -28,6 +28,8 @@ export interface LogEntry {
   /** Stable id of the service this log belongs to (compose deployments). Routes
    *  the line to its per-service tab without fragile name matching. */
   serviceId?: string;
+  /** Trusted runtime evidence attached by the controller, never parsed from app output. */
+  resourceIssue?: import("./deployment-resource-issue").DeploymentResourceIssue;
   /** Pre-encoded base64 data - passed through to SSE without re-encoding. */
   rawData?: string;
   /** Monotonic sequence assigned by the session manager at append time, used as
@@ -65,6 +67,8 @@ export interface PortCheckResult {
   listening: boolean;
   /** False = probe inconclusive (runtime can't exec inside / probe errored) — no advisory. */
   checked: boolean;
+  /** Confirmed Docker listener reachable only within its network namespace. */
+  loopbackOnly?: boolean;
   /** Compose only: which service this result belongs to. */
   serviceId?: string;
   serviceName?: string;
@@ -72,3 +76,25 @@ export interface PortCheckResult {
   skippedReason?: "not-exposed" | "no-exec" | "no-port";
 }
 
+/** Shared diagnosis for persisted checks, live hints and deployment review. */
+export function getPortCheckIssue(
+  check: Partial<PortCheckResult>,
+): "not-listening" | "loopback-only" | null {
+  if (
+    check.checked !== true ||
+    !Number.isInteger(check.port) ||
+    (check.port ?? 0) < 1 ||
+    (check.port ?? 0) > 65535
+  )
+    return null;
+  if (check.listening === false) return "not-listening";
+  return check.listening === true && check.loopbackOnly === true ? "loopback-only" : null;
+}
+
+/** Match the existing dismissal contract, including single apps with a service id. */
+export function getPortCheckTarget(
+  check: Pick<PortCheckResult, "port" | "serviceId">,
+  isCompose: boolean,
+): number | string {
+  return isCompose && check.serviceId ? check.serviceId : check.port;
+}

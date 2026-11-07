@@ -11,6 +11,10 @@ Use `openship <command> --help` to check the version installed on your machine. 
 | --- | --- |
 | `-V, --version` | output the version number |
 | `--json` | Machine-readable JSON output (stdout data only) |
+| `--context <name>` | Use a saved connection for this command without changing the default |
+| `--api-url <url>` | Use a remote API for this command; authenticate with OPENSHIP_TOKEN |
+| `--local` | Use this machine's installation with its private administrator credential |
+| `--organization <id>` | Use a fixed organization scope for SDK resource commands (remote only) |
 | `--native-config <file>` | Run SDK commands using an explicitly trusted JavaScript configuration |
 | `-h, --help` | display help for command |
 
@@ -20,10 +24,13 @@ Put global options before the command, for example `openship --json project list
 
 | Command | Purpose |
 | --- | --- |
-| [`openship login`](/docs/cli/reference/login) | Authenticate with a Personal Access Token (create one in dashboard Settings) |
+| [`openship login`](/docs/cli/reference/login) | Connect to Cloud or self-hosted Openship with a Personal Access Token |
 | [`openship logout`](/docs/cli/reference/logout) | Remove the stored Openship token |
 | [`openship context`](/docs/cli/reference/context) | Manage connection contexts (list/use/add/rm) |
 | [`openship token`](/docs/cli/reference/token) | Manage personal access tokens |
+| [`openship access`](/docs/cli/reference/access) | Manage workspaces, members, invitations and resource grants |
+| [`openship credential`](/docs/cli/reference/credential) | Manage stored registry and DNS credentials; reads return masked secrets |
+| [`openship github`](/docs/cli/reference/github) | Connect GitHub, browse repositories and manage deployment sources |
 | [`openship api`](/docs/cli/reference/api) | Make an authenticated request to any Openship API route (like `gh api`) |
 
 ## Deploy
@@ -45,16 +52,35 @@ Put global options before the command, for example `openship --json project list
 | [`openship app`](/docs/cli/reference/app) | Browse, install, and configure catalog apps |
 | [`openship service`](/docs/cli/reference/service) | Manage the services in a compose stack (a multi-service project) |
 | [`openship domain`](/docs/cli/reference/domain) | Manage custom domains, DNS verification, and SSL certificates |
+| [`openship dns`](/docs/cli/reference/dns) | Manage DNS providers and zone access |
+
+## Operations
+
+| Command | Purpose |
+| --- | --- |
+| [`openship monitoring`](/docs/cli/reference/monitoring) | Inspect issues and workload health using the platform's monitoring operations |
+| [`openship notification`](/docs/cli/reference/notification) | Manage notification channels, subscriptions and deliveries |
+| [`openship webhook`](/docs/cli/reference/webhook) | Manage incoming deploy and job webhooks |
+| [`openship audit`](/docs/cli/reference/audit) | Inspect audit events and retention settings |
+| [`openship analytics`](/docs/cli/reference/analytics) | Read project traffic, deployments and runtime resource measurements |
+| [`openship settings`](/docs/cli/reference/settings) | Manage user preferences on the selected Openship instance |
+
+## Cloud
+
+| Command | Purpose |
+| --- | --- |
+| [`openship billing`](/docs/cli/reference/billing) | Manage Cloud plans, server subscriptions, usage and payment checkouts |
 
 ## Infrastructure
 
 | Command | Purpose |
 | --- | --- |
 | [`openship job`](/docs/cli/reference/job) | Manage self-hosted jobs, schedules, and run logs |
-| [`openship server`](/docs/cli/reference/server) | Manage self-hosted SSH servers |
+| [`openship server`](/docs/cli/reference/server) | Manage Cloud and self-hosted deployment servers |
 | [`openship backup`](/docs/cli/reference/backup) | Manage backups: policies, runs, restores, destinations |
 | [`openship edge`](/docs/cli/reference/edge) | Install and manage the OpenResty edge (reverse proxy, TLS, per-route rules) |
 | [`openship mail`](/docs/cli/reference/mail) | Self-hosted mail server (iRedMail) setup and admin [self-host] |
+| [`openship migration`](/docs/cli/reference/migration) | Discover, import, move and copy Docker workloads between authorized servers, including Cloud |
 | [`openship system`](/docs/cli/reference/system) | Instance settings, onboarding, migration, and data transfer |
 
 ## Local installation

@@ -91,7 +91,7 @@ const RULES: readonly OwnershipRule[] = [
     // while apt works" in a progress notice is not, and the refusal that lists
     // "apt-get, dnf, yum or apk" as what it looked for is the opposite of authoring.
     pattern:
-      /\b(?:apt|apt-get|apt-cache|dpkg|dnf|yum|apk|zypper|pacman|brew)[ \t]+(?:-{1,2}[\w-]+[ \t]+)*(?:install|remove|purge|uninstall|autoremove|add|del|delete|update|upgrade|policy|list|search|info)\b/,
+      /\b(?:apt|apt-get|apt-cache|dpkg|dnf|yum|apk|zypper|pacman|brew)[ \t]+(?:-{1,2}[\w-]+[ \t]+)*(?:install|remove|purge|uninstall|autoremove|add|del|delete|update|upgrade|policy|list|search|info)\b|\bpacman[ \t]+-[SRUFQDT]/,
     owners: [
       OPS,
       PROSE,
@@ -102,7 +102,7 @@ const RULES: readonly OwnershipRule[] = [
       // The image's Debian/Alpine OS is independent of the deployment host profile;
       // envOps(host) would install the wrong packages on a differently hosted image.
       // Narrowed below, with stage/output behavior covered by the recipe tests.
-      "packages/adapters/src/runtime/docker-build-plan.ts",
+      "packages/adapters/src/runtime/docker-recipes/ruby.ts",
     ],
     why:
       "A per-package-manager table outside environment-ops.ts is how this bug happened — " +
@@ -354,6 +354,7 @@ describe("the detector looks and never touches", () => {
     for (const probe of [
       "command -v apt-get",
       "command -v apk",
+      "command -v pacman",
       "ufw status",
       "firewall-cmd --state",
     ]) {
@@ -378,7 +379,7 @@ describe("the container helper's package manager is the image's, not the host's"
   });
 
   it("limits the Dockerfile generator to Debian/Alpine image installation verbs", () => {
-    const source = read("packages/adapters/src/runtime/docker-build-plan.ts");
+    const source = read("packages/adapters/src/runtime/docker-recipes/ruby.ts");
     const matches = source.match(/\b(?:apt|apt-get|dnf|yum|apk|zypper|pacman)[ \t]+[a-z-]+/g);
     expect(matches).toEqual(["apk add", "apt-get update", "apt-get install"]);
   });

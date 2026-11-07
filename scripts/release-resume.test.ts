@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -61,6 +61,18 @@ const job = {
 };
 
 describe("release continuation", () => {
+  it("binds both Actions checks to their own execution scope", () => {
+    const source = readFileSync(new URL("../.github/workflows/actions-e2e.yml", import.meta.url), "utf8");
+    for (const target of ["linux", "macos"]) {
+      expect(() => assertResumeBinding(source, ".github/workflows/actions-e2e.yml", target)).not.toThrow();
+      expect(() => assertResumeBinding(source.replace(`scope: actions-${target}`, "scope: unit"), ".github/workflows/actions-e2e.yml", target)).toThrow();
+      expect(affectsScope("packages/actions-runner/worker.go", `actions-${target}`)).toBe(true);
+      expect(affectsScope("apps/api/test/e2e/rollback-full-cycle.e2e.test.ts", `actions-${target}`)).toBe(false);
+    }
+    expect(affectsScope("apps/api/test/e2e/actions-runner.e2e.test.ts", "actions-linux")).toBe(true);
+    expect(affectsScope("apps/api/test/helpers/workspace-runtime.ts", "actions-linux")).toBe(true);
+    expect(affectsScope("apps/api/test/e2e/actions-runner.e2e.test.ts", "fast")).toBe(false);
+  });
   it("has an explicit wizard command without requesting a version bump or force", () => {
     expect(buildWizardArgs({ mode: "continue", dryRun: false, forceBranch: false })).toEqual([
       "continue",
@@ -197,6 +209,7 @@ describe("release continuation", () => {
     ])
       for (const file of [
         "packages/adapters/src/cluster/job.ts",
+        "apps/dashboard/src/app/(dashboard)/servers/[serverId]/page.tsx",
         "bun.lock",
         ".bun-version",
         "apps/api/test/helpers/new-helper.ts",
@@ -210,6 +223,14 @@ describe("release continuation", () => {
     expect(affectsScope("apps/api/test/e2e/scaling-databases.e2e.test.ts", "application")).toBe(
       false,
     );
+  });
+
+  it("reruns fixture-dependent checks after dashboard teardown changes", () => {
+    const file = "apps/dashboard/src/app/(dashboard)/servers/[serverId]/offline-server.render.test.tsx";
+    for (const scope of ["application", "databases", "storage", "actions-linux", "actions-macos", "fast", "heavy", "update"])
+      expect(affectsScope(file, scope)).toBe(false);
+    for (const scope of ["unit", "build", "sdk"])
+      expect(affectsScope(file, scope)).toBe(true);
   });
 
   it("ignores the resume wrapper but detects altered commands, conditions, runners and environment", () => {
@@ -276,7 +297,15 @@ describe("release continuation", () => {
     try {
       git("init", "-q");
       write(".github/workflows/scaling-e2e.yml", workflow);
+      write(
+        ".github/workflows/release-gate.yml",
+        readFileSync(new URL("../.github/workflows/release-gate.yml", import.meta.url), "utf8"),
+      );
       write("packages/adapters/src/cluster/job.ts", "original production code");
+      write(
+        "packages/platform/src/engine/modules/actions/github-checks.test.ts",
+        "original Checks fixture",
+      );
       commit();
       const previous = { ...run, head_sha: git("rev-parse", "HEAD") };
       write(".github/workflows/scaling-e2e.yml", resumedWorkflow);
@@ -290,7 +319,12 @@ describe("release continuation", () => {
         const path = String(url);
         return Response.json(
           path.includes("/jobs?")
-            ? { jobs: [{ ...job, conclusion: successful ? "success" : "failure" }] }
+            ? {
+                jobs: [
+                  { ...job, conclusion: successful ? "success" : "failure" },
+                  { ...job, name: "Release gate / Typecheck + tests", conclusion: "success" },
+                ],
+              }
             : path.includes("/artifacts?")
               ? { artifacts: [{ id: 789, name: "result", expired }] }
               : previous,
@@ -311,6 +345,20 @@ describe("release continuation", () => {
         url: job.html_url,
         artifactId: 789,
       });
+      const unitOptions = {
+        ...options,
+        scope: "unit",
+        jobName: "Typecheck + tests",
+        workflow: ".github/workflows/release-gate.yml",
+        jobId: "test",
+        artifact: undefined,
+      };
+      expect(await findReusableJob(unitOptions)).toEqual({ runId: "123", url: job.html_url });
+      write(
+        "packages/platform/src/engine/modules/actions/github-checks.test.ts",
+        "corrected typed Checks fixture",
+      );
+      commit();
       previous.path = ".github/workflows/magic-runtime.yml";
       previous.head_branch = `magic-runtime-${previous.head_sha.slice(0, 12)}`;
       options.tag = `magic-runtime-${git("rev-parse", "HEAD").slice(0, 12)}`;
@@ -319,6 +367,7 @@ describe("release continuation", () => {
         url: job.html_url,
         artifactId: 789,
       });
+      expect(await findReusableJob(unitOptions)).toBeUndefined();
       // The changed database journey cannot inherit its own older result.
       expect(await findReusableJob({ ...options, scope: "databases" })).toBeUndefined();
       await expect(

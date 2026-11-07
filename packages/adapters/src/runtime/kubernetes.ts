@@ -1,3 +1,4 @@
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { createHash } from "node:crypto";
 import {
   listNamespaceResources,
@@ -5,6 +6,7 @@ import {
   projectNamespaceManifest,
 } from "../cluster/namespace";
 import { kubernetesIdLabel } from "../cluster/kubernetes-label";
+import { PROJECT_MANIFEST_LABEL } from "../cluster/project-manifests";
 import { patchKubernetesObject } from "../cluster/kubernetes-mutation";
 import { clusterVolumeClaim, clusterVolumeMountName } from "../cluster/volumes";
 import { clusterDatabaseNamespace } from "../cluster/database";
@@ -36,13 +38,12 @@ import {
   type KubernetesObject,
 } from "../cluster/kubernetes-api";
 import { splitRuntimeEnv, droppedRuntimeEnvMessage } from "./runtime-env";
-import { ownsBuiltImage } from "./docker";
+import { ClusterImageBuilder, clusterBuildImageTag } from "./cluster-image-builder";
 
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 export { kubernetesProjectNamespace } from "../cluster/namespace";
 const releaseName = (id: string) => `release-${digest(id).slice(0, 24)}`;
-export const kubernetesBuildImageTag = (repository: string, buildId: string) =>
-  `${repository}:${releaseName(buildId)}`;
+export const kubernetesBuildImageTag = clusterBuildImageTag;
 const unsupported = (feature: string): never => {
   throw new AppError(
     `${feature} is not available for cluster workloads.`,
@@ -85,6 +86,7 @@ export class KubernetesRuntime implements RuntimeAdapter {
     "rollback",
     "projectContainerSweep",
     "deploymentContainerQuery",
+    "clusterStatus",
   ]);
   readonly namespace: string;
   private readonly lifetime = new AbortController();
@@ -98,8 +100,7 @@ export class KubernetesRuntime implements RuntimeAdapter {
       ...(this.operationSignal ? [this.operationSignal] : []),
     ]);
   }
-  private builder?: Promise<DockerRuntime>;
-  private readonly artifacts = new Map<string, string>();
+  private readonly images: ClusterImageBuilder;
   constructor(
     private readonly options: {
       api: KubernetesApi;
@@ -109,18 +110,18 @@ export class KubernetesRuntime implements RuntimeAdapter {
       edgeSourceIps?: string[];
       servers?: ReadonlyArray<{ serverId: string; name: string; nodeName: string }>;
       config: ClusterWorkloadConfig;
+      /** Trusted connection grants, reread for deployment and release restoration. */
+      sharedDatabases?: () => Promise<readonly { databaseId: string; projectId: string }[]>;
       builder: () => Promise<DockerRuntime>;
       resolveRegistryAuth: (image: string) => Promise<DockerRegistryAuth | undefined>;
     },
   ) {
     validateClusterWorkload(options.config);
     this.namespace = kubernetesProjectNamespace(options.projectId);
+    this.images = new ClusterImageBuilder({imageRepository: options.config.imageRepository, builder: options.builder, signal: () => this.signal});
   }
   supports(cap: RuntimeCapability) {
     return this.capabilities.has(cap);
-  }
-  private buildRuntime() {
-    return (this.builder ??= this.options.builder());
   }
   private get base() {
     return `/apis/apps/v1/namespaces/${this.namespace}/deployments`;
@@ -207,68 +208,10 @@ export class KubernetesRuntime implements RuntimeAdapter {
       },
     });
   }
-  private async rememberArchitecture(imageRef: string, builder: DockerRuntime) {
-    const image = await builder.docker.getImage(imageRef).inspect();
-    if (!["amd64", "arm64"].includes(image.Architecture) || image.Os !== "linux")
-      throw new Error("Cluster applications require a Linux amd64 or arm64 image.");
-    this.artifacts.set(imageRef, image.Architecture);
-  }
-  async build(config: BuildConfig, logger?: BuildLogger): Promise<BuildResult> {
-    if (!this.options.config.imageRepository)
-      throw new Error("Choose a registry repository for cluster source builds.");
-    const builder = await this.buildRuntime();
-    const result = await builder.build(config, logger);
-    if (!result.imageRef || result.status === "failed" || result.status === "cancelled")
-      return result;
-    logger?.log(
-      "Publishing this release so every eligible cluster server can pull the same image.\n",
-    );
-    await this.rememberArchitecture(result.imageRef, builder);
-    const publishedTag = kubernetesBuildImageTag(
-      this.options.config.imageRepository,
-      config.sessionId,
-    );
-    try {
-      const imageRef = await builder.publishImage(result.imageRef, publishedTag, this.signal);
-      this.artifacts.set(imageRef, this.artifacts.get(result.imageRef)!);
-      return { ...result, imageRef, artifactOwned: false };
-    } finally {
-      // Kubernetes pulls from the registry; the builder's generated aliases
-      // are disposable cache, not the retained release artifact.
-      for (const image of [
-        publishedTag,
-        ...(ownsBuiltImage(result.imageRef) ? [result.imageRef] : []),
-      ]) {
-        await builder
-          .removeImage(image)
-          .catch((error) =>
-            logger?.log(
-              `Local build image cleanup deferred: ${error instanceof Error ? error.message : String(error)}\n`,
-              "warn",
-            ),
-          );
-      }
-    }
-  }
-  async prepareImage(config: ImageArtifactConfig, logger?: BuildLogger): Promise<BuildResult> {
-    const builder = await this.buildRuntime();
-    const result = await builder.prepareImage(config, logger);
-    if (result.status === "failed" || result.status === "cancelled") return result;
-    if (result.imageRef) {
-      if (!/@sha256:[a-f0-9]{64}$/.test(result.imageRef))
-        throw new Error(
-          "The registry did not provide an immutable image digest. Retry after checking the image repository.",
-        );
-      await this.rememberArchitecture(result.imageRef, builder);
-    }
-    return result;
-  }
-  async cancelBuild(id: string) {
-    if (this.builder) await (await this.builder).cancelBuild(id);
-  }
-  async getBuildLogs(id: string) {
-    return this.builder ? (await this.builder).getBuildLogs(id) : [];
-  }
+  build(config: BuildConfig, logger?: BuildLogger) { return this.images.build(config, logger); }
+  prepareImage(config: ImageArtifactConfig, logger?: BuildLogger) { return this.images.prepareImage(config, logger); }
+  cancelBuild(id: string) { return this.images.cancelBuild(id); }
+  getBuildLogs(id: string) { return this.images.getBuildLogs(id); }
   async deploy(config: DeployConfig, onLog?: (entry: LogEntry) => void): Promise<DeploymentResult> {
     if (config.projectId !== this.options.projectId)
       throw new Error("Cluster project identity mismatch");
@@ -282,10 +225,10 @@ export class KubernetesRuntime implements RuntimeAdapter {
       );
     if (!config.imageRef || !/@sha256:[a-f0-9]{64}$/.test(config.imageRef))
       throw new Error("Cluster releases require an immutable registry image digest.");
-    if (!this.artifacts.has(config.imageRef)) {
-      const builder = await this.buildRuntime();
+    if (!this.images.artifacts.has(config.imageRef)) {
+      const builder = await this.images.buildRuntime();
       await builder.pullImage(config.imageRef);
-      await this.rememberArchitecture(config.imageRef, builder);
+      await this.images.rememberArchitecture(config.imageRef, builder);
     }
     await this.ensureNamespace();
     const mounts = structuredClone(this.options.config.mounts ?? []);
@@ -394,7 +337,7 @@ export class KubernetesRuntime implements RuntimeAdapter {
             : {}),
           nodeSelector: {
             "openship.io/runtime": this.options.runtimeId,
-            "kubernetes.io/arch": this.artifacts.get(config.imageRef),
+            "kubernetes.io/arch": this.images.artifacts.get(config.imageRef),
           },
           topologySpreadConstraints: [
             {
@@ -518,7 +461,8 @@ export class KubernetesRuntime implements RuntimeAdapter {
       await this.activateService(name);
       return { deploymentId: config.deploymentId, containerId: this.ref(name), status: "running" };
     } catch (error) {
-      const observed = await this.status(this.ref(name)).catch(() => null);
+      observeCaughtError(error, "adapters/runtime/kubernetes");
+      const observed = await this.status(this.ref(name)).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "adapters/runtime/kubernetes"); return null; });
       const detail = observed?.pods
         .filter((pod) => !pod.ready)
         .map((pod) => `${pod.nodeName ?? pod.name}: ${pod.phase}`)
@@ -528,6 +472,7 @@ export class KubernetesRuntime implements RuntimeAdapter {
       try {
         await this.destroy(this.ref(name));
       } catch (cleanup) {
+        observeCaughtError(cleanup, "adapters/runtime/kubernetes");
         onLog?.({
           timestamp: new Date().toISOString(),
           level: "warn",
@@ -546,6 +491,8 @@ export class KubernetesRuntime implements RuntimeAdapter {
       if (isMissing(error)) return;
       throw error;
     }
+    const deployment = await this.owned(`${this.base}/${name}`);
+    await this.validateSavedDatabases(deployment);
     const path = `${this.core}/services`;
     let current: KubernetesObject | null = null;
     try {
@@ -772,6 +719,7 @@ export class KubernetesRuntime implements RuntimeAdapter {
         409,
         "CLUSTER_DATABASE_UNAVAILABLE",
       );
+    const shared = names.size ? ((await this.options.sharedDatabases?.()) ?? []) : [];
     for (const name of [...names].sort()) {
       const base = `/api/v1/namespaces/${name}`;
       const read = async (path: string) => {
@@ -783,24 +731,25 @@ export class KubernetesRuntime implements RuntimeAdapter {
         }
       };
       const namespace = await read(base);
-      const secret = await read(`${base}/secrets/credentials`);
-      if (!namespace || !secret) throw unavailable();
+      if (!namespace) throw unavailable();
       const databaseId = namespace.metadata.labels?.["openship.io/database"];
+      const projectId =
+        namespace.metadata.labels?.["openship.io/project"] ===
+        kubernetesIdLabel(this.options.projectId)
+          ? this.options.projectId
+          : shared.find((item) => item.databaseId === databaseId)?.projectId;
+      // Decide authorization from the namespace before reading another project's secret.
+      if (!projectId || !databaseId || clusterDatabaseNamespace(databaseId) !== name)
+        throw unavailable();
       const owned = (object: KubernetesObject) =>
         !!object.metadata.uid &&
         !object.metadata.deletionTimestamp &&
-        object.metadata.labels?.["openship.io/project"] ===
-          kubernetesIdLabel(this.options.projectId) &&
+        object.metadata.labels?.["openship.io/project"] === kubernetesIdLabel(projectId) &&
         object.metadata.labels?.["openship.io/runtime"] === this.options.runtimeId &&
         object.metadata.labels?.["openship.io/database"] === databaseId;
-      if (
-        !databaseId ||
-        clusterDatabaseNamespace(databaseId) !== name ||
-        !owned(namespace) ||
-        !owned(secret) ||
-        !secret.data?.password
-      )
-        throw unavailable();
+      if (!owned(namespace)) throw unavailable();
+      const secret = await read(`${base}/secrets/credentials`);
+      if (!secret || !owned(secret) || !secret.data?.password) throw unavailable();
       // A retained database keeps its namespace and credentials. Require the
       // actual database too, so retained data cannot look like a running target.
       let database: KubernetesObject | null = null;
@@ -961,9 +910,13 @@ export class KubernetesRuntime implements RuntimeAdapter {
         undefined,
         this.lifetime.signal,
       );
-      return list.items.map((object) => {
+      return list.items.flatMap((object) => {
         this.assertOwned(object);
-        return this.ref(object.metadata.name!);
+        // Manifests have arbitrary names, not native release references. Keep them
+        // out of the app/orphan sweep; cleanupProject checks ownership before
+        // deleting their namespace along with its other supported resources.
+        if (object.metadata.labels?.[PROJECT_MANIFEST_LABEL] === "true") return [];
+        return [this.ref(object.metadata.name!)];
       });
     } catch (error) {
       if (isMissing(error)) return [];
@@ -1067,6 +1020,7 @@ export class KubernetesRuntime implements RuntimeAdapter {
                 onLog(entry);
               }
             } catch (error) {
+              observeCaughtError(error, "adapters/runtime/kubernetes");
               if (isMissing(error) || followSignal.aborted) return;
               if (error instanceof KubernetesApiError && [401, 403].includes(error.statusCode)) {
                 onLog({
@@ -1077,9 +1031,13 @@ export class KubernetesRuntime implements RuntimeAdapter {
                 return;
               }
             }
-            await sleep(1000, followSignal).catch(() => {});
+            await sleep(1000, followSignal).catch((diagnosticFailure) => {
+              observeCaughtError(diagnosticFailure, "adapters/runtime/kubernetes");
+            });
           }
-        })().catch(() => {});
+        })().catch((diagnosticFailure) => {
+          observeCaughtError(diagnosticFailure, "adapters/runtime/kubernetes");
+        });
       }
     };
     const readPods = async () => {
@@ -1131,6 +1089,7 @@ export class KubernetesRuntime implements RuntimeAdapter {
         }
       }
     })().catch((error) => {
+      observeCaughtError(error, "adapters/runtime/kubernetes");
       if (!signal.aborted)
         onLog({
           timestamp: new Date().toISOString(),
@@ -1181,6 +1140,11 @@ export class KubernetesRuntime implements RuntimeAdapter {
       "EndpointSlice",
       "Secret",
       "NetworkPolicy",
+      // Kinds that project manifests may create (cluster/project-manifests.ts).
+      // They still have to carry this project's ownership labels to be accepted.
+      "ConfigMap",
+      "Job",
+      "CronJob",
     ]);
     for (const object of objects) {
       if (object.kind === "PersistentVolumeClaim")
@@ -1201,7 +1165,9 @@ export class KubernetesRuntime implements RuntimeAdapter {
       try {
         this.assertOwned(object);
         acceptable.add(object.metadata.uid!);
-      } catch {}
+      } catch (diagnosticFailure) {
+        observeCaughtError(diagnosticFailure, "adapters/runtime/kubernetes");
+      }
     }
     for (let pass = 0; pass < objects.length; pass++) {
       let added = false;
@@ -1244,6 +1210,6 @@ export class KubernetesRuntime implements RuntimeAdapter {
   async dispose() {
     this.lifetime.abort();
     await this.options.api.dispose();
-    if (this.builder) await (await this.builder).dispose();
+    await this.images.dispose();
   }
 }

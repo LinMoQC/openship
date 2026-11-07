@@ -53,26 +53,32 @@ export function sdkSurface() {
           : ""),
     ];
   }
-  return checker
-    .getTypeAtLocation(declaration)
-    .getProperties()
-    .filter((property) => !["deploy", "deployment", "organizationId"].includes(property.name))
-    .map((property) => ({
-      group: property.name,
-      methods: checker
-        .getTypeOfSymbolAtLocation(property, declaration)
-        .getProperties()
-        .map((method) => ({
-          name: method.name,
-          calls: checker
-            .getTypeOfSymbolAtLocation(method, declaration)
-            .getCallSignatures()
-            .map(
-              (signature) =>
-                `${method.name}(${signature.parameters.flatMap(argumentsFor).join(", ")})`,
-            ),
-        })),
-    }));
+  const remoteSource = program.getSourceFile(join(root, "packages/sdk/src/client.ts"));
+  const remote = remoteSource?.statements.find(
+    (node) => ts.isClassDeclaration(node) && node.name?.text === "OpenshipClient",
+  );
+  if (!remote) throw new Error("Cannot find the public OpenshipClient class");
+  const groups = new Map();
+  for (const [surface, location] of [["native", declaration], ["remote", remote]]) {
+    for (const property of checker.getTypeAtLocation(location).getProperties()) {
+      if (["deploy", "deployment", "organizationId", "http", "options"].includes(property.name)) continue;
+      const type = checker.getTypeOfSymbolAtLocation(property, location);
+      // Root workflow functions are documented separately; groups contain named methods.
+      if (type.getCallSignatures().length) continue;
+      const methods = groups.get(property.name) ?? new Map();
+      for (const method of type.getProperties()) {
+        const signatures = checker.getTypeOfSymbolAtLocation(method, location).getCallSignatures();
+        if (!signatures.length) continue;
+        const entry = methods.get(method.name) ?? { name: method.name, calls: [], surfaces: [] };
+        entry.calls = [...new Set([...entry.calls, ...signatures.map(signature =>
+          `${method.name}(${signature.parameters.flatMap(argumentsFor).join(", ")})`)])];
+        entry.surfaces.push(surface);
+        methods.set(method.name, entry);
+      }
+      if (methods.size) groups.set(property.name, methods);
+    }
+  }
+  return [...groups].map(([group, methods]) => ({ group, methods: [...methods.values()] }));
 }
 
 function helpRows(lines) {
@@ -144,7 +150,7 @@ export function httpSurface() {
   );
   // Browser callback and OAuth discovery routes are mounted at the origin root.
   // Resolve the two explicit MCP resource aliases without importing the app.
-  const resourceFile = join(root, "apps/api/src/lib/mcp-resource.ts");
+  const resourceFile = join(root, "packages/platform/src/engine/lib/mcp-resources.ts");
   const resources = ts.createSourceFile(
     resourceFile,
     readFileSync(resourceFile, "utf8"),

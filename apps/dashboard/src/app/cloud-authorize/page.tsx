@@ -1,5 +1,6 @@
 "use client";
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { Icon as UiIcon } from "@repo/ui/icons";
 
 /**
@@ -28,20 +29,17 @@ import { Icon as UiIcon } from "@repo/ui/icons";
  *   /authorize, so we wrap manually.
  */
 
-import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useSession } from "@/lib/auth-client";
 import { cloudApi } from "@/lib/api";
-import { ApiError, getApiErrorMessage } from "@/lib/api/client";
+import { ApiError, getApiErrorCode, getApiErrorMessage } from "@/lib/api/client";
+import { CloudAuthorizationIdentity } from "@/components/cloud/CloudAuthorizationIdentity";
 import { AuthShell } from "@/components/auth-shell";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { useI18n } from "@/components/i18n-provider";
-
-/** RFC 7636 — code_challenge is 43-128 url-safe chars. We accept the
- *  same 40-128 window the API uses so any URL valid server-side renders. */
-const CODE_CHALLENGE_RE = /^[A-Za-z0-9_-]{40,128}$/;
-/** State is opaque to us; we just cap its length and keep it url-safe-ish. */
-const STATE_RE = /^[A-Za-z0-9_\-.~]{1,256}$/;
+import { isCloudCodeChallenge, isCloudHandoffState, isCloudDeviceUserCode } from "@repo/contracts";
 
 type ValidatedParams =
   | { ok: true; redirect?: string; redirectHost?: string; state: string; codeChallenge: string; isDevice: boolean }
@@ -65,8 +63,8 @@ function validateParams(
   if (!state) return { ok: false, error: msgs.missingState };
   if (!codeChallenge) return { ok: false, error: msgs.missingCodeChallenge };
 
-  if (!STATE_RE.test(state)) return { ok: false, error: msgs.invalidState };
-  if (!CODE_CHALLENGE_RE.test(codeChallenge)) {
+  if (!isCloudHandoffState(state)) return { ok: false, error: msgs.invalidState };
+  if (!isCloudCodeChallenge(codeChallenge)) {
     return { ok: false, error: msgs.invalidCodeChallenge };
   }
 
@@ -125,11 +123,19 @@ function CloudAuthorizeInner() {
   // just confirm in-place — there's nothing to navigate to.
   const isDevice = searchParams.get("mode") === "device";
   const [submitting, setSubmitting] = useState(false);
+  const authorizationInFlight = useRef(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [deviceDone, setDeviceDone] = useState(false);
+  const [userCode, setUserCode] = useState("");
+  const userCodeReady = !isDevice || isCloudDeviceUserCode(userCode);
 
   const handleAuthorize = useCallback(async () => {
-    if (!validated.ok) return;
+    if (!validated.ok || authorizationInFlight.current) return;
+    if (!userCodeReady) {
+      setSubmitError(m.userCodeRequired);
+      return;
+    }
+    authorizationInFlight.current = true;
     setSubmitError(null);
     setSubmitting(true);
     try {
@@ -137,18 +143,20 @@ function CloudAuthorizeInner() {
         ...(validated.redirect ? { redirect: validated.redirect } : {}),
         state: validated.state,
         codeChallenge: validated.codeChallenge,
-        ...(isDevice ? { mode: "device" as const } : {}),
+        ...(isDevice ? { mode: "device" as const, userCode } : {}),
       });
       if (isDevice) {
         // The code is now stored keyed by `state`; the CLI's poll will pick it
         // up. Show a clean confirmation — there's no redirect at all in this flow.
         setDeviceDone(true);
         setSubmitting(false);
+        authorizationInFlight.current = false;
         return;
       }
       if (!res.callbackUrl) {
         setSubmitError(m.authorizeError);
         setSubmitting(false);
+        authorizationInFlight.current = false;
         return;
       }
       // Hard navigate so the local instance receives the code via a
@@ -163,17 +171,25 @@ function CloudAuthorizeInner() {
         router.replace(`/login?returnTo=${encodeURIComponent(buildReturnTo(new URLSearchParams(searchParams.toString())))}`);
         return;
       }
+      if (getApiErrorCode(err) === "INVALID_USER_CODE" || getApiErrorCode(err) === "MISSING_USER_CODE") {
+        setSubmitError(m.userCodeInvalid);
+        setSubmitting(false);
+        authorizationInFlight.current = false;
+        return;
+      }
       setSubmitError(getApiErrorMessage(err, m.authorizeError));
       setSubmitting(false);
+      authorizationInFlight.current = false;
     }
-  }, [validated, router, searchParams, m]);
+  }, [validated, router, searchParams, m, isDevice, userCodeReady, userCode]);
 
   const handleCancel = useCallback(() => {
     if (typeof window !== "undefined" && window.opener) {
       try {
         window.close();
         return;
-      } catch {
+      } catch (diagnosticFailure) {
+        observeCaughtError(diagnosticFailure, "dashboard/app/cloud-authorize/page");
         /* user-gesture missing or blocked — fall through */
       }
     }
@@ -232,12 +248,12 @@ function CloudAuthorizeInner() {
   }
 
   return (
-    <AuthShell>
-      <div className="mb-6 text-center">
-        <div className="mx-auto mb-4 flex size-14 items-center justify-center rounded-2xl bg-gradient-to-br from-primary/80 to-primary shadow-sm">
-          <UiIcon name="server" className="size-7 text-primary-foreground" />
+    <AuthShell maxWidth="max-w-[460px]">
+      <div className="mb-7">
+        <div className="mb-5 flex size-12 items-center justify-center rounded-2xl bg-card">
+          <UiIcon name="server" className="size-6 text-foreground" />
         </div>
-        <h1 className="text-xl font-semibold">{m.title}</h1>
+        <h1 className="text-2xl font-medium tracking-tight text-foreground">{m.title}</h1>
         {/* Device/poll flow has no redirect host to name — the title alone is
             the ask; only the browser-redirect flow shows "…to <host>". */}
         {!isDevice && (
@@ -249,38 +265,68 @@ function CloudAuthorizeInner() {
         )}
       </div>
 
-      <div className="mb-6 rounded-lg border border-border bg-muted/30 p-4">
-        <p className="text-sm font-medium text-foreground">{m.signedInAs}</p>
-        <p className="mt-0.5 text-sm text-muted-foreground">{session.user.email}</p>
-      </div>
+      <CloudAuthorizationIdentity
+        session={session}
+        disabled={submitting}
+        loginUrl={`/login?returnTo=${encodeURIComponent(buildReturnTo(new URLSearchParams(searchParams.toString())))}`}
+      >
+        {(ready) => (
+          <>
+            {submitError && (
+              <div className="mb-4 rounded-xl bg-danger/10 p-3 text-sm text-danger" role="alert">
+                {submitError}
+              </div>
+            )}
 
-      {submitError && (
-        <div className="mb-4 rounded-md bg-destructive/10 p-3 text-sm text-destructive">
-          {submitError}
-        </div>
-      )}
+            {isDevice && (
+              <div className="mb-4 rounded-xl border border-input bg-card p-3">
+                <label
+                  htmlFor="device-user-code"
+                  className="mb-1.5 block text-sm font-medium text-foreground"
+                >
+                  {m.userCodeLabel}
+                </label>
+                <Input
+                  id="device-user-code"
+                  value={userCode}
+                  onChange={(event) => setUserCode(event.target.value)}
+                  placeholder="XXXX-XXXX"
+                  autoComplete="one-time-code"
+                  autoCapitalize="characters"
+                  spellCheck={false}
+                  maxLength={9}
+                  disabled={submitting}
+                />
+                <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
+                  {m.userCodeHint}
+                </p>
+              </div>
+            )}
 
-      <div className="space-y-2">
-        <Button
-          className="w-full"
-          size="lg"
-          disabled={submitting}
-          onClick={() => {
-            void handleAuthorize();
-          }}
-        >
-          {submitting && <UiIcon name="spinner" className="me-2 size-4 animate-spin" />}
-          {submitting ? m.authorizing : m.authorize}
-        </Button>
-        <Button
-          variant="outline"
-          className="w-full"
-          disabled={submitting}
-          onClick={handleCancel}
-        >
-          {m.cancel}
-        </Button>
-      </div>
+            <div className="space-y-2">
+              <Button
+                className="w-full"
+                size="lg"
+                disabled={submitting || !ready || !userCodeReady}
+                onClick={() => {
+                  void handleAuthorize();
+                }}
+              >
+                {submitting && <UiIcon name="spinner" className="me-2 size-4 animate-spin" />}
+                {submitting ? m.authorizing : m.authorize}
+              </Button>
+              <Button
+                variant="outline"
+                className="w-full"
+                disabled={submitting}
+                onClick={handleCancel}
+              >
+                {m.cancel}
+              </Button>
+            </div>
+          </>
+        )}
+      </CloudAuthorizationIdentity>
     </AuthShell>
   );
 }

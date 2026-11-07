@@ -1,7 +1,9 @@
+import { reportCaughtError as observeCaughtError, diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import { findActiveDeployment } from "@repo/platform/engine/lib/active-deployment";
 import type { Domain, Project } from "@repo/db";
 import type { ManualCert, Platform, SslProvider, SslResult, ProvisionCertOptions, DnsCertificateProvider } from "@repo/adapters";
 import {
+  AppError,
   ForbiddenError,
   ValidationError,
   NotFoundError,
@@ -199,9 +201,9 @@ export async function resolveMailOwner(
     .toLowerCase()
     .replace(/^mail\./, "");
   if (base === hostname.trim().toLowerCase()) return null; // not a mail.<base> host
-  const mail = await repos.mailServer.findByDomain(base).catch(() => undefined);
+  const mail = await repos.mailServer.findByDomain(base).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/lib/domain-ssl"); return undefined; });
   if (!mail) return null;
-  const server = await repos.server.get(mail.serverId).catch(() => undefined);
+  const server = await repos.server.get(mail.serverId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/lib/domain-ssl"); return undefined; });
   if (!server?.organizationId) return null;
   return { kind: "mail", serverId: mail.serverId, organizationId: server.organizationId };
 }
@@ -320,15 +322,18 @@ function notLocalResult(hostname: string): SslResult {
   return { domain: hostname, expiresAt: "", issuer: "", verified: true, reason: "not_local" };
 }
 
-async function persistSslResult(
+export async function persistSslResult(
   domainId: string,
   currentStatus: string | null | undefined,
   result: SslResult,
 ) {
   const patch = resolveSslPatch(currentStatus, result);
   // A negative probe is not an issuance in progress. Its caller records the
-  // completed failure once, with its reason; only proof updates the certificate.
-  if (patch?.sslStatus === "active") await repos.domain.updateSsl(domainId, patch);
+  // completed failure once, with its reason. Only proof or an explicitly pending
+  // provider request updates certificate state here.
+  if (patch && (patch.sslStatus === "active" || result.reason === "pending")) {
+    await repos.domain.updateSsl(domainId, patch);
+  }
 }
 
 /**
@@ -364,9 +369,9 @@ export async function recordMailCertDomain(hostname: string, result: SslResult):
     }
     await persistSslResult(row.id, row.sslStatus, result);
   } catch (err) {
-    console.warn(
+    errorDiagnostics.warn("platform/engine/lib/domain-ssl",
       `[MAIL] could not record the certificate for ${hostname} — renewal may not be ` +
-        `scheduled until step 12 is re-run: ${safeErrorMessage(err)}`,
+        `scheduled until step 12 is re-run: ${safeErrorMessage(err)}`, err,
     );
   }
 }
@@ -403,10 +408,10 @@ async function recoverIssuedCert(
   err: unknown,
 ): Promise<SslResult> {
   return createProvisionLock(sslIssueLockKey(domainRecord.hostname)).run(async () => {
-    const onDisk = await ssl.verifyCert(domainRecord.hostname).catch(() => null);
+    const onDisk = await ssl.verifyCert(domainRecord.hostname).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/lib/domain-ssl"); return null; });
     if (!onDisk || !certComfortablyValid(onDisk)) throw err;
     await ssl.activateCert?.(domainRecord.hostname);
-    console.warn(
+    errorDiagnostics.warn("platform/engine/lib/domain-ssl",
       `[SSL] ${domainRecord.hostname}: issuance reported an error but a valid certificate ` +
         `(expires ${onDisk.expiresAt.slice(0, 10)}) is active on the edge — recording it so renewal ` +
         `stays scheduled. The error was: ${safeErrorMessage(err)}`,
@@ -482,17 +487,23 @@ async function resolveSslProvider(owner: SslOwner): Promise<ResolvedSslProvider>
           meta.serverId ||
           meta.deployTarget === "server" ||
           meta.deployTarget === "cloud" ||
-          project.cloudWorkspaceId
+          project.workspaceId
         ) {
           throw err;
         }
         // Legacy local deployments may still use the host-anchored provider.
-        console.warn(
+        errorDiagnostics.warn("platform/engine/lib/domain-ssl",
           `[domain-ssl] could not resolve the deployment platform for ${owner.kind === "project" ? owner.project.id : "domain"}` +
-            `${meta.serverId ? ` (server ${meta.serverId})` : ""} — falling back to the host edge: ${safeErrorMessage(err)}`,
+            `${meta.serverId ? ` (server ${meta.serverId})` : ""} — falling back to the host edge: ${safeErrorMessage(err)}`, err,
         );
       }
     }
+  }
+
+  // A never-deployed project bound to a server issues on that server's edge, where it will serve.
+  if (!depId && project.serverId) {
+    const provider = await resolveSslOnly({ serverId: project.serverId } as DeploymentMeta, project.organizationId);
+    return { ...provider, lockScope: project.serverId };
   }
 
   // Fallback anchor. `platform().ssl` is the API's OWN context — for a
@@ -507,7 +518,7 @@ async function resolveSslProvider(owner: SslOwner): Promise<ResolvedSslProvider>
   // on its deployment server (resolved above via serverId → SSH). The primary
   // path handles that; this local anchor is only for a server-host install.
   if (!env.CLOUD_MODE && env.DEPLOY_MODE !== "desktop") {
-    const local = await repos.server.findLocal(project.organizationId).catch(() => null);
+    const local = await repos.server.findLocal(project.organizationId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/lib/domain-ssl"); return null; });
     if (local) {
       try {
         const provider = await resolveSslOnly(
@@ -517,9 +528,9 @@ async function resolveSslProvider(owner: SslOwner): Promise<ResolvedSslProvider>
         return { ...provider, lockScope: local.id };
       } catch (err) {
         // Host-server unresolvable — last resort below.
-        console.warn(
+        errorDiagnostics.warn("platform/engine/lib/domain-ssl",
           `[domain-ssl] could not resolve the local host-server (${local.id}) edge — ` +
-            `falling back to the API's own context: ${safeErrorMessage(err)}`,
+            `falling back to the API's own context: ${safeErrorMessage(err)}`, err,
         );
       }
     }
@@ -530,7 +541,7 @@ async function resolveSslProvider(owner: SslOwner): Promise<ResolvedSslProvider>
   // domain, so certbot/verify runs against the wrong (or a non-existent) edge and
   // the SSL action fails with no obvious cause. Left non-throwing so the single-box
   // case still works, but logged so the misfire is traceable when it isn't that.
-  console.warn(
+  errorDiagnostics.warn("platform/engine/lib/domain-ssl",
     `[domain-ssl] resolving SSL via the API's own edge context (last resort) for ` +
       `${owner.kind === "project" ? owner.project.id : "domain"} — if this instance's edge runs ` +
       `elsewhere (containerized API, remote deploy target, or a post-takeover host), this action ` +
@@ -560,10 +571,14 @@ export function createDnsHookScripts(manager: MatchedDnsManager): DnsHookScripts
 set -e
 DOMAIN="\${CERTBOT_DOMAIN#\\*.}"
 RECORD_NAME="_acme-challenge.\${DOMAIN}"
+case "$DOMAIN" in ''|*[!A-Za-z0-9.-]*) echo "Invalid ACME domain" >&2; exit 1;; esac
+case "$CERTBOT_VALIDATION" in ''|*[!A-Za-z0-9_-]*) echo "Invalid ACME validation value" >&2; exit 1;; esac
+DNS_PAYLOAD=$(printf '%s' '{"type":"TXT","name":"' "$RECORD_NAME" \\
+  '","content":"\\"' "$CERTBOT_VALIDATION" '\\"","ttl":60,"comment":"Managed by Openship"}')
 RES=$(curl -s -S --connect-timeout 5 --max-time 15 -X POST "https://api.cloudflare.com/client/v4/zones/${manager.zone.id}/dns_records" \\
   -H "Authorization: Bearer ${manager.credentials.apiToken}" \\
   -H "Content-Type: application/json" \\
-  --data "{\\"type\\":\\"TXT\\",\\"name\\":\\"\${RECORD_NAME}\\",\\"content\\":\\"\${CERTBOT_VALIDATION}\\",\\"ttl\\":60,\\"comment\\":\\"Managed by Openship\\"}")
+  --data "$DNS_PAYLOAD")
 if ! echo "$RES" | grep -q '"success":true'; then
   echo "Cloudflare rejected the ACME TXT record request" >&2
   echo "$RES" >&2
@@ -708,19 +723,24 @@ export async function manageDomainSsl(
         await applyMailCertificate(authorized.owner.serverId, authorized.domainRecord.hostname);
       }
     } catch (error) {
-      await repos.domain.recordSslFailure(authorized.domainRecord.id, safeErrorMessage(error));
+      await repos.domain.recordSslFailure(
+        authorized.domainRecord.id, safeErrorMessage(error), opts.action === "verify" ? "unknown" : "operation",
+      );
       throw error;
     }
+    if (result.reason === "pending") return result;
     const expired = !!result.expiresAt && new Date(result.expiresAt).getTime() <= Date.now();
     if (result.reason !== "not_local" && (!result.verified || !result.expiresAt || expired)) {
       await repos.domain.recordSslFailure(
         authorized.domainRecord.id,
-        expired
+        result.detail ?? (expired
           ? "The HTTPS certificate on the server has expired. Retry to renew it."
           : result.reason === "read_error"
             ? "The HTTPS certificate could not be read on the server. Check the server connection and retry."
-            : "No usable HTTPS certificate was found on the server. Check DNS and the certificate configuration, then retry.",
-        expired || result.reason === "missing" || result.reason === "invalid",
+            : "No usable HTTPS certificate was found on the server. Check DNS and the certificate configuration, then retry."),
+        result.reason === "read_error" ? "unknown"
+          : expired || result.reason === "missing" || result.reason === "invalid" || result.reason === "edge_invalid"
+            ? "invalid" : "operation",
       );
       return { ...result, verified: false };
     }
@@ -767,10 +787,10 @@ async function manageAuthorizedDomainSsl(
       return result;
     }
 
-    const isDns =
+    const isDns = ssl.certificateManagement !== "provider" && (
       opts.challenge === "dns-01" ||
       domainRecord.sslChallenge === "dns-01" ||
-      isWildcardHostname(domainRecord.hostname);
+      isWildcardHostname(domainRecord.hostname));
 
     try {
       const result = await createProvisionLock(sslIssueLockKey(domainRecord.hostname)).run(async () => {
@@ -782,7 +802,8 @@ async function manageAuthorizedDomainSsl(
         const provOpts: ProvisionCertOptions = {
           ...(opts.onLog ? { onLog: opts.onLog } : {}),
           force: true,
-          ...(isDns ? { challenge: "dns-01" } : opts.challenge ? { challenge: opts.challenge } : {}),
+          ...(ssl.certificateManagement === "provider" ? {} :
+            isDns ? { challenge: "dns-01" } : opts.challenge ? { challenge: opts.challenge } : {}),
           ...dnsHooks,
         };
         return createProvisionLock(acmeIssueLockKey(lockScope)).run(() =>
@@ -792,6 +813,7 @@ async function manageAuthorizedDomainSsl(
       await persistSslResult(domainRecord.id, domainRecord.sslStatus, result);
       return result;
     } catch (err) {
+      observeCaughtError(err, "platform/engine/lib/domain-ssl");
       // Issuance may have succeeded and a LATER step failed — never leave a valid
       // cert unrecorded. See {@link recoverIssuedCert}. Rethrows when it really failed.
       return recoverIssuedCert(ssl, domainRecord, err);
@@ -843,10 +865,10 @@ async function provisionAuthorizedDomainCert(
   },
 ): Promise<SslResult> {
   return withSslProvider(owner, async ({ ssl, lockScope }) => {
-    const isDns =
+    const isDns = ssl.certificateManagement !== "provider" && (
       opts.challenge === "dns-01" ||
       domainRecord.sslChallenge === "dns-01" ||
-      isWildcardHostname(domainRecord.hostname);
+      isWildcardHostname(domainRecord.hostname));
 
     // Serialize issuance per-hostname, and re-check the cert INSIDE the lock.
     // This closes the TOCTOU: two concurrent Verify hits (or Verify racing the
@@ -862,7 +884,22 @@ async function provisionAuthorizedDomainCert(
       const result = await createProvisionLock(sslIssueLockKey(domainRecord.hostname)).run(
         async () => {
           if (!opts.force) {
-            const existing = await ssl.verifyCert(domainRecord.hostname).catch(() => null);
+            const existing = await ssl.verifyCert(domainRecord.hostname).catch((diagnosticFailure) => {
+              observeCaughtError(diagnosticFailure, "platform/engine/lib/domain-ssl");
+              // An unreachable provider API cannot authorize another order.
+              return ssl.certificateManagement === "provider" ? {
+                domain: domainRecord.hostname, verified: false, expiresAt: "", issuer: "", reason: "read_error" as const,
+                // Structured operation failures already carry safe recovery
+                // guidance. Keep it instead of claiming a connection outage.
+                ...(diagnosticFailure instanceof AppError ? { detail: safeErrorMessage(diagnosticFailure) } : {}),
+              } : null;
+            });
+            // An issued provider certificate served incorrectly is an edge
+            // problem. Automatic sweeps may observe it, never burn another
+            // issuance on every retry. Connection loss is not evidence that a
+            // fresh order is needed either. Explicit Renew retains its path.
+            if (ssl.certificateManagement === "provider" && existing &&
+              ["edge_invalid", "read_error", "pending"].includes(existing.reason ?? "")) return existing;
             if (existing && certComfortablyValid(existing)) {
               await ssl.activateCert?.(domainRecord.hostname);
               opts.onLog?.(
@@ -888,7 +925,7 @@ async function provisionAuthorizedDomainCert(
             ssl.provisionCert(domainRecord.hostname, {
               onLog: opts.onLog,
               force: true,
-              challenge: isDns ? "dns-01" : "http-01",
+              ...(ssl.certificateManagement === "provider" ? {} : { challenge: isDns ? "dns-01" as const : "http-01" as const }),
               ...dnsHooks,
             }),
           );
@@ -898,6 +935,7 @@ async function provisionAuthorizedDomainCert(
       await persistSslResult(domainRecord.id, domainRecord.sslStatus, result);
       return result;
     } catch (err) {
+      observeCaughtError(err, "platform/engine/lib/domain-ssl");
       // This is the path that lost TLS: a cert was issued, the post-issue read threw,
       // and the row stayed `provisioning`/null-expiry — invisible to the renewer. See
       // {@link recoverIssuedCert}. Rethrows when issuance really failed, so the caller

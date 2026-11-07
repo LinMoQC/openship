@@ -141,15 +141,15 @@ describe("service sync — compose config JSON mapping", () => {
     expect(errors.join("\n")).not.toContain("never-print-this-object");
   });
 
-  it("carries shared namespaces instead of dropping the advanced blob", () => {
+  it("carries sibling service namespaces instead of dropping the advanced blob", () => {
     const errors: string[] = [];
     const svc = mapComposeService(
       "qbit",
-      { image: "linuxserver/qbittorrent", network_mode: "service:gluetun", pid: "container:abc" },
+      { image: "linuxserver/qbittorrent", network_mode: "service:gluetun", pid: "service:gluetun" },
       "/repo",
       errors,
     );
-    expect(svc.advanced).toEqual({ networkMode: "service:gluetun", pidMode: "container:abc" });
+    expect(svc.advanced).toEqual({ networkMode: "service:gluetun", pidMode: "service:gluetun" });
     expect(errors).toEqual([]);
   });
 
@@ -212,6 +212,21 @@ describe("service sync — compose config JSON mapping", () => {
 
     expect(services[0]).toMatchObject({ advanced: { runToCompletion: true } });
     expect(services[1]?.advanced).not.toHaveProperty("runToCompletion");
+  });
+
+  it.each(["network_mode", "pid"])("refuses direct container references in %s", (field) => {
+    const errors: string[] = [];
+    const svc = mapComposeService(
+      "agent",
+      { image: "nginx", [field]: "container:another-project" },
+      "/repo",
+      errors,
+    );
+
+    expect(svc.advanced).toBeUndefined();
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain(field);
+    expect(errors[0]).toContain("direct container references are not supported");
   });
 
   it("reports `host` as an error rather than syncing a service without it", () => {

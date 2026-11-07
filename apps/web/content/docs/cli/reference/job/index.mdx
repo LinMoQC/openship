@@ -18,16 +18,26 @@ openship job|jobs [options] [command]
 | --- | --- |
 | [`list`](/docs/cli/reference/job#openship-job-list) | List system and custom jobs |
 | [`get <key>`](/docs/cli/reference/job#openship-job-get) | Show a job's configuration and recent runs |
-| [`create [options]`](/docs/cli/reference/job#openship-job-create) | Create a custom job (name, server, command, and schedule required) |
+| [`create [options]`](/docs/cli/reference/job#openship-job-create) | Create a scheduled command or saved workflow job |
 | [`update [options] <key>`](/docs/cli/reference/job#openship-job-update) | Update a job; built-ins accept schedule and enabled changes |
 | [`delete\|rm [options] <key>`](/docs/cli/reference/job#openship-job-delete) | Delete a custom job (system jobs cannot be deleted) |
 | [`run [options] <key>`](/docs/cli/reference/job#openship-job-run) | Run a job now; custom jobs return a run ID |
 | [`runs [options] <key>`](/docs/cli/reference/job#openship-job-runs) | List a job's run history |
 | [`logs [options] <runId>`](/docs/cli/reference/job#openship-job-logs) | Show stored run output, or the full run in JSON mode |
+| [`events`](/docs/cli/reference/job#openship-job-events) | List event types available as job triggers |
+| [`backup-schedules`](/docs/cli/reference/job#openship-job-backup-schedules) | List scheduled backups with their next and last runs |
+
+## openship job backup-schedules
+
+List scheduled backups with their next and last runs
+
+```text
+openship job backup-schedules [options]
+```
 
 ## openship job create
 
-Create a custom job (name, server, command, and schedule required)
+Create a scheduled command or saved workflow job
 
 ```text
 openship job create [options]
@@ -41,7 +51,7 @@ openship job create [options]
 | `--schedule <type>` | Schedule type (choices: "recurring", "once", "manual") |
 | `--cron <expression>` | Five-field cron expression |
 | `--at <iso>` | Run time for a once schedule |
-| `--file <path>` | JSON API body (env, secrets, retry, etc.); flags override file values |
+| `--file <path>` | JSON API body (workflowId/inputs or command settings); flags override file values |
 
 ## openship job delete
 
@@ -54,6 +64,14 @@ openship job delete|rm [options] <key>
 | Option | Meaning |
 | --- | --- |
 | `-y, --yes` | Confirm deletion |
+
+## openship job events
+
+List event types available as job triggers
+
+```text
+openship job events [options]
+```
 
 ## openship job get
 
@@ -123,6 +141,6 @@ openship job update [options] <key>
 | `--schedule <type>` | Schedule type (choices: "recurring", "once", "manual") |
 | `--cron <expression>` | Five-field cron expression |
 | `--at <iso>` | Run time for a once schedule |
-| `--file <path>` | JSON API body (env, secrets, retry, etc.); flags override file values |
+| `--file <path>` | JSON API body (workflowId/inputs or command settings); flags override file values |
 | `--enabled` | Enable the job |
 | `--no-enabled` | Disable the job |

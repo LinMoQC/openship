@@ -1,19 +1,27 @@
 /** Installs the actual tarball outside the workspace, under the caller's Node runtime. */
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readPackedArchive } from "./npm-pack";
 
-const packageDir = dirname(fileURLToPath(import.meta.url));
+// A publishing-tools repair can verify the immutable release checkout without
+// rebuilding the product from the newer tools commit.
+const packageDir = resolve(process.env.OPENSHIP_VERIFY_PACKAGE_DIR ?? dirname(fileURLToPath(import.meta.url)));
 const scratch = mkdtempSync(join(tmpdir(), "openship-package-"));
 const node = process.env.OPENSHIP_TEST_NODE ?? process.argv[2] ?? "node";
 const run = (bin: string, args: string[], cwd = scratch, env = process.env) => execFileSync(bin, args, { cwd, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 180_000 });
 
 try {
   run("bun", ["run", "check"], packageDir);
-  const packed = JSON.parse(run("npm", ["pack", "--json", "--ignore-scripts", "--pack-destination", scratch], packageDir)) as Array<{ filename: string; size: number; unpackedSize: number }>;
-  const archive = packed[0]!;
+  const expected = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8"));
+  const archive = readPackedArchive(
+    run("npm", ["pack", "--json", "--ignore-scripts", "--pack-destination", scratch], packageDir),
+    expected,
+  );
+  if (statSync(join(scratch, archive.filename)).size !== archive.size)
+    throw new Error("The packed archive size does not match npm's report.");
   writeFileSync(join(scratch, "package.json"), JSON.stringify({
     name: "openship-external-check", private: true, type: "module",
     dependencies: { openship: `file:${join(scratch, archive.filename)}` },
@@ -66,6 +74,9 @@ assert.equal(process.getActiveResourcesInfo().includes('Timeout'), false);
 console.log('CJS_OK');
 `);
   if (!run(node, ["probe.cjs"]).includes("CJS_OK")) throw new Error("CommonJS package probe failed");
+  cpSync(join(import.meta.dirname, "test/remote-platform.mjs"), join(scratch, "remote-platform.mjs"));
+  if (!run(node, ["remote-platform.mjs"]).includes("PACKAGED_REMOTE_PLATFORM_OK"))
+    throw new Error("Packaged SDK/CLI remote platform workflows failed");
   writeFileSync(join(scratch, "native-probe.mjs"), `
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -167,6 +178,11 @@ try {
   const example = `import { OpenshipClient, OpenshipOperatorClient, type DeploymentHandle, type ProjectOperations, type EnvironmentVariable, type BillingOperations, type NoticeOperations, type OperatorNoticeOperations } from 'openship';
 import { createShip, type IdentityAdapter } from 'openship/native';
 const client = new OpenshipClient({ baseUrl: 'https://ship.example.test' });
+const mail: import('openship').MailOperations = client.mail;
+const migrations: import('openship').MigrationOperations = client.migrations;
+const instance: import('openship').InstanceOperations = client.instance;
+const terminal: import('openship').TerminalOperations = client.terminal;
+void mail; void migrations; void instance; void terminal;
 const handle: DeploymentHandle = client.deployment('deployment');
 const identity: IdentityAdapter<string> = { resolve: async () => null };
 const operatorNotices: OperatorNoticeOperations = new OpenshipOperatorClient({ baseUrl: 'https://ship.example.test', internalToken: 'operator' }).notices;

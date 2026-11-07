@@ -12,6 +12,7 @@
  * a reported failure; callers cannot safely retry an operation that did commit.
  */
 
+import { observedAllSettled, reportCaughtError as observeCaughtError, diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import { withTimeout } from "@repo/core";
 
 import { clearAuthModeCache } from "@repo/platform/engine/lib/auth-mode";
@@ -20,7 +21,7 @@ import { clearAllCacheStores } from "@repo/platform/engine/lib/cache-store/index
 import { clearHostControlCache, syncHostControlOverride } from "@repo/platform/engine/lib/host-control";
 import { invalidateLocalUserCache } from "./local-user";
 import { invalidateInstanceTransportCache, invalidatePlatformTransport } from "@repo/platform/engine/lib/mail";
-import { invalidateMcpSigningKeyCache } from "./mcp-oidc-keys";
+import { invalidateActionOidcKeyCache } from "@repo/platform/engine/modules/actions/oidc-cache";
 import { clearProductModeCache } from "@repo/platform/engine/lib/product-mode";
 import { invalidateSelfAppPublicUrl } from "@repo/platform/engine/lib/public-url";
 import { sshManager } from "@repo/platform/engine/lib/ssh-manager";
@@ -37,6 +38,7 @@ export async function reconcileRuntimeStateAfterImport(): Promise<void> {
     try {
       operation();
     } catch (error) {
+      observeCaughtError(error, "api/lib/database-runtime-state");
       failures.push({ name, error });
     }
   };
@@ -49,12 +51,12 @@ export async function reconcileRuntimeStateAfterImport(): Promise<void> {
   run("self-app URL", invalidateSelfAppPublicUrl);
   run("instance SMTP", invalidateInstanceTransportCache);
   run("platform SMTP", () => invalidatePlatformTransport());
-  run("MCP signing key", invalidateMcpSigningKeyCache);
+  run("Actions OIDC signing key", invalidateActionOidcKeyCache);
   run("SSH connections", () => sshManager.invalidate());
   run("mail reachability", clearMailPortReachabilityCache);
   run("service volume sizes", clearServiceVolumeSizeCache);
 
-  const asyncRefreshes = await Promise.allSettled([
+  const asyncRefreshes = await observedAllSettled([
     withTimeout(
       clearAllCacheStores(),
       ASYNC_RECONCILE_TIMEOUT_MS,
@@ -65,7 +67,7 @@ export async function reconcileRuntimeStateAfterImport(): Promise<void> {
       ASYNC_RECONCILE_TIMEOUT_MS,
       "Timed out synchronizing host-control state after database import",
     ),
-  ]);
+  ], "api/lib/database-runtime-state");
   const names = ["shared cache stores", "host-control adapter"];
   asyncRefreshes.forEach((result, index) => {
     if (result.status === "rejected") {
@@ -74,7 +76,7 @@ export async function reconcileRuntimeStateAfterImport(): Promise<void> {
   });
 
   if (failures.length > 0) {
-    console.error(
+    errorDiagnostics.error("api/lib/database-runtime-state",
       "[data-transfer] database import committed, but runtime-state reconciliation was incomplete:",
       failures,
     );

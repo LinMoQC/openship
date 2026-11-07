@@ -31,6 +31,7 @@ import copyJa from "./locales/ja.json";
 import copyPt from "./locales/pt.json";
 import copyTr from "./locales/tr.json";
 import copyZh from "./locales/zh.json";
+import copyRu from "./locales/ru.json";
 
 /* ─── Catalog ─────────────────────────────────────────────────────────────── */
 
@@ -44,7 +45,7 @@ export { planLimitsSchema } from "./schema";
 
 /** Plan tier identifier. Mirrors `pricing.json#plans[].id`; the pricing test
  *  asserts the two never drift (a new tier is a compile error, by design). */
-export type PlanTierId = "free" | "starter" | "pro" | "team" | "enterprise";
+export type PlanTierId = "free" | "hobby" | "starter" | "pro" | "team" | "enterprise";
 
 /** Ordered plan ids, display order = catalog order. */
 export const PLAN_IDS: readonly PlanTierId[] = PRICING.plans.map((p) => p.id as PlanTierId);
@@ -54,7 +55,7 @@ export const DEFAULT_PLAN_TIER: PlanTierId = "free";
 
 /* ─── Locales ─────────────────────────────────────────────────────────────── */
 
-export const PRICING_LOCALES = ["en", "ar", "de", "es", "fr", "ja", "pt", "tr", "zh"] as const;
+export const PRICING_LOCALES = ["en", "ar", "de", "es", "fr", "ja", "pt", "tr", "zh", "ru"] as const;
 export type PricingLocale = (typeof PRICING_LOCALES)[number];
 
 /** English copy — the source of truth and the fallback for every other locale. */
@@ -78,6 +79,7 @@ const COPY: Record<PricingLocale, PartialCopy> = {
   pt: copyPt,
   tr: copyTr,
   zh: copyZh,
+  ru: copyRu,
 };
 
 /**
@@ -150,17 +152,24 @@ export interface OblienLimits {
   max_vcpus: number | null;
   max_ram_mb: number | null;
   max_disk_gb: number | null;
+  max_total_vcpus: number | null;
+  max_total_ram_mb: number | null;
+  max_total_disk_gb: number | null;
 }
 
-/** Numeric plan limits, in customer-facing units. `null` is ALWAYS "unlimited". */
+/** Numeric application limits. null removes that separate limit; paid usage
+ * still draws from the namespace's credit allowance and shared capacity. */
 export interface PlanLimits {
   workloads: readonly WorkloadType[];
   services: boolean;
   /** Concurrent services; several Compose services may share a workspace. */
   runningServices: number | null;
+  concurrentBuilds?: number | null;
   maxProjects: number | null;
-  /** Largest per-service machine this tier may select, or null for uncapped. */
+  /** Preset ceiling for saved offers without explicit service resources. */
   maxResourceTier: FixedResourceTier | null;
+  /** Explicit per-service ceiling; null is uncapped, absent retains the saved preset. */
+  maxServiceResources?: { cpuCores: number; memoryMb: number } | null;
   /** Legacy display field; paid offers use credits rather than fixed runtime minutes. */
   computeMinutesPerMonth: number | null;
   buildMinutesPerMonth: number | null;
@@ -174,6 +183,7 @@ export interface PlanLimits {
  * already interpolated and locale-formatted) — the UI renders them verbatim.
  */
 export interface PlanDefinition {
+  availableForPurchase: boolean;
   id: PlanTierId;
   name: string;
   /**
@@ -190,11 +200,14 @@ export interface PlanDefinition {
    *  payload shape, which clients already read.) */
   description: string;
   price: { monthly: number | null; annual: number | null };
-  /** Milli-credits granted per period; null = granted by hand (enterprise). */
+  billingMode: "metered" | "monthly";
+  /** Milli-credits per period; null when compute is covered by a monthly pool or custom contract. */
   monthlyCredits: number | null;
   oblienLimits: OblienLimits;
   limits: PlanLimits;
   features: readonly string[];
+  /** Stable keys aligned with `features`, so clients can group facts without parsing copy. */
+  featureKeys: readonly string[];
   popular: boolean;
   support: string;
   contactSales?: string;
@@ -225,6 +238,16 @@ export function planLimits(planId: string | null | undefined): PlanLimits {
   return plan.limits;
 }
 
+/** Resolve the supplied contract, never substitute current catalog limits for a saved offer. */
+export function planServiceResources(limits: Pick<PlanLimits, "maxResourceTier" | "maxServiceResources">): {
+  cpuCores: number; memoryMb: number;
+} | null {
+  if (limits.maxServiceResources !== undefined) return limits.maxServiceResources;
+  if (limits.maxResourceTier === null) return null;
+  const { cpuCores, memoryMb } = RESOURCE_TIER_SPECS[limits.maxResourceTier];
+  return { cpuCores, memoryMb };
+}
+
 /** @deprecated Historical display conversion. Not an Oblien metering rate. */
 export const MILLI_PER_COMPUTE_MINUTE = 1000;
 
@@ -236,11 +259,10 @@ export function computeUnitsPerMinute(tier: FixedResourceTier): number {
   return RESOURCE_TIER_SPECS[tier].cpuCores / RESOURCE_TIER_SPECS.low.cpuCores;
 }
 
-/** Explicit namespace credits per monthly cycle, in milli-credits for Openship
- * clients. Price, resource limits and checkout copy do not change this allowance. */
+/** Metered namespace credits, in milli-credits. Monthly pools have no credit allowance. */
 export function planMonthlyCredits(planId: string | null | undefined): number | null {
   const plan = PLAN_BY_ID.get(planId ?? "") ?? PLAN_BY_ID.get(DEFAULT_PLAN_TIER)!;
-  return plan.billing.creditsPerCycle === null ? null : plan.billing.creditsPerCycle * 1000;
+  return plan.billing.mode === "monthly" || plan.billing.creditsPerCycle === null ? null : plan.billing.creditsPerCycle * 1000;
 }
 
 /** May this tier run that workload? Free ships static-only. */
@@ -265,18 +287,22 @@ function placeholders(plan: PricingCatalogRaw["plans"][number], locale: PricingL
   const unlimited = uiString(locale, "unlimited");
   const n = (v: number | null) => (v === null ? unlimited : formatCount(v, locale));
   const { limits } = plan;
-  const svc = limits.maxResourceTier ? RESOURCE_TIER_SPECS[limits.maxResourceTier] : null;
+  const svc = planServiceResources(limits);
   return {
+    credits: n(plan.billing.creditsPerCycle),
+    namespaceCpu: n(plan.billing.resourceLimits.max_total_vcpus),
+    namespaceRamGb: n(plan.billing.resourceLimits.max_total_ram_mb == null ? null : plan.billing.resourceLimits.max_total_ram_mb / 1024),
+    namespaceDiskGb: n(plan.billing.resourceLimits.max_total_disk_gb),
     buildMinutes: n(limits.buildMinutesPerMonth),
     freeSubdomains: n(limits.freeSubdomains),
     customDomains: n(limits.customDomains),
     seats: n(limits.seats),
     runningServices: n(limits.runningServices),
+    concurrentBuilds: n(limits.concurrentBuilds ?? null),
     maxProjects: n(limits.maxProjects),
     // Per-SERVICE machine size, not a pool — the copy must say so.
     powerCpu: svc ? formatDecimal(svc.cpuCores, locale) : unlimited,
     powerRamGb: svc ? formatDecimal(svc.memoryMb / 1024, locale) : unlimited,
-    powerDiskGb: svc ? formatCount(Math.round(svc.diskMb / 1024), locale) : unlimited,
     computeMinutes: n(limits.computeMinutesPerMonth),
     inherited: plan.inherits ? planName(plan.inherits, locale) : "",
     freeDomainSuffix: PRICING.freeDomainSuffix,
@@ -291,11 +317,19 @@ const EVERYTHING_IN_KEY = "everythingIn";
 export function resolvePlan(planId: PlanTierId, locale: PricingLocale = "en"): PlanDefinition {
   const plan = PLAN_BY_ID.get(planId) ?? PLAN_BY_ID.get(DEFAULT_PLAN_TIER)!;
   const values = placeholders(plan, locale);
+  const features = plan.features
+    .filter((key) => key !== EVERYTHING_IN_KEY)
+    .flatMap((key) => {
+      const template = featureTemplate(key, locale);
+      return template === null ? [] : [{ key, label: fill(template, values) }];
+    });
   return {
     id: plan.id as PlanTierId,
+    availableForPurchase: plan.availableForPurchase,
     name: planName(plan.id, locale),
     description: planTagline(plan.id, locale),
     price: plan.price,
+    billingMode: plan.billing.mode,
     monthlyCredits: planMonthlyCredits(plan.id),
     oblienLimits: { ...plan.billing.resourceLimits },
     limits: plan.limits,
@@ -308,13 +342,8 @@ export function resolvePlan(planId: PlanTierId, locale: PricingLocale = "en"): P
         : null;
       return lead === null ? {} : { inheritedFrom: fill(lead, values) };
     })(),
-    features: plan.features
-      .filter((key) => key !== EVERYTHING_IN_KEY)
-      .map((key) => {
-        const template = featureTemplate(key, locale);
-        return template === null ? null : fill(template, values);
-      })
-      .filter((s): s is string => s !== null),
+    features: features.map(({ label }) => label),
+    featureKeys: features.map(({ key }) => key),
     popular: plan.popular,
     support: plan.support,
     ...(plan.contactSales ? { contactSales: plan.contactSales } : {}),

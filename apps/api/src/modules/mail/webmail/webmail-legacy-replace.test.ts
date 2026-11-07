@@ -28,7 +28,7 @@ const WEBMAIL_PROJECT = {
   appTemplateId: "webmail",
   framework: "docker-compose",
   serverId: "srv1",
-  cloudWorkspaceId: null,
+  workspaceId: null,
   activeDeploymentId: null,
 };
 
@@ -40,7 +40,7 @@ const LEGACY_PROJECT = {
   appTemplateId: "mail-webmail",
   framework: "webmail",
   serverId: "srv1",
-  cloudWorkspaceId: null,
+  workspaceId: null,
   activeDeploymentId: "dep-old",
 };
 
@@ -66,7 +66,10 @@ const h = vi.hoisted(() => ({
 
 vi.mock("@repo/db", () => ({
   repos: {
-    server: { get: vi.fn(async (id: string) => ({ id, organizationId: "org1" })) },
+    server: {
+      get: vi.fn(async (id: string) => ({ id, organizationId: "org1" })),
+      getInOrganization: vi.fn(async (id: string) => ({ id, organizationId: "org1" })),
+    },
     mailServer: {
       get: vi.fn(async () => ({ domain: "example.com", webmailProjectId: h.linked?.id ?? null })),
       setWebmailProject: h.setWebmailProject,
@@ -83,6 +86,7 @@ vi.mock("@repo/db", () => ({
 vi.mock("@repo/platform/engine/modules/projects/project-teardown", () => ({
   teardownProject: h.teardownProject,
 }));
+vi.mock("@repo/platform/engine/lib/authorization", () => ({ authorization: { authorize: vi.fn() } }));
 vi.mock("@repo/platform/engine/modules/apps/catalog-source", () => ({
   getTemplateForOrg: vi.fn(async () => h.template),
 }));
@@ -96,6 +100,7 @@ vi.mock("@repo/platform/engine/modules/apps/app-settings.service", () => ({
 }));
 vi.mock("@repo/platform/engine/modules/deployments/build.service", () => ({
   requestBuildAccess: h.requestBuildAccess,
+  resolveSnapshotTarget: vi.fn(async () => ({})),
 }));
 vi.mock("@repo/platform/engine/modules/domains/project-route.service", () => ({
   listProjectRouteRows: vi.fn(async () => []),

@@ -12,6 +12,8 @@ import { getShipClient, ApiError } from "../lib/ship-client";
 import { exitCommand, rethrowCommandExit } from "../lib/command-exit";
 import type { CreateBackupDestinationInput, UpdateBackupDestinationInput, PreflightBackupDestinationInput, UpdateBackupPolicyInput, PrepareBackupRestoreInput } from "@repo/sdk";
 import { err, info, isJsonMode, ok, printJson, printTable } from "../lib/output";
+import { positiveInteger } from "../lib/command-input";
+import { printResult } from "../lib/cmd-helpers";
 
 type Row = Record<string, unknown>;
 
@@ -391,6 +393,12 @@ restoreCmd
 // ─── destination ─────────────────────────────────────────────────────────────
 
 const destinationCmd = new Command("destination").description("Backup destinations (storage targets)");
+destinationCmd.command("history").description("Read backup history across destinations with a continuation cursor")
+  .option("--limit <number>", "Maximum results", positiveInteger).option("--before <cursor>", "Continuation cursor")
+  .action(opts => printResult(() => getShipClient().backupDestinations.history({ limit: opts.limit, before: opts.before })));
+destinationCmd.command("runs").argument("<id>", "Destination ID").description("Read a destination's backup runs and next cursor")
+  .option("--limit <number>", "Maximum results", positiveInteger).option("--before <cursor>", "Continuation cursor")
+  .action((id: string, opts) => printResult(() => getShipClient().backupDestinations.runs(id, { limit: opts.limit, before: opts.before })));
 
 destinationCmd
   .command("list")

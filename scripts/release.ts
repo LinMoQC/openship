@@ -35,7 +35,7 @@
  *   2. Refuse if not on main (override with --force-branch)
  *   3. Refuse if HEAD is behind origin/main (you'd push an old commit)
  *   4. Compute next version from apps/api/package.json
- *   5. Sync both root package.json and apps/api/package.json
+ *   5. Refresh GeoIP and sync package versions
  *   6. Commit "Bump to vX.Y.Z"
  *   7. Push the bump commit to main
  *   8. Tag vX.Y.Z and push the tag
@@ -56,10 +56,12 @@ import { fileURLToPath } from "node:url";
 import { buildWizardArgs, type WizardAnswers } from "./release-args";
 import { extractChangelogSection } from "./changelog-notes";
 import { RESUME_TRAILER, resumeRuns, unpublishedReleaseRuns } from "./release-resume";
+import { buildReleaseAdvisory } from "./release-advisory";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const ROOT_PKG = join(ROOT, "package.json");
 const API_PKG = join(ROOT, "apps/api/package.json");
+const GEOIP_DB = join(ROOT, "apps/api/assets/geoip/GeoLite2-Country.mmdb");
 // The upgrade-prompt gate. A release ships SILENTLY unless `publish` writes an
 // advisory here for the new version (see release-advisories.json's $comment).
 const ADVISORIES = join(ROOT, "release-advisories.json");
@@ -213,6 +215,9 @@ if (currentApi !== currentRoot) {
 
 const next = computeNext(currentApi, bump);
 const tag = `v${next}`;
+const announcement = publish
+  ? buildReleaseAdvisory(next, { critical, message, modes }, JSON.parse(readFileSync(ADVISORIES, "utf8")))
+  : null;
 
 if (publish && tag.includes("-")) {
   console.error(
@@ -228,9 +233,9 @@ log(`Current version (apps/api): ${currentApi}`);
 log(`Next version:               ${next}`);
 log(`Tag:                        ${tag}`);
 log(`Prerelease:                 ${tag.includes("-") ? "yes" : "no"}`);
-log(`Announcement:               ${publish ? `yes (${critical ? "critical" : "recommended"} advisory)` : "no — silent release"}`);
-if (publish) {
-  log(`Audience:                   ${modes ? modes.join(", ") : "all installs (desktop, selfhosted, cloud)"}`);
+log(`Announcement:               ${announcement ? `yes (${announcement.severity} advisory)` : "no — silent release"}`);
+if (announcement) {
+  log(`Audience:                   ${announcement.modes?.join(", ") ?? "all installs (desktop, selfhosted, cloud)"}`);
 }
 log(`Release notes:              ${changelogNotesStatus(next)}`);
 log(``);
@@ -245,39 +250,31 @@ if (dryRun) {
   }
   if (publish) {
     log(`[dry-run] would write an announcement advisory to release-advisories.json:`);
-    log(JSON.stringify(buildAdvisory(next, { critical, message, modes }), null, 2));
+    log(JSON.stringify(announcement, null, 2));
   }
   if (force && tagExists(tag)) {
     log(`[dry-run] --force: tag ${tag} exists → would DELETE it (local + origin) and re-push`);
   }
+  log(`[dry-run] would refresh and validate GeoIP before creating the release commit and tag.`);
   log(`[dry-run] no files written, no git ops executed.`);
   process.exit(0);
 }
 
-if (tagExists(tag)) {
-  if (!force) {
-    console.error(
-      `Refusing: tag ${tag} already exists. ` +
-        (bump.kind === "current"
-          ? `Bump the version (patch/minor/major), or pass --force to re-release ${tag}.`
-          : `Pick a different version, or pass --force to re-release ${tag}.`),
-    );
-    process.exit(1);
-  }
-  // --force: salvage an existing tag. Delete it locally AND on origin so the
-  // `git tag` + push below create a FRESH ref — a same-SHA re-push reports
-  // "up-to-date" and fires no workflow, which is exactly why a plain re-run of
-  // an existing tag does nothing.
+const existingTag = tagExists(tag);
+if (existingTag && !force) {
+  console.error(`Refusing: tag ${tag} already exists. Bump the version or pass --force to re-release an unpublished tag.`);
+  process.exit(1);
+}
+refreshReleaseGeoip();
+if (existingTag) {
   log(`⚠ --force: tag ${tag} exists — deleting it (local + origin) to re-release`);
   retireExistingTag(tag);
 }
 
 /* ─── Apply ─────────────────────────────────────────────────────────── */
 
-// Files to stage into the (single) release commit. Version bumps + the
-// announcement advisory both ride the SAME commit so the advisory is pinned to
-// the tag clients pull.
-const staged: string[] = [];
+// GeoIP, versions and the announcement share the release commit and tag.
+const staged: string[] = [GEOIP_DB];
 
 if (bump.kind !== "current") {
   for (const p of SYNCED_PKGS) writeVersion(p, next);
@@ -285,8 +282,8 @@ if (bump.kind !== "current") {
   staged.push(...SYNCED_PKGS);
 }
 
-if (publish) {
-  const { entry, replaced } = writeAdvisory(next, { critical, message, modes });
+if (announcement) {
+  const { entry, replaced } = writeAdvisory(announcement);
   log(`✓ wrote announcement advisory "${entry.id}" (${entry.severity})`);
   if (replaced.length) {
     log(`  replaced previous advisory(ies): ${replaced.join(", ")}`);
@@ -341,6 +338,11 @@ if (ghMatch) {
 watchCi(tag, actionsUrl);
 
 /* ─── Helpers ──────────────────────────────────────────────────────── */
+
+function refreshReleaseGeoip(): void {
+  const result = spawnSync(process.execPath, [join(ROOT, "scripts/update-geoip.mjs")], { cwd: ROOT, stdio: "inherit" });
+  if (result.status !== 0) process.exit(result.status ?? 1);
+}
 
 function usageAndExit(code = 1): never {
   const out = code === 0 ? console.log : console.error;
@@ -539,6 +541,10 @@ async function continueRelease(): Promise<void> {
     log("[dry-run] would push the current branch and update the unpublished tag with this resume record.");
     return;
   }
+  refreshReleaseGeoip();
+  git("add", GEOIP_DB);
+  if (spawnSync("git", ["diff", "--cached", "--quiet"], { cwd: ROOT }).status !== 0)
+    git("commit", "-m", "build: refresh release GeoIP snapshot");
   git("push", "origin", `HEAD:refs/heads/${currentBranch()}`);
   const localRef = spawnSync("git", ["rev-parse", "--verify", `refs/tags/${targetTag}`], { encoding: "utf8", cwd: ROOT });
   git("tag", "-f", "-a", targetTag, "HEAD", "-m", `${targetTag}\n\n${RESUME_TRAILER} ${runIds.join(",")}`);
@@ -799,56 +805,17 @@ function log(msg: string): void {
   console.log(msg);
 }
 
-interface AdvisoryEntry {
-  id: string;
-  severity: "critical" | "recommended";
-  /** The interrupt gate clients read — always true for a published release. */
-  announce: boolean;
-  affects: string;
-  title: string;
-  message: string;
-  action: { label: string; kind: "update" };
-  /** Install kinds the announcement targets. Omitted = all (see --modes). */
-  modes?: string[];
-}
-
-/** The advisory entry for a published release. `affects: "<version"` means
- *  everyone BELOW this version sees the banner; users on it (or newer) don't. */
-function buildAdvisory(
-  version: string,
-  opts: { critical?: boolean; message?: string; modes?: readonly string[] },
-): AdvisoryEntry {
-  return {
-    id: `update-${version}`,
-    severity: opts.critical ? "critical" : "recommended",
-    // `publish` MEANS "interrupt people about this one", so it's written as an
-    // explicit key rather than left for clients to infer from severity.
-    announce: true,
-    affects: `<${version}`,
-    title: `Update to Openship ${version}`,
-    message:
-      opts.message ??
-      `Openship ${version} is available. See the release notes for what's new — updating is recommended.`,
-    action: { label: "Update now", kind: "update" },
-    // Omitted entirely when targeting everyone, so the manifest stays identical
-    // to what older clients (which ignore `modes`) already understand.
-    ...(opts.modes && opts.modes.length > 0 ? { modes: [...opts.modes] } : {}),
-  };
-}
-
 /** Write the single announcement advisory into release-advisories.json,
  *  preserving the file's $comment gate. One active announcement at a time (the
  *  newest published version); returns any prior advisory ids it replaced. */
 function writeAdvisory(
-  version: string,
-  opts: { critical?: boolean; message?: string; modes?: readonly string[] },
-): { entry: AdvisoryEntry; replaced: string[] } {
+  entry: ReturnType<typeof buildReleaseAdvisory>,
+) {
   const raw = JSON.parse(readFileSync(ADVISORIES, "utf8")) as {
     $comment?: string;
     advisories?: Array<{ id?: string }>;
   };
-  const replaced = (raw.advisories ?? []).map((a) => a.id ?? "").filter(Boolean);
-  const entry = buildAdvisory(version, opts);
+  const replaced = (raw.advisories ?? []).map((a) => a.id ?? "").filter(id => id && id !== entry.id);
   const nextDoc = { ...raw, advisories: [entry] };
   writeFileSync(ADVISORIES, JSON.stringify(nextDoc, null, 2) + "\n");
   return { entry, replaced };

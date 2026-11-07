@@ -1,3 +1,4 @@
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { createHash } from "node:crypto";
 import {
   AppError,
@@ -147,10 +148,10 @@ export async function runClusterRuntime(
         if (!signal.aborted && !(await repos.clusterRuntime.heartbeat(row.id, row.generation)))
           cancellation.abort();
       })
-      .catch(() => cancellation.abort());
+      .catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/system/cluster-runtime.operations"); return cancellation.abort(); });
   }, 20_000);
   const logTimer = setInterval(() => {
-    if (dirty) void persist().catch(() => cancellation.abort());
+    if (dirty) void persist().catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/system/cluster-runtime.operations"); return cancellation.abort(); });
   }, 1000);
   leaseTimer.unref();
   logTimer.unref();
@@ -169,6 +170,8 @@ export async function runClusterRuntime(
         409,
         "CLUSTER_RUNTIME_CONFLICT",
       );
+    if (row.provider !== "k3s" || !plan.networkId || !plan.networkRevision)
+      throw new AppError("This runtime is externally managed.", 409, "CLUSTER_RUNTIME_EXTERNAL");
     const network = await repos.serverCluster.get(ctx.organizationId, plan.networkId);
     if (row.intent === "setup") {
       if (
@@ -341,6 +344,7 @@ export async function runClusterRuntime(
               "The host supports cluster setup and its private interface is available.",
             );
           } catch (error) {
+            observeCaughtError(error, "platform/engine/modules/system/cluster-runtime.operations");
             await step(
               host,
               host.steps.find((entry) => entry.status === "running")?.id ?? "inspect",
@@ -408,6 +412,7 @@ export async function runClusterRuntime(
               joinToken = await checked(bootstrap, (executor) => k3sTools.token(executor));
               break;
             } catch (error) {
+              observeCaughtError(error, "platform/engine/modules/system/cluster-runtime.operations");
               diagnostic = message(error);
               await pause(3000, signal);
             }
@@ -519,15 +524,16 @@ export async function runClusterRuntime(
       row.intent === "setup" ? "cluster.runtime.ready" : "cluster.runtime.removed",
     );
   } catch (error) {
+    observeCaughtError(error, "platform/engine/modules/system/cluster-runtime.operations");
     const reason = message(error);
     for (const host of plan.hosts) {
       const current = host.steps.find((entry) => entry.status === "running");
       if (current) updateNetworkSetupStep(host, current.id, "failed", reason);
     }
-    await writes.catch(() => undefined);
+    await writes.catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/system/cluster-runtime.operations"); return undefined; });
     await repos.clusterRuntime
       .finish(row.id, row.generation, plan, row.intent, reason)
-      .catch(() => undefined);
+      .catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/system/cluster-runtime.operations"); return undefined; });
   } finally {
     clearInterval(logTimer);
     clearInterval(leaseTimer);
@@ -572,6 +578,7 @@ export const clusterRuntimeCollection = {
     const result = await withServerInventoryLock(ctx.organizationId, async () => {
       await fleetAdmin(ctx);
       const cluster = await repos.computeCluster.get(ctx.organizationId, input.clusterId);
+      if (!cluster.networkId) throw new AppError("This runtime is externally managed.", 409, "CLUSTER_RUNTIME_EXTERNAL");
       const network = await repos.serverCluster.get(ctx.organizationId, cluster.networkId);
       if (network.operation && managedNetworkUnsettled(network.operation.status))
         throw new AppError(
@@ -581,8 +588,13 @@ export const clusterRuntimeCollection = {
         );
       const hosts: ClusterRuntimeHost[] = [];
       const controls = cluster.serverIds.length >= 3 ? 3 : 1;
-      for (const [index, serverId] of [...cluster.serverIds].sort().entries()) {
-        const server = await authorizeMember(ctx, serverId);
+      const servers = [];
+      for (const serverId of [...cluster.serverIds].sort())
+        servers.push({ serverId, server: await authorizeMember(ctx, serverId) });
+      // The first control server is the API/build/Edge gateway, so the local server (the one
+      // with the public address) must lead; other members keep their sorted ID order.
+      servers.sort((a, b) => Number(!!b.server.isLocal) - Number(!!a.server.isLocal));
+      for (const [index, { serverId, server }] of servers.entries()) {
         const member = network.members.find((item) => item.serverId === serverId);
         if (!member)
           throw new AppError(

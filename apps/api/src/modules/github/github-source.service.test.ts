@@ -179,15 +179,16 @@ describe("workspace GitHub source service", () => {
     expect(h.sourceCreate).not.toHaveBeenCalled();
   });
 
-  it("builds a state-bound least-privilege GitHub manifest", async () => {
+  it("builds a state-bound GitHub manifest for workflows and repository runners", async () => {
     const result = await beginGitHubManifestFlow(ctx, { name: "Acme Production" });
 
-    expect(result.url).toBe("https://github.com/settings/apps/new");
+    expect(result.url).toMatch(
+      /^https:\/\/github\.com\/settings\/apps\/new\?state=[A-Za-z0-9_-]+$/,
+    );
     expect(result.manifest).toMatchObject({
       url: "https://ship.example",
-      redirect_url: expect.stringMatching(
-        /^https:\/\/ship\.example\/auth\/callback\/github-app\?flow=manifest&state=/,
-      ),
+      // GitHub rejects a redirect_url with a query string; the state rides on result.url instead.
+      redirect_url: "https://ship.example/auth/callback/github-app",
       setup_url: "https://ship.example/auth/callback/github-app",
       public: false,
       request_oauth_on_install: false,
@@ -195,14 +196,17 @@ describe("workspace GitHub source service", () => {
         url: "https://ship.example/api/webhooks/github",
         active: true,
       },
-      default_permissions: {
-        checks: "write",
-        contents: "read",
-        metadata: "read",
-        pull_requests: "read",
-        statuses: "write",
-      },
-      default_events: ["check_run", "pull_request", "push"],
+      default_events: ["check_run", "pull_request", "push", "workflow_job", "workflow_run"],
+    });
+    expect(result.manifest.default_permissions).toEqual({
+      actions: "write",
+      administration: "write",
+      checks: "write",
+      contents: "write",
+      workflows: "write",
+      metadata: "read",
+      pull_requests: "write",
+      statuses: "write",
     });
     expect(h.stateCreate).toHaveBeenCalledWith(
       expect.objectContaining({

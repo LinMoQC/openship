@@ -62,7 +62,7 @@ jobs:
           set -euo pipefail
           short_sha="${GITHUB_SHA:0:12}"
           tag="magic-runtime-${short_sha}"
-          version="0.8.0-magic.${short_sha}"
+          version="0.9.10-magic.${short_sha}"
           node scripts/magic-runtime-identity.mjs
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -151,5 +151,5 @@ jobs:
               --target "$GITHUB_SHA" \
               --prerelease \
               --title "Magic OpenShip runtime ${GITHUB_SHA:0:12}" \
-              --notes "Pinned OpenShip 0.8.0 GitOps runtime (contract 1) for Magic Resume. Built from ${GITHUB_SHA}."
+              --notes "Pinned OpenShip 0.9.10 GitOps runtime (contract 1) for Magic Resume. Built from ${GITHUB_SHA}."
           fi

@@ -19,6 +19,10 @@
     "enterprise": {
       "name": "Enterprise",
       "tagline": "Límites a medida, infraestructura dedicada y un SLA."
+    },
+    "hobby": {
+      "name": "Hobby",
+      "tagline": "Un pequeño servidor administrado para proyectos personales y aplicaciones cotidianas."
     }
   },
   "features": {
@@ -27,9 +31,9 @@
     "anyWorkload": "Ejecuta lo que sea: contenedores, Compose, workers, Postgres, Redis",
     "runningServices": "{runningServices} apps, bases de datos o workers en ejecución",
     "buildMinutes": "{buildMinutes} minutos de build al mes",
+    "sharedBuilds": "Las compilaciones comparten tu servidor, sin límite de tiempo mensual",
     "power": "Hasta {powerCpu} vCPU y {powerRamGb} GB de RAM por app",
     "projects": "{maxProjects} proyectos",
-    "projectsUnlimited": "Proyectos ilimitados",
     "freeSubdomains": "{freeSubdomains} subdominios {freeDomainSuffix} gratis",
     "freeSubdomainsUnlimited": "Subdominios {freeDomainSuffix} gratis e ilimitados",
     "gitDeploys": "Despliega desde GitHub, GitLab o cualquier remoto Git",
@@ -49,7 +53,9 @@
     "selfHostedUnlimited": "Despliegues, proyectos, servidores y dominios ilimitados",
     "selfHostedServices": "Todos los servicios gestionados: Postgres, Redis, correo",
     "selfHostedClients": "CLI, web y escritorio: un solo backend",
-    "selfHostedFreeSubdomains": "{freeSubdomains} subdominios {freeDomainSuffix} gratis al conectarte a Cloud"
+    "selfHostedFreeSubdomains": "{freeSubdomains} subdominios {freeDomainSuffix} gratis al conectarte a Cloud",
+    "monthlyCoverage": "CPU, RAM y almacenamiento incluidos durante el período pagado",
+    "namespaceCapacity": "Total: {namespaceCpu} vCPU, {namespaceRamGb} GB RAM, {namespaceDiskGb} GB de disco"
   },
   "selfHosted": {
     "name": "Autoalojado",
@@ -61,7 +67,12 @@
   "creditPacks": {
     "pack_5k": "{credits} créditos",
     "pack_25k": "{credits} créditos",
-    "pack_100k": "{credits} créditos"
+    "pack_100k": "{credits} créditos",
+    "pack_500": "{credits} créditos",
+    "pack_2k": "{credits} créditos",
+    "pack_400": "{credits} créditos",
+    "pack_1700": "{credits} créditos",
+    "pack_4500": "{credits} créditos"
   },
   "ui": {
     "perMonth": "/mes",

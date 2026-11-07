@@ -50,6 +50,7 @@
  * costs at most one extra minute of detection latency.
  */
 
+import { reportCaughtError as observeCaughtError, diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import { activeDeploymentForProject } from "@repo/platform/engine/lib/active-deployment";
 import { repos, type Deployment, type Project, type Service, type ServiceIncident } from "@repo/db";
 import {
@@ -65,7 +66,7 @@ import {
 } from "@repo/platform/engine/lib/deployment-runtime";
 import { deploymentIsInFlight } from "@repo/platform/engine/modules/projects/deployment-flags";
 import { mapWithLimit } from "@repo/platform/engine/lib/map-with-limit";
-import { liveContainerStatus, resolveLiveServiceState } from "@repo/platform/engine/modules/services/live-state";
+import { liveContainerStatus, liveMatchTiersForDeployment, resolveLiveServiceState } from "@repo/platform/engine/modules/services/live-state";
 import { readLogTail } from "@repo/platform/engine/modules/deployments/stability-audit.service";
 import {
   classifySteadyState,
@@ -80,8 +81,11 @@ import {
   willNotifyFor,
   type WorkloadTarget,
 } from "@repo/platform/engine/modules/monitoring/incident.service";
-import { containerHealthSupported, HEALTH_WATCH_JOB, healthWatchActive } from "./health-watch-policy";
+import { HEALTH_WATCH_JOB, healthWatchActive, isManagedServerIdle } from "./health-watch-policy";
 import { desktopNetworkDisconnected } from "../../lib/desktop-network";
+import { isNetworkUnavailableError } from "../../lib/remote-state";
+import { projectRuntimeLockKey } from "../../lib/project-runtime-lock";
+import { tryWithProvisionLock } from "../../lib/provision-lock";
 
 /** Consecutive observations that must agree before a fault opens or escalates. */
 const AGREE_TICKS = 2;
@@ -136,10 +140,15 @@ const SERVER_CONCURRENCY = 4;
  * runner's own timeout marks the run failed but cannot cancel the body, so nothing
  * recovers it and nothing says so: a monitor that silently stopped monitoring.
  *
- * Falling into the gate-3 catch is the right outcome rather than a workaround — a
- * box that cannot answer inside 90s IS unreachable, and that is the incident an
- * operator needs. Generous enough that no healthy box trips it: the whole budget
- * of 120 inspects over a laggy bridge is a few seconds.
+ * Falling into the gate-3 catch is one miss, not yet a page. A box that cannot
+ * answer inside 90s is unreachable for THIS sweep, but one wedged probe is not an
+ * outage: the sweep already queued on `sweepChain` often gets a fresh connection
+ * and answers at once, and opening here is what mailed "answering again after 0s"
+ * for a daemon that was never down. The incident waits for a second counted miss
+ * (`AGREE_TICKS` / `MIN_CONFIRM_GAP_MS`, the same rule as a workload fault). A
+ * network-wide gap is not this counter — that one is recorded immediately and
+ * stays silent. Generous enough that no healthy box trips the deadline: the whole
+ * budget of 120 inspects over a laggy bridge is a few seconds.
  */
 const GROUP_DEADLINE_MS = 90_000;
 /**
@@ -215,7 +224,7 @@ export interface HealthWatchSummary {
   /** Incidents closed because the workload stopped being watched (see below). */
   stale: number;
   unreachable: number;
-  /** Remote server groups not checked because this desktop has no network. */
+  /** Remote groups not observed because the observer's network/route is unavailable. */
   offline: number;
   /**
    * Projects skipped because their deployment record names a target that cannot be
@@ -282,12 +291,29 @@ interface WatchMemory {
  */
 const MEMORY = new Map<string, WatchMemory>();
 
+/**
+ * Consecutive daemon misses per (server × org), this process only.
+ *
+ * Same split as `MEMORY`: losing it costs re-earning the second observation,
+ * never a second page. An open `server_unreachable` row dedups the next miss,
+ * including the one that lands after a control-plane restart emptied this map.
+ */
+interface ServerMiss {
+  /** Misses that counted. A repeat inside `MIN_CONFIRM_GAP_MS` does not. */
+  agreed: number;
+  /** When the last COUNTED miss landed. */
+  lastSeenAtMs: number;
+}
+
+const SERVER_MISSES = new Map<string, ServerMiss>();
+
 /** Latest authoritative observation exposed to the org-wide Monitoring → Health
  * surface. This is deliberately fed by the existing grouped sweep/event hybrid:
  * the dashboard never opens one watcher or one request per container. */
 export interface WorkloadHealthSnapshot {
   organizationId: string;
   projectId: string;
+  deploymentId: string;
   projectName: string;
   projectSlug: string;
   serviceId: string | null;
@@ -327,6 +353,9 @@ interface Workload {
   serviceKey: string;
   serviceName: string;
   containerId: string;
+  trackedContainerId?: string | null;
+  /** Only an unambiguous native/adopted identity can heal a stored binding. */
+  refreshBinding?: { serviceUpdatedAt: Date };
   /** False when the operator stopped this specific service. */
   expectRunning: boolean;
 }
@@ -361,19 +390,20 @@ const LOCAL_SERVER_KEY = "__local__";
  * accelerator names groups exactly the way the sweep does — the whole filter
  * contract is this string.
  */
-export function watchGroupKey(serverId: string | null, organizationId: string): string {
-  return `${serverId ?? LOCAL_SERVER_KEY}::${organizationId}`;
+export function watchGroupKey(serverId: string | null, organizationId: string, projectId?: string): string {
+  return `${serverId ?? LOCAL_SERVER_KEY}::${organizationId}${projectId ? `::${projectId}` : ""}`;
 }
 
 export function parseWatchGroupKey(key: string): {
   serverId: string | null;
   organizationId: string;
+  projectId?: string;
 } {
-  const split = key.indexOf("::");
-  const serverId = split < 0 ? key : key.slice(0, split);
+  const [serverId, organizationId = "", projectId] = key.split("::");
   return {
     serverId: serverId === LOCAL_SERVER_KEY ? null : serverId,
-    organizationId: split < 0 ? "" : key.slice(split + 2),
+    organizationId,
+    ...(projectId ? { projectId } : {}),
   };
 }
 
@@ -381,8 +411,6 @@ export function parseWatchGroupKey(key: string): {
 type WatchTarget =
   /** A daemon we can name. `null` is the control plane's own socket. */
   | { kind: "docker"; serverId: string | null }
-  /** Runs on Oblien — nothing here can observe it. */
-  | { kind: "cloud" }
   /** The record names a target that resolves to no daemon. See below. */
   | { kind: "unresolved"; reason: string };
 
@@ -402,7 +430,7 @@ type WatchTarget =
  *     `resolveEffectiveTarget` says so in as many words ("UI chose 'server' target but
  *     serverId may be missing → still route to SSH") and the webmail installer writes it.
  *     It resolves to the org's ONE server, while a null key names the local socket.
- *   - `cloudWorkspaceId` is the canonical "this is a cloud project" test (project.ts),
+ *   - `workspaceId` is the canonical "this is a cloud project" test (project.ts),
  *     and it outranks a stale local `deployTarget` on the active deployment: after a
  *     promote the workload runs on Oblien whatever the last local snapshot says.
  *
@@ -429,8 +457,15 @@ async function resolveWatchTargets(
 
   for (const { project, dep, meta } of projects) {
     const effective = resolveEffectiveTarget(base, meta);
-    if (project.cloudWorkspaceId || effective === "cloud") {
-      out.set(dep.id, { kind: "cloud" });
+    if (project.workspaceId || effective === "cloud") {
+      if (!meta.serverId || meta.serverId !== project.serverId ||
+          meta.managedServer?.projectId !== project.id ||
+          meta.managedServer.ownerWorkspaceId !== project.workspaceId) {
+        out.set(dep.id, { kind: "unresolved", reason: "has no matching managed server execution binding" });
+      } else {
+        pending.push({ dep, meta });
+        referenced.add(meta.serverId);
+      }
       continue;
     }
     if (effective !== "server") {
@@ -567,7 +602,7 @@ export function runCurrentHealthScan(
   CURRENT_HEALTH_SCAN_IN_FLIGHT.set(organizationId, scan);
   void scan.then(
     () => CURRENT_HEALTH_SCAN_IN_FLIGHT.delete(organizationId),
-    () => CURRENT_HEALTH_SCAN_IN_FLIGHT.delete(organizationId),
+    () => { /* diagnostics-ignore: The original scan/sweep promise is returned and its rejection is observed; this branch maintains sequencing. */ return CURRENT_HEALTH_SCAN_IN_FLIGHT.delete(organizationId); },
   );
   return scan;
 }
@@ -575,9 +610,11 @@ export function runCurrentHealthScan(
 function enqueueSweep(opts?: HealthSweepOptions): Promise<HealthWatchSummary> {
   const next = sweepChain.then(
     () => sweepOnce(opts),
-    () => sweepOnce(opts),
+    () => { /* diagnostics-ignore: The original scan/sweep promise is returned and its rejection is observed; this branch maintains sequencing. */ return sweepOnce(opts); },
   );
-  sweepChain = next.catch(() => {});
+  sweepChain = next.catch((diagnosticFailure) => {
+    observeCaughtError(diagnosticFailure, "platform/engine/modules/monitoring/health-watch");
+  });
   return next;
 }
 
@@ -601,7 +638,6 @@ async function sweepOnce(opts?: HealthSweepOptions): Promise<HealthWatchSummary>
   };
 
   const base = getPlatform().target;
-  if (!containerHealthSupported()) return summary;
   const projects = opts?.organizationId
     ? (await repos.project.listByOrganization(opts.organizationId, { page: 1, perPage: 5000 })).rows
     : await repos.project.listAllForScan();
@@ -634,7 +670,7 @@ async function sweepOnce(opts?: HealthSweepOptions): Promise<HealthWatchSummary>
     const candidate = project.activeDeploymentId ? activeDeps.get(project.activeDeploymentId) : undefined;
     const dep = activeDeploymentForProject(project, candidate);
     if (candidate && !dep) {
-      console.warn(`[health-watch] Ignoring invalid active-deployment binding for project ${project.id}`);
+      errorDiagnostics.warn("platform/engine/modules/monitoring/health-watch", `[health-watch] Ignoring invalid active-deployment binding for project ${project.id}`);
       continue;
     }
     // Nothing deployed, or the operator turned it off. Both are permanent until
@@ -653,11 +689,7 @@ async function sweepOnce(opts?: HealthSweepOptions): Promise<HealthWatchSummary>
 
   for (const { project, dep, meta } of live) {
     const target = watchTargets.get(dep.id);
-    // Cloud workloads run on Oblien, whose runtime declares no stability probe.
-    if (!target || target.kind === "cloud") {
-      retired.add(project.id);
-      continue;
-    }
+    if (!target) continue;
     if (target.kind === "unresolved") {
       unresolved.push(`${project.slug} (${target.reason})`);
       unknownCandidates.push({
@@ -672,7 +704,12 @@ async function sweepOnce(opts?: HealthSweepOptions): Promise<HealthWatchSummary>
     // containers. Skipped WITHOUT retiring — an open incident stays open, because
     // we genuinely don't know anything about this project right now.
     const newest = latestDeps.get(project.id) ?? dep;
-    if (deploymentIsInFlight(newest) || now - newest.updatedAt.getTime() < DEPLOY_GRACE_MS) {
+    const handoverPending = newest.roleHandover && newest.roleHandover.phase !== "complete";
+    if (
+      deploymentIsInFlight(newest) ||
+      handoverPending ||
+      now - newest.updatedAt.getTime() < DEPLOY_GRACE_MS
+    ) {
       unknownCandidates.push({ project, dep, meta, serverId: target.serverId });
       continue;
     }
@@ -682,7 +719,7 @@ async function sweepOnce(opts?: HealthSweepOptions): Promise<HealthWatchSummary>
 
   if (unresolved.length > 0) {
     summary.unresolved = unresolved.length;
-    console.warn(
+    errorDiagnostics.warn("platform/engine/modules/monitoring/health-watch",
       `[health-watch] not watched, unresolvable deploy target: ${unresolved.join("; ")}`,
     );
   }
@@ -690,7 +727,7 @@ async function sweepOnce(opts?: HealthSweepOptions): Promise<HealthWatchSummary>
   // Group by server AND org: the SSH credentials for a box are org-scoped.
   const groups = new Map<string, Candidate[]>();
   for (const candidate of candidates) {
-    const key = watchGroupKey(candidate.serverId, candidate.dep.organizationId);
+    const key = candidateWatchGroupKey(candidate);
     const bucket = groups.get(key);
     if (bucket) bucket.push(candidate);
     else groups.set(key, [candidate]);
@@ -699,13 +736,14 @@ async function sweepOnce(opts?: HealthSweepOptions): Promise<HealthWatchSummary>
   const allGroupKeys = [...groups.keys()];
   const filtered = opts?.onlyServerKeys;
   if (filtered) {
-    for (const key of allGroupKeys) if (!filtered.has(key)) groups.delete(key);
+    for (const [key, group] of groups) if (!filtered.has(key) &&
+        !filtered.has(watchGroupKey(group[0]!.serverId, group[0]!.dep.organizationId))) groups.delete(key);
   }
-  summary.servers = groups.size;
+  summary.servers = new Set([...groups.values()].map(group => watchGroupKey(group[0]!.serverId, group[0]!.dep.organizationId))).size;
 
   const sweptGroups = [...groups.values()];
   const unknownInScope = filtered
-    ? unknownCandidates.filter(candidate => filtered.has(watchGroupKey(candidate.serverId, candidate.dep.organizationId)))
+    ? unknownCandidates.filter(candidate => filtered.has(candidateWatchGroupKey(candidate)) || filtered.has(watchGroupKey(candidate.serverId, candidate.dep.organizationId)))
     : unknownCandidates;
   const serviceRows = await repos.service.listByProjects([
     ...new Set([
@@ -731,6 +769,8 @@ async function sweepOnce(opts?: HealthSweepOptions): Promise<HealthWatchSummary>
     countedWorkloads,
     summary,
     currentOnly: opts?.currentOnly === true,
+    inspectedByServer: new Map<string, number>(),
+    unreachableServers: new Set<string>(),
   };
 
   if (unknownInScope.length > 0) {
@@ -841,7 +881,7 @@ async function sweepOnce(opts?: HealthSweepOptions): Promise<HealthWatchSummary>
       else await stopAllContainerEventWatchers();
     } catch (err) {
       summary.errors++;
-      console.error(`[health-watch] event watcher renewal failed: ${safeErrorMessage(err)}`);
+      errorDiagnostics.error("platform/engine/modules/monitoring/health-watch", `[health-watch] event watcher renewal failed: ${safeErrorMessage(err)}`, err);
     }
   }
 
@@ -858,6 +898,12 @@ interface GroupContext {
   countedWorkloads: Set<string>;
   summary: HealthWatchSummary;
   currentOnly: boolean;
+  inspectedByServer: Map<string, number>;
+  unreachableServers: Set<string>;
+}
+
+function candidateWatchGroupKey(candidate: Candidate) {
+  return watchGroupKey(candidate.serverId, candidate.dep.organizationId, candidate.meta.managedServer?.projectId);
 }
 
 /**
@@ -897,8 +943,8 @@ async function publishUnknownCandidates(
     } catch (err) {
       ctx.summary.errors++;
       ctx.swept.delete(candidate.project.id);
-      console.error(
-        `[health-watch] ${candidate.project.slug}: could not resolve workloads: ${safeErrorMessage(err)}`,
+      errorDiagnostics.error("platform/engine/modules/monitoring/health-watch",
+        `[health-watch] ${candidate.project.slug}: could not resolve workloads: ${safeErrorMessage(err)}`, err,
       );
     }
   }
@@ -919,6 +965,110 @@ async function incidentServerId(
   organizationId: string,
 ): Promise<string | null> {
   return serverId ?? (await repos.server.findLocal(organizationId))?.id ?? null;
+}
+
+/**
+ * Write the server-scoped incident for a miss that is allowed to record.
+ *
+ * No server row means nothing to dedup against, so this does not notify — an
+ * undeduped alert would repeat every minute.
+ */
+async function commitServerUnreachable(
+  summary: HealthWatchSummary,
+  opts: {
+    organizationId: string;
+    serverId: string | null;
+    reason: string;
+    affectedProjects: number;
+    cause: unknown;
+  },
+): Promise<void> {
+  const target = await incidentServerId(opts.serverId, opts.organizationId);
+  if (!target) {
+    summary.errors++;
+    errorDiagnostics.error("platform/engine/modules/monitoring/health-watch",
+      `[health-watch] local docker unreachable: ${opts.reason}`, opts.cause,
+    );
+    return;
+  }
+  try {
+    const existing = await repos.serviceIncident.findOpenForServer(target);
+    const server = existing ? undefined : (await repos.server.getMany([target])).get(target);
+    const transition = await recordServerUnreachable({
+      organizationId: opts.organizationId,
+      serverId: target,
+      serverName: existing?.serviceName ?? server?.name ?? "this server",
+      reason: opts.reason,
+      affectedProjects: opts.affectedProjects,
+      existing,
+    });
+    if (transition === "opened") summary.opened++;
+  } catch (inner) {
+    summary.errors++;
+    errorDiagnostics.error("platform/engine/modules/monitoring/health-watch",
+      `[health-watch] could not record unreachable server: ${safeErrorMessage(inner)}`, inner,
+    );
+  }
+}
+
+/**
+ * One observation that this box's daemon did not answer.
+ *
+ * Same notifying rule as a workload fault: `AGREE_TICKS` counted misses, spaced
+ * at least `MIN_CONFIRM_GAP_MS` apart, before an incident is opened. One deadline
+ * — or one refused connection — is `pending`, which is what asks the accelerator
+ * for a second look. An incident that is already open still dedups on this miss;
+ * the row, not this counter, is what makes a second page impossible.
+ */
+async function observeDaemonMiss(
+  summary: HealthWatchSummary,
+  opts: {
+    organizationId: string;
+    serverId: string | null;
+    reason: string;
+    affectedProjects: number;
+    cause: unknown;
+  },
+): Promise<void> {
+  const key = watchGroupKey(opts.serverId, opts.organizationId);
+  const nowMs = Date.now();
+  const previous = SERVER_MISSES.get(key);
+  const held = previous !== undefined && nowMs - previous.lastSeenAtMs < MIN_CONFIRM_GAP_MS;
+  const agreed = held && previous ? previous.agreed : (previous?.agreed ?? 0) + 1;
+  SERVER_MISSES.set(key, {
+    agreed,
+    lastSeenAtMs: held && previous ? previous.lastSeenAtMs : nowMs,
+  });
+
+  let existing: ServiceIncident | undefined;
+  try {
+    const target = await incidentServerId(opts.serverId, opts.organizationId);
+    if (!target) {
+      // No server row to hang the incident on (a control-plane docker socket that
+      // was never registered). Nothing to dedup against, so don't notify at all.
+      summary.errors++;
+      errorDiagnostics.error("platform/engine/modules/monitoring/health-watch",
+        `[health-watch] local docker unreachable: ${opts.reason}`, opts.cause,
+      );
+      return;
+    }
+    existing = await repos.serviceIncident.findOpenForServer(target);
+  } catch (inner) {
+    summary.errors++;
+    errorDiagnostics.error("platform/engine/modules/monitoring/health-watch",
+      `[health-watch] could not record unreachable server: ${safeErrorMessage(inner)}`, inner,
+    );
+    return;
+  }
+
+  // Inside the confirm gap, or still one short of agreement and nothing open yet.
+  // A held miss carries no new information, so it does not touch an open row.
+  if (held || (agreed < AGREE_TICKS && !existing)) {
+    if (!existing) summary.pending++;
+    return;
+  }
+
+  await commitServerUnreachable(summary, opts);
 }
 
 async function sweepServerGroup(ctx: GroupContext): Promise<void> {
@@ -942,6 +1092,19 @@ async function sweepServerGroup(ctx: GroupContext): Promise<void> {
       GROUP_DEADLINE_MS,
       GROUP_DEADLINE_REASON,
     );
+
+    // Only a completed read can forgive a miss or announce recovery. A container
+    // list can succeed while an inspect still hangs; timed-out reads keep running
+    // detached and must never reach this transition. Snapshot-only reads do not
+    // change the continuous watcher's confirmation state.
+    if (handle.listed && !ctx.currentOnly) {
+      SERVER_MISSES.delete(watchGroupKey(serverId, organizationId));
+      const target = await incidentServerId(serverId, organizationId);
+      if (target) {
+        const existing = await repos.serviceIncident.findOpenForServer(target);
+        if (existing && (await resolveServerIncident(existing))) summary.resolved++;
+      }
+    }
   } catch (err) {
     const reason = safeErrorMessage(err);
     // Set before anything else: from here the group's verdict is decided WITHOUT
@@ -955,6 +1118,7 @@ async function sweepServerGroup(ctx: GroupContext): Promise<void> {
     // can land between the two).
     for (const candidate of group) ctx.swept.delete(candidate.project.id);
     await publishUnknownCandidates(ctx, group);
+    if (isManagedServerIdle(err)) return;
 
     // The network may have disappeared while SSH was connecting. Preserve any
     // existing incidents, but do not open one against each healthy remote host.
@@ -963,14 +1127,18 @@ async function sweepServerGroup(ctx: GroupContext): Promise<void> {
       return;
     }
 
+    const networkUnavailable = isNetworkUnavailableError(err);
     if (ctx.currentOnly) {
       if (handle.listed && reason !== GROUP_DEADLINE_REASON) {
         summary.errors++;
-        console.error(
-          `[health-watch] ${serverId ?? "local docker"}: current scan failed after the daemon answered: ${reason}`,
+        errorDiagnostics.error("platform/engine/modules/monitoring/health-watch",
+          `[health-watch] ${serverId ?? "local docker"}: current scan failed after the daemon answered: ${reason}`, err,
         );
+      } else if (networkUnavailable) {
+        summary.offline++;
       } else {
-        summary.unreachable++;
+        ctx.unreachableServers.add(watchGroupKey(serverId, organizationId));
+        summary.unreachable = ctx.unreachableServers.size;
       }
       return;
     }
@@ -979,9 +1147,9 @@ async function sweepServerGroup(ctx: GroupContext): Promise<void> {
     // came back. PAST that point the daemon has demonstrably answered, so a failure
     // is ours — a rejected incident write, a bug — and reporting it as an unreachable
     // box tells every project on a healthy machine that it can't be monitored, with
-    // a Postgres error for a message. This tick may even have just announced the box
-    // answering again (`readServerGroup` closes that incident before the loop), so
-    // the pair would read "is answering again" followed by "can't reach Docker".
+    // a Postgres error for a message. Server recovery writes also happen only after
+    // the bounded daemon read completes, so a slow recovery write cannot be
+    // mistaken for a daemon deadline.
     //
     // The DEADLINE is exempt: an inspect that hangs after the list came back is a
     // wedged daemon or a dead bridge, which is precisely what gate 3 is for. A
@@ -989,39 +1157,38 @@ async function sweepServerGroup(ctx: GroupContext): Promise<void> {
     // rejections, so nothing else the daemon does arrives here as an exception.
     if (handle.listed && reason !== GROUP_DEADLINE_REASON) {
       summary.errors++;
-      console.error(
-        `[health-watch] ${serverId ?? "local docker"}: sweep failed after the daemon answered: ${reason}`,
+      errorDiagnostics.error("platform/engine/modules/monitoring/health-watch",
+        `[health-watch] ${serverId ?? "local docker"}: sweep failed after the daemon answered: ${reason}`, err,
       );
       return;
     }
 
     // One incident for the box; every project in this group keeps whatever incidents
     // it had, and none of them are retired (they're absent from `swept`).
-    summary.unreachable++;
-    const target = await incidentServerId(serverId, organizationId);
-    if (!target) {
-      // No server row to hang the incident on (a control-plane docker socket that
-      // was never registered). Nothing to dedup against, so don't notify at all —
-      // an undeduped alert here would repeat every minute.
-      summary.errors++;
-      console.error(`[health-watch] local docker unreachable: ${reason}`);
-      return;
+    if (networkUnavailable) summary.offline++;
+    else {
+      ctx.unreachableServers.add(watchGroupKey(serverId, organizationId));
+      summary.unreachable = ctx.unreachableServers.size;
     }
-    try {
-      const existing = await repos.serviceIncident.findOpenForServer(target);
-      const server = existing ? undefined : (await repos.server.getMany([target])).get(target);
-      const transition = await recordServerUnreachable({
+    // A network-wide gap is recorded at once and stays silent — it is not evidence
+    // that this host's daemon missed. A daemon miss pages only on the second
+    // counted observation, unless an incident is already open.
+    if (networkUnavailable) {
+      await commitServerUnreachable(summary, {
         organizationId,
-        serverId: target,
-        serverName: existing?.serviceName ?? server?.name ?? "this server",
+        serverId,
         reason,
         affectedProjects: group.length,
-        existing,
+        cause: err,
       });
-      if (transition === "opened") summary.opened++;
-    } catch (inner) {
-      summary.errors++;
-      console.error(`[health-watch] could not record unreachable server: ${safeErrorMessage(inner)}`);
+    } else {
+      await observeDaemonMiss(summary, {
+        organizationId,
+        serverId,
+        reason,
+        affectedProjects: group.length,
+        cause: err,
+      });
     }
   } finally {
     // Tears down the SSH loopback bridge; a no-op on the socket transport. On a
@@ -1034,8 +1201,8 @@ async function sweepServerGroup(ctx: GroupContext): Promise<void> {
       // failed observation, and reporting the sweep as failed would hide one that worked.
       // But it is the one failure in this file that LEAKS — an ssh child process and its
       // fd — and swallowed without a word it leaked once a minute with nothing to see.
-      console.error(
-        `[health-watch] ${serverId ?? "local docker"}: transport did not close cleanly: ${safeErrorMessage(err)}`,
+      errorDiagnostics.error("platform/engine/modules/monitoring/health-watch",
+        `[health-watch] ${serverId ?? "local docker"}: transport did not close cleanly: ${safeErrorMessage(err)}`, err,
       );
     }
   }
@@ -1087,7 +1254,7 @@ async function readServerGroup(
     // function of the group KEY instead of of whichever project happened to sort first,
     // which is the invariant every verdict in this group depends on.
     const resolved = await resolveDeploymentRuntimeForRead({
-      meta: { ...((first.dep.meta ?? {}) as DeploymentMeta), serverId: serverId ?? undefined },
+      meta: { ...((first.dep.meta ?? {}) as DeploymentMeta), serverId: serverId ?? undefined, runtimeMode: "docker" },
       organizationId,
     });
     handle.runtime = resolved.runtime;
@@ -1098,23 +1265,16 @@ async function readServerGroup(
     }
 
     const live = await runtime.listAllContainers();
+    // A list that lands after the deadline already wrote this group off is not an
+    // answer. `withTimeout` cannot cancel the read, so this is the call that was
+    // still in flight. Forgiving it would clear the miss the catch just counted,
+    // and resolving here is what mailed "answering again after 0s".
+    if (handle.abandoned) return;
     handle.listed = true;
-
-    // The box answered — close its unreachable incident if it had one. Through the
-    // same resolver the open path uses, so a LOCAL group can close the incident it
-    // opened: that one hangs on the self-server row, which keying this off `serverId`
-    // alone (null, here) could never reach.
-    if (!ctx.currentOnly) {
-      const incidentTarget = await incidentServerId(serverId, organizationId);
-      if (incidentTarget) {
-        const stale = await repos.serviceIncident.findOpenForServer(incidentTarget);
-        if (stale && (await resolveServerIncident(stale))) summary.resolved++;
-      }
-    }
 
     const byContainerId = new Map(live.map((c) => [c.id, c]));
     const sampler = runtime.supports("stabilityProbe") ? runtime.sampleStability?.bind(runtime) : undefined;
-    let inspectBudget = MAX_INSPECTS_PER_SERVER;
+    const serverKey = watchGroupKey(serverId, organizationId);
 
     const pending: { candidate: Candidate; workload: Workload; container: ListedContainer | null }[] =
       [];
@@ -1129,8 +1289,8 @@ async function readServerGroup(
         workloads = await resolveWorkloads(candidate, ctx.serviceRows.get(candidate.project.id) ?? [], live);
       } catch (err) {
         summary.errors++;
-        console.error(
-          `[health-watch] ${candidate.project.slug}: could not resolve workloads: ${safeErrorMessage(err)}`,
+        errorDiagnostics.error("platform/engine/modules/monitoring/health-watch",
+          `[health-watch] ${candidate.project.slug}: could not resolve workloads: ${safeErrorMessage(err)}`, err,
         );
         // Not swept after all — don't let a failed read retire its incidents.
         ctx.swept.delete(candidate.project.id);
@@ -1154,7 +1314,7 @@ async function readServerGroup(
     // resolution. Event handling reads this; it never derives ownership itself.
     if (!ctx.currentOnly) {
       TRACKED_CONTAINERS.set(
-        watchGroupKey(serverId, organizationId),
+        candidateWatchGroupKey(first),
         new Set(pending.map((entry) => entry.workload.containerId)),
       );
     }
@@ -1178,11 +1338,13 @@ async function readServerGroup(
       ctx.visited.add(key);
       let sample: ContainerStabilitySample | null = null;
       if (container && sampler) {
-        if (inspectBudget > 0) {
-          inspectBudget--;
+        const inspected = ctx.inspectedByServer.get(serverKey) ?? 0;
+        if (inspected < MAX_INSPECTS_PER_SERVER) {
+          ctx.inspectedByServer.set(serverKey, inspected + 1);
           try {
             sample = await sampler(workload.containerId);
-          } catch {
+          } catch (diagnosticFailure) {
+            observeCaughtError(diagnosticFailure, "platform/engine/modules/monitoring/health-watch");
             // An inspect that fails on a container the list view just showed is a
             // transient — treat it as no information, never as a fault. Counted,
             // because a box where this is the steady state is a box we are not
@@ -1219,6 +1381,7 @@ async function readServerGroup(
           openByKey: ctx.openByKey,
           summary,
           currentOnly: ctx.currentOnly,
+          isAbandoned: () => handle.abandoned === true,
         });
       } catch (err) {
         // One workload's incident write rejecting (a service row deleted mid-sweep
@@ -1232,8 +1395,8 @@ async function readServerGroup(
           publishHealthSnapshot(candidate, workload, "unknown");
           summary.indeterminate++;
         }
-        console.error(
-          `[health-watch] ${candidate.project.slug}/${workload.serviceName}: ${safeErrorMessage(err)}`,
+        errorDiagnostics.error("platform/engine/modules/monitoring/health-watch",
+          `[health-watch] ${candidate.project.slug}/${workload.serviceName}: ${safeErrorMessage(err)}`, err,
         );
       }
     });
@@ -1251,7 +1414,7 @@ function inspectRank(container: ListedContainer | null): number {
  * Which containers on this host does this project expect to be up?
  *
  * Compose/monorepo projects: one workload per service the ACTIVE release
- * deployed. Single-app projects: the deployment's own container.
+ * deployed. Single-app projects: the deployment's web and recorded role containers.
  */
 async function resolveWorkloads(
   candidate: Candidate,
@@ -1264,15 +1427,28 @@ async function resolveWorkloads(
     // Single-app. `runsAsContainer` is load-bearing: a bare deploy writes its
     // systemd handle into `containerId`, and inspecting that id would report a
     // missing container and page about a perfectly healthy service.
-    if (!dep.containerId || !runsAsContainer(meta)) return [];
+    if (!runsAsContainer(meta)) return [];
     return [
-      {
+      ...(dep.containerId
+        ? [
+            {
+              serviceId: null,
+              serviceKey: SINGLE_APP_KEY,
+              serviceName: project.name,
+              containerId: dep.containerId,
+              expectRunning: true,
+            },
+          ]
+        : []),
+      ...(dep.roleContainers ?? []).map((ref) => ({
         serviceId: null,
-        serviceKey: SINGLE_APP_KEY,
-        serviceName: project.name,
-        containerId: dep.containerId,
+        // Stable across releases, like __app__: a new container must not open
+        // another incident for the same broken replica. Service IDs use svc_.
+        serviceKey: `__role__:${ref.role}:${ref.replica}`,
+        serviceName: `${ref.role} · ${ref.replica}`,
+        containerId: ref.containerId,
         expectRunning: true,
-      },
+      })),
     ];
   }
 
@@ -1285,6 +1461,7 @@ async function resolveWorkloads(
     projectId: project.id,
     slug: project.slug,
     trackedIds: Object.fromEntries([...hints].map(([id, row]) => [id, row.containerId])),
+    tiers: liveMatchTiersForDeployment({ adopt: meta.adopt }),
   });
 
   const workloads: Workload[] = [];
@@ -1296,13 +1473,31 @@ async function resolveWorkloads(
     const hint = hints.get(service.id);
     // Not part of the active release (added but never deployed, or skipped).
     if (!hint) continue;
-    const containerId = matches.get(service.id)?.containerId ?? hint.containerId;
+    const match = matches.get(service.id);
+    const replacement = live.find((row) => row.id === match?.containerId);
+    // A carried service may retain an older deployment label. Its stable
+    // project/service identity is the lookup key; the active DB release is
+    // independently guarded when the observed binding is committed.
+    const nativeProject = replacement?.labels["openship.project"];
+    const nativeService = replacement?.labels["openship.service"];
+    const replacementConflicts = match?.containerId !== hint.containerId && (
+      (nativeProject && nativeProject !== project.id) ||
+      (nativeService && nativeService !== service.name) ||
+      (match?.duplicates.length ?? 0) > 0
+    );
+    const containerId = replacementConflicts ? hint.containerId : (match?.containerId ?? hint.containerId);
     if (!containerId) continue;
     workloads.push({
       serviceId: service.id,
       serviceKey: service.id,
       serviceName: service.name,
       containerId,
+      trackedContainerId: hint.containerId,
+      refreshBinding: (
+        hint.containerId && containerId !== hint.containerId && match?.status === "running" && match.duplicates.length === 0 &&
+        !replacementConflicts &&
+        (match.matchedBy === "label" || (meta.adopt === true && match.matchedBy === "compose"))
+      ) ? { serviceUpdatedAt: service.updatedAt } : undefined,
       // Gate 2. `service_deployment.status` is never read for LIVENESS — but it
       // is the only record of INTENT, written by stopServiceContainer.
       expectRunning: service.enabled !== false && hint.status !== "stopped",
@@ -1403,6 +1598,7 @@ async function evaluate(args: {
   openByKey: Map<string, ServiceIncident>;
   summary: HealthWatchSummary;
   currentOnly: boolean;
+  isAbandoned: () => boolean;
 }): Promise<void> {
   const { candidate, workload, key, container, summary } = args;
   const previous = MEMORY.get(key);
@@ -1499,6 +1695,50 @@ async function evaluate(args: {
     healthySince: verdict.kind ? null : (previous?.kind === null ? (previous.healthySince ?? nowMs) : nowMs),
     lastResolvedAtMs: previous?.lastResolvedAtMs ?? null,
   };
+  // Keep an unstable recovery visible until it earns its all-clear. Heal the
+  // binding only when this observation may also resolve the existing incident.
+  if (verdict.clear === "healthy" && existing) {
+    const flapping =
+      memory.lastResolvedAtMs !== null &&
+      existing.openedAt.getTime() - memory.lastResolvedAtMs < FLAP_WINDOW_MS;
+    if (flapping && nowMs - (memory.healthySince ?? nowMs) < RECOVERY_HOLD_MS) {
+      MEMORY.set(key, memory);
+      summary.recovering++;
+      return;
+    }
+  }
+
+  // A healthy successor is a runtime observation, not a new release. Rebind
+  // before resolving its outage, and abandon the sample if a concurrent deploy,
+  // stop or another repair already changed the authoritative identity.
+  if (verdict.clear === "healthy" && workload.expectRunning && workload.refreshBinding &&
+      workload.serviceId && workload.trackedContainerId) {
+    const input = {
+      projectId: candidate.project.id,
+      organizationId: candidate.project.organizationId,
+      deploymentId: candidate.dep.id,
+      serviceId: workload.serviceId,
+      expectedContainerId: workload.trackedContainerId,
+      containerId: workload.containerId,
+      expectedProjectUpdatedAt: candidate.project.updatedAt,
+      expectedServiceUpdatedAt: workload.refreshBinding.serviceUpdatedAt,
+    };
+    // Never contend with an environment apply, restart or deployment. Their
+    // replacement may be healthy but not committed yet. Reuse the runtime
+    // writer's two-layer lock, skipping busy projects instead of queuing a stale
+    // observation behind a live cutover.
+    const refreshed = await tryWithProvisionLock(projectRuntimeLockKey(candidate.project.id), () =>
+      args.isAbandoned() ? Promise.resolve(false) : repos.service.refreshContainerBinding(input),
+    );
+    if (args.isAbandoned()) return;
+    if (!refreshed) {
+      summary.indeterminate++;
+      publishHealthSnapshot(candidate, workload, "unknown", nowMs);
+      return;
+    }
+    workload.trackedContainerId = workload.containerId;
+  }
+
   MEMORY.set(key, memory);
 
   if (!verdict.kind) {
@@ -1516,18 +1756,6 @@ async function evaluate(args: {
         summary.stale++;
         args.openByKey.delete(key);
       }
-      return;
-    }
-    // Healthy, with an incident to close. Normally that happens on this one good
-    // observation. The exception is a workload we have already watched break right
-    // after a recovery — see `RECOVERY_HOLD_MS`. Re-breaking inside the hold leaves
-    // the SAME incident open, so the whole episode stays one alert instead of one
-    // per cycle.
-    const flapping =
-      memory.lastResolvedAtMs !== null &&
-      existing.openedAt.getTime() - memory.lastResolvedAtMs < FLAP_WINDOW_MS;
-    if (flapping && nowMs - (memory.healthySince ?? nowMs) < RECOVERY_HOLD_MS) {
-      summary.recovering++;
       return;
     }
     if (await resolveWorkloadIncident(existing, candidate.project.name)) {
@@ -1552,6 +1780,8 @@ async function evaluate(args: {
         exitCode: sample?.exitCode ?? null,
         restartCount: sample?.restartCount ?? existing.restartCount,
         containerId: workload.containerId,
+        deploymentId: candidate.dep.id,
+        trackedContainerId: workload.trackedContainerId ?? null,
       });
     }
     return;
@@ -1566,6 +1796,8 @@ async function evaluate(args: {
     serviceName: workload.serviceName,
     serverId: candidate.serverId,
     containerId: workload.containerId,
+    deploymentId: candidate.dep.id,
+    trackedContainerId: workload.trackedContainerId ?? null,
   };
 
   // Read the log tail ONLY when this will produce a message. Otherwise a box full
@@ -1601,6 +1833,7 @@ function publishHealthSnapshot(
   HEALTH_SNAPSHOTS.set(memoryKey(candidate.project.id, workload.serviceKey), {
     organizationId: candidate.project.organizationId,
     projectId: candidate.project.id,
+    deploymentId: candidate.dep.id,
     projectName: candidate.project.name,
     projectSlug: candidate.project.slug,
     serviceId: workload.serviceId,

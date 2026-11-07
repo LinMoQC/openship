@@ -1,5 +1,5 @@
 import {
-  isServicesFramework,
+  clusterDatabasePodCount,
   resolveWorkload,
   type ClusterWorkloadStatus,
   type ClusterWorkloadConfig,
@@ -8,6 +8,9 @@ import {
 import type { Service, ServiceContainer } from "@/lib/api/services";
 import type { ProjectConnection } from "@/lib/api/connections";
 import type { ClusterDatabase } from "@repo/contracts";
+import { hasSeparateApplication } from "@/lib/project-application";
+import { runtimeRoleState, type RuntimeRole, type ProjectRuntimeRoles } from "@/lib/runtime-roles";
+export { hasSeparateApplication } from "@/lib/project-application";
 
 /** A projection of saved project data. Canvas positions never define infrastructure. */
 export interface TopologyProject {
@@ -44,12 +47,16 @@ export type TopologyState =
   | "unknown"
   | "disabled"
   | "configured"
-  | "pending";
+  | "pending"
+  | "succeeded"
+  | "cancelled"
+  | "skipped";
 
 export interface TopologyResource {
   id: string;
   kind:
     | "application"
+    | "role"
     | "service"
     | "edge"
     | "environment"
@@ -57,7 +64,11 @@ export interface TopologyResource {
     | "instance"
     | "traffic"
     | "database"
-    | "volume";
+    | "volume"
+    | "workflow-job"
+    | "workflow-step";
+  role?: RuntimeRole;
+  deploymentId?: string;
   name: string;
   description: string;
   tone: TopologyTone;
@@ -71,21 +82,38 @@ export interface TopologyResource {
   /** Only a runtime observation may supply the number of running instances. */
   instances?: number;
   replicaStatus?: ClusterWorkloadStatus;
-  clusterPod?: ClusterWorkloadStatus["pods"][number];
+  clusterPod?: ClusterWorkloadStatus["pods"][number] & { role?: string };
   database?: ClusterDatabase;
+  /** A logical database header whose observed members are visible on the canvas. */
+  replicaGroup?: boolean;
   volume?: ClusterVolume;
   ownerName?: string;
   pending?: boolean;
   isNew?: boolean;
+  /** Optional dependency depth for non-infrastructure graphs. */
+  layoutColumn?: number;
+  /** Expanded node content reserves its actual size in the shared layout. */
+  layoutHeight?: number;
+  layoutWidth?: number;
+  /** Child nodes move with their parent and use parent-relative positions. */
+  parentId?: string;
+  /** An explicit canvas position, relative to the parent only when parentId is set. */
+  layoutPosition?: { x: number; y: number };
+  workflowStep?: { jobId: string; index: number; kind: "action" | "command" };
 }
 
 export interface TopologyRelation {
   id: string;
   source: string;
   target: string;
-  kind: "route" | "dependency" | "binding";
+  kind: "route" | "dependency" | "binding" | "sequence";
+  sourceHandle?: string;
+  targetHandle?: string;
+  /** Route the vertical segment through the gap before the target column. */
+  targetGutter?: number;
+  readOnly?: boolean;
   /** A runtime service route is not an editable public domain. */
-  scope?: "instances" | "database" | "storage";
+  scope?: "instances" | "database" | "storage" | "roles";
   databaseId?: string;
   volumeName?: string;
   label: string;
@@ -107,6 +135,18 @@ export const serviceNodeId = (serviceId: string) => `service:${serviceId}`;
 export const environmentNodeId = (projectId: string) => `environment:${projectId}`;
 export const databaseNodeId = (id: string) => `database:${id}`;
 export const volumeNodeId = (name: string) => `volume:${name}`;
+
+/** Auxiliary failover voters are workloads, not database data replicas. */
+export function databaseInstanceStatus(database: ClusterDatabase) {
+  const desired = clusterDatabasePodCount(database.config);
+  const dataPods = database.observation?.pods.filter((pod) => pod.role !== "sentinel");
+  const ready = dataPods?.filter((pod) => pod.ready).length;
+  return {
+    desired,
+    ready,
+    settled: database.status === "ready" && !!database.observation?.ready && ready === desired,
+  };
+}
 
 export function addClusterVolumes(
   graph: ProjectTopologyGraph,
@@ -158,11 +198,16 @@ export function addClusterDatabases(
   const edges = [...graph.edges];
   for (const database of databases) {
     if (database.status === "deleted" || database.projectId !== project.id) continue;
+    const instances = databaseInstanceStatus(database);
     const state: TopologyState =
       database.status === "ready"
-        ? database.observation?.ready
-          ? "running"
-          : "failed"
+        ? !database.observation
+          ? "unknown"
+          : instances.settled
+            ? "running"
+            : database.observation.ready
+              ? "starting"
+              : "failed"
         : ["failed", "interrupted"].includes(database.status)
           ? "failed"
           : database.status === "retained"
@@ -174,10 +219,17 @@ export function addClusterDatabases(
       name: database.name,
       projectId: project.id,
       tone: database.config.engine,
-      description: `${database.config.engine === "postgres" ? "PostgreSQL" : "Redis"} · ${database.config.mode === "cluster" ? "Cluster" : "Standalone"}`,
+      description:
+        database.config.engine === "postgres"
+          ? `PostgreSQL · 1 primary${database.config.instances > 1 ? ` + ${database.config.instances - 1} read replicas` : ""}`
+          : database.config.mode === "cluster"
+            ? `Redis · ${database.config.instances} shards`
+            : database.config.mode === "replication"
+              ? `Redis · 1 primary + ${database.config.instances - 1} replicas`
+              : "Redis · Standalone",
       state,
       database,
-      instances: database.observation?.pods.length,
+      instances: instances.ready,
     });
     if (database.envKey && nodes.some((node) => node.id === applicationNodeId(project.id)))
       edges.push({
@@ -189,6 +241,17 @@ export function addClusterDatabases(
         databaseId: database.id,
         label: database.envKey,
         description: `${database.envKey} connects this application to the database over its private network. Redeploy the application after changing the connection.`,
+      });
+    if (database.readEnvKey && nodes.some((node) => node.id === applicationNodeId(project.id)))
+      edges.push({
+        id: `database-read-connection:${database.id}`,
+        source: applicationNodeId(project.id),
+        target: databaseNodeId(database.id),
+        kind: "binding",
+        scope: "database",
+        databaseId: database.id,
+        label: database.readEnvKey,
+        description: `${database.readEnvKey} connects this application to read replicas over its private network. Queries must use this connection explicitly; replicas may lag.`,
       });
   }
   return { nodes, edges };
@@ -203,7 +266,14 @@ export function buildDatabaseReplicaTopology(
     id: `database-pod:${database.id}:${pod.name}`,
     kind: "instance",
     projectId: project.id,
-    name: pod.role === "primary" ? "Primary" : pod.role === "replica" ? "Replica" : pod.name,
+    name:
+      pod.role === "primary"
+        ? "Primary"
+        : pod.role === "replica"
+          ? "Replica"
+          : pod.role === "sentinel"
+            ? "Failover voter"
+            : pod.name,
     description: pod.serverName ?? "Assigning a server",
     state: pod.ready ? "running" : pod.phase === "Failed" ? "failed" : "starting",
     tone: database.config.engine,
@@ -212,19 +282,88 @@ export function buildDatabaseReplicaTopology(
   // PostgreSQL reports the actual primary. Redis roles can change independently
   // of StatefulSet names; do not invent a replication graph from pod ordinals.
   const primary = database.observation?.primary;
-  const edges: TopologyRelation[] = primary
-    ? pods
-        .filter((pod) => pod.name !== primary)
-        .map((pod) => ({
-          id: `replication:${database.id}:${pod.name}`,
-          source: `database-pod:${database.id}:${primary}`,
-          target: `database-pod:${database.id}:${pod.name}`,
-          kind: "route",
-          scope: "instances",
-          label: "Replication",
-          description: "PostgreSQL streaming replication managed by the database operator.",
-        }))
-    : [];
+  const edges: TopologyRelation[] =
+    primary && pods.some((pod) => pod.name === primary)
+      ? pods
+          .filter((pod) => pod.name !== primary)
+          .map((pod) => ({
+            id: `replication:${database.id}:${pod.name}`,
+            source: `database-pod:${database.id}:${primary}`,
+            target: `database-pod:${database.id}:${pod.name}`,
+            kind: "route",
+            scope: "instances",
+            label: pod.role === "sentinel" ? "Failover monitoring" : "Replication",
+            description:
+              pod.role === "sentinel"
+                ? "Sentinel monitors the primary and coordinates failover; it does not store application data."
+                : database.config.engine === "postgres"
+                  ? "PostgreSQL streaming replication managed by the database operator."
+                  : "Redis asynchronous replication managed by the database operator.",
+          }))
+      : [];
+  return { nodes, edges };
+}
+
+/** Expand observations only. Logical database bindings and management IDs stay unchanged. */
+export function expandDatabaseReplicas(
+  graph: ProjectTopologyGraph,
+  project: TopologyProject,
+): ProjectTopologyGraph {
+  const nodes: TopologyResource[] = [];
+  const edges = [...graph.edges];
+  for (const resource of graph.nodes) {
+    if (!resource.database) {
+      nodes.push(resource);
+      continue;
+    }
+    const members = buildDatabaseReplicaTopology(project, resource.database);
+    // Sentinel voters monitor failover; they are not additional copies of the data.
+    // The existing Instances view still includes them for inspection.
+    const data = members.nodes
+      .filter((node) => node.clusterPod?.role !== "sentinel")
+      .sort((a, b) => a.id.localeCompare(b.id));
+    if (
+      !data.length ||
+      (data.length === 1 && clusterDatabasePodCount(resource.database.config) === 1)
+    ) {
+      nodes.push(resource);
+      continue;
+    }
+    const primary = data.find(
+      (node) => node.clusterPod?.name === resource.database!.observation?.primary,
+    );
+    const remaining = data.filter((node) => node !== primary);
+    const columns = remaining.length > 3 ? 2 : 1;
+    const rows = Math.max(1, Math.ceil(remaining.length / columns));
+    const { width, height, gapX } = DEFAULT_TOPOLOGY_NODE_LAYOUT;
+    const gapY = 24,
+      header = 72;
+    const memberHeight = rows * height + (rows - 1) * gapY;
+    const offset = primary && remaining.length ? 1 : 0;
+    const memberColumns = remaining.length ? columns + offset : 1;
+    nodes.push({
+      ...resource,
+      replicaGroup: true,
+      layoutWidth: memberColumns * width + (memberColumns - 1) * gapX,
+      layoutHeight: header + memberHeight,
+    });
+    for (const node of data) {
+      const index = remaining.indexOf(node);
+      nodes.push({
+        ...node,
+        parentId: resource.id,
+        layoutPosition:
+          node === primary
+            ? { x: 0, y: header + (memberHeight - height) / 2 }
+            : {
+                x: (offset + (index % columns)) * (width + gapX),
+                y: header + Math.floor(index / columns) * (height + gapY),
+              },
+      });
+    }
+    const ids = new Set(data.map((node) => node.id));
+    edges.push(...members.edges.filter((edge) => ids.has(edge.source) && ids.has(edge.target)));
+  }
   return { nodes, edges };
 }
 
@@ -291,21 +430,6 @@ export function buildClusterReplicaTopology(
   return { nodes, edges };
 }
 
-export function hasSeparateApplication(
-  project: TopologyProject,
-  services: readonly Service[],
-): boolean {
-  if (isServicesFramework(project.framework)) return false;
-  // Adding a companion to a source-built app materializes its main application
-  // as a monorepo service. The project header must not mint another copy of it.
-  if (services.some((service) => service.kind === "monorepo")) return false;
-  // Adopted/cloned stacks deliberately keep framework="unknown"; their stack
-  // and runtime identity live on the service rows returned by the same API.
-  if (project.framework === "unknown" && project.projectType === "services") return false;
-  if (project.isApp && services.length > 0) return false;
-  return true;
-}
-
 /** Presentation only: recognizing a logo never grants replication capabilities. */
 export function servicePresentation(service: Pick<Service, "image" | "kind" | "build">): {
   tone: TopologyTone;
@@ -361,6 +485,7 @@ export function buildProjectTopology({
   containers,
   connections,
   cluster,
+  roles,
 }: {
   project: TopologyProject;
   services: readonly Service[];
@@ -368,6 +493,7 @@ export function buildProjectTopology({
   containers: readonly ServiceContainer[] | null;
   connections: readonly ProjectConnection[];
   cluster?: ClusterWorkloadStatus | null;
+  roles?: ProjectRuntimeRoles | null;
 }): ProjectTopologyGraph {
   const nodes: TopologyResource[] = [];
   const edges: TopologyRelation[] = [];
@@ -406,6 +532,38 @@ export function buildProjectTopology({
               ? "unknown"
               : "configured",
     });
+  }
+
+  if (roles?.deploymentId && roles.deploymentId === project.activeDeploymentId) {
+    for (const role of roles.roles) {
+      const state = runtimeRoleState(role);
+      const id = `role:${project.id}:${role.name}`;
+      nodes.push({
+        id,
+        kind: "role",
+        projectId: project.id,
+        name: role.name,
+        role,
+        deploymentId: roles.deploymentId,
+        tone: "service",
+        description: `${role.kind ? role.kind[0].toUpperCase() + role.kind.slice(1) : "Role"} · ${role.replicas} replica${role.replicas === 1 ? "" : "s"}`,
+        state: state === "missing" ? "failed" : state,
+        instances: role.containers.some((replica) => replica.status === "unknown")
+          ? undefined
+          : role.containers.filter((replica) => replica.status === "running").length,
+      });
+      if (hasPrimaryApplication)
+        edges.push({
+          id: `role-release:${project.id}:${role.name}`,
+          source: applicationNodeId(project.id),
+          target: id,
+          kind: "binding",
+          scope: "roles",
+          readOnly: true,
+          label: "Runtime role",
+          description: "Shares the application's deployment image and environment.",
+        });
+    }
   }
 
   for (const service of services) {
@@ -534,26 +692,80 @@ export function buildProjectTopology({
   return { nodes, edges };
 }
 
+export interface TopologyNodeLayout {
+  width: number;
+  height: number;
+  gapX: number;
+  gapY: number;
+  align?: "center" | "start";
+  /** Pack disconnected nodes beside the dependency columns, without routing edges through peers. */
+  maxIndependentRows?: number;
+}
+
+export const DEFAULT_TOPOLOGY_NODE_LAYOUT: TopologyNodeLayout = {
+  width: 250,
+  height: 160,
+  gapX: 90,
+  gapY: 40,
+};
+
 /** Deterministic first layout; later refreshes preserve the user's positions. */
 export function topologyPositions(
   graph: ProjectTopologyGraph,
+  layout = DEFAULT_TOPOLOGY_NODE_LAYOUT,
 ): Record<string, { x: number; y: number }> {
-  const columns = new Map<number, TopologyResource[]>();
+  let columns = new Map<number, TopologyResource[]>();
+  const positions: Record<string, { x: number; y: number }> = {};
   for (const node of graph.nodes) {
+    if (node.parentId || node.layoutPosition) {
+      positions[node.id] = node.layoutPosition ?? { x: 0, y: 0 };
+      continue;
+    }
     const column =
-      node.kind === "edge" || node.kind === "traffic"
+      node.layoutColumn ??
+      (node.kind === "edge" || node.kind === "traffic"
         ? 0
         : node.kind === "linked"
           ? 3
           : node.kind === "environment" || node.tone === "postgres" || node.tone === "redis"
             ? 2
-            : 1;
+            : 1);
     columns.set(column, [...(columns.get(column) ?? []), node]);
   }
-  const positions: Record<string, { x: number; y: number }> = {};
+  if (layout.maxIndependentRows && layout.maxIndependentRows > 0) {
+    const rows = Math.max(1, Math.floor(layout.maxIndependentRows));
+    const connected = new Set(graph.edges.flatMap((edge) => [edge.source, edge.target]));
+    const wrapped = new Map<number, TopologyResource[]>();
+    const independent: TopologyResource[] = [];
+    for (const [column, nodes] of [...columns].sort(([a], [b]) => a - b)) {
+      const linked = nodes.filter((node) => connected.has(node.id));
+      if (linked.length) wrapped.set(column, linked);
+      independent.push(...nodes.filter((node) => !connected.has(node.id)));
+    }
+    const start = Math.max(-1, ...wrapped.keys()) + 1;
+    for (let index = 0; index * rows < independent.length; index++)
+      wrapped.set(start + index, independent.slice(index * rows, (index + 1) * rows));
+    columns = wrapped;
+  }
+  const widths = new Map(
+    [...columns].map(([column, nodes]) => [
+      column,
+      Math.max(layout.width, ...nodes.map((node) => node.layoutWidth ?? layout.width)),
+    ]),
+  );
   for (const [column, nodes] of columns) {
-    for (const [row, node] of nodes.entries()) {
-      positions[node.id] = { x: column * 340, y: (row - (nodes.length - 1) / 2) * 200 };
+    const totalHeight =
+      nodes.reduce((height, node) => height + (node.layoutHeight ?? layout.height), 0) +
+      Math.max(0, nodes.length - 1) * layout.gapY;
+    const x =
+      column * (layout.width + layout.gapX) +
+      [...widths]
+        .filter(([other]) => other < column)
+        .reduce((extra, [, width]) => extra + width - layout.width, 0);
+    let y = layout.align === "start" ? 0 : (layout.height - totalHeight) / 2;
+    for (const node of nodes) {
+      positions[node.id] = { x, y };
+      y += (node.layoutHeight ?? layout.height) + layout.gapY;
     }
   }
   return positions;

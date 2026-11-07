@@ -7,6 +7,7 @@
     "http",
     "auth",
     "health",
+    "diagnostics",
     "---Applications---",
     "projects",
     "sources",
@@ -26,6 +27,7 @@
     "issues",
     "updates",
     "jobs",
+    "actions",
     "backups",
     "backup-destinations",
     "notifications",
@@ -38,6 +40,8 @@
     "settings",
     "mcp",
     "mcp-tools",
+    "assistant",
+    "chat-apps",
     "---Infrastructure---",
     "servers",
     "system",
@@ -48,6 +52,8 @@
     "data-transfer",
     "---Cloud---",
     "cloud",
-    "billing"
+    "billing",
+    "affiliates",
+    "support"
   ]
 }

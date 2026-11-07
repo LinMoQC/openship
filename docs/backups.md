@@ -15,6 +15,15 @@ settings creates a service policy. Running the project policy from the project p
 backs up its eligible enabled services, with a separate run and progress stream for
 each. All child rows are admitted in one database transaction before workers start.
 
+For a standalone app with no service rows, the project policy backs up the app's
+persistent volumes, including framework storage defaults. No deployment service
+is created. These runs identify their source as `project` and keep `serviceId`
+null; scheduled, webhook and pre-deploy triggers use the same behavior. Restore
+uses the app's current deployment and requires confirmation of its name (or its
+project ID when a name is unavailable). If the project has since become a service
+stack, restore stops for review instead of selecting a different container.
+Deleted-service backups are never reinterpreted as app backups.
+
 The API and SDK return `runId` for compatibility and `runIds` for the complete batch.
 An optional `serviceId` selects one service within a project policy; services outside
 the policy's project are rejected. Reconnecting a progress stream never starts a
@@ -113,7 +122,7 @@ worker from the data path.
 Volume capture is crash-consistent by default. Docker's optional **Quiesce** freezes
 the service while its volumes are copied, then resumes it even if capture or upload
 fails. This prevents concurrent writes but does not flush application buffers. Prefer
-a logical database dump for a live database. Bare hosts and native Cloud workspaces
+a logical database dump for a live database. Bare processes
 reject quiescing because they cannot provide that guarantee.
 
 Capture commands must exit successfully. A successful compressor cannot hide a failed
@@ -165,6 +174,18 @@ restores merge by default, unless the policy explicitly requests clearing a safe
 target directory. Logical database restores execute through the running database.
 Runtime access and stop failures abort before the restore can replace data.
 
+Docker volume and bind restores receive and validate the complete archive in a
+temporary volume on the destination daemon before mounting the target for writes.
+A disconnected source, failed decompressor or truncated archive leaves existing
+contents untouched. The destination's received byte count must also match the source.
+The receipt uses Openship's bounded container logs independently of the daemon's
+default logging driver. Upload inactivity is checked until EOF; local validation
+and extraction then remain covered by the overall restore deadline and cancellation.
+Allow free disk space for the compressed and uncompressed archive in addition
+to the restored data. The temporary volume is removed after success or failure.
+Extraction itself is not transactional: a disk failure or cancellation after it
+starts can leave partial data, and the failed restore remains stopped for review.
+
 Only one restore can apply to a project or mail server at a time. Project services
 share this restriction because they may share volumes. Mail migrations reserve the
 destination server. A conflicting apply returns an actionable conflict and leaves
@@ -184,13 +205,12 @@ staged length and clean up after success or failure. These transports need tempo
 disk space for the artifact. A disconnected host can defer remote cleanup until its
 operation settles or require operator cleanup of the reported staging failure.
 
-Modern Cloud Docker services use the same Docker backup executor as self-hosted
-Docker. Legacy native Cloud command/file restores use the workspace command transport
-and the SDK's tar.gz upload format. Legacy **offline volume restore is refused during
-preparation**: stopping that workspace also stops the filesystem API required for
-restore. Use a files-and-folders policy for an online restore, or move the service to
-the Docker runtime for offline volume restores. Native Cloud transport tests use a
-local simulated gateway; they do not certify a live Cloud account's infrastructure.
+Managed Cloud servers use the same Docker and bare backup executors as connected
+servers. An offline restore stops the selected application, leaving the managed
+server and neighboring applications available. The provider command transport
+stages restore input when streaming stdin is unavailable. Project-owned paths and
+volume labels are checked before capture and restore. Local provider simulations
+do not certify a live Cloud account's infrastructure.
 
 ## Release verification
 

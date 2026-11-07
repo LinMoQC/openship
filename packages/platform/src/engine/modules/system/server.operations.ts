@@ -1,3 +1,7 @@
+import { serverSecurityResources } from "./server-security.operations";
+import { assertManagementAccess } from "../billing/management.service";
+import { verifyCustomerSshConnection } from "../../lib/customer-ssh";
+import { reportCaughtError as observeCaughtError, diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import {
   networkCollection,
   computeClusterCollection,
@@ -16,25 +20,37 @@ import {
   type CreateServerInput,
   type UpdateServerInput,
   type ServerOperations,
+  type CloudWorkspaceSummary,
 } from "@repo/contracts";
 import { repos } from "@repo/db";
+import { env } from "../../config";
+import { requireCloudWorkspace } from "../../lib/cloud-workspace-scope";
+import * as managed from "../cloud-workspaces/cloud-workspace.service";
+import { withServerExecution } from "../../lib/server-execution";
+import { managedServerCollection, serverLifecycleResources } from "./server-lifecycle.operations";
+import { serverNetworkSettings } from "./server-network-settings.operations";
+import { serverSwarmResources } from "./server-swarm.operations";
+import { serverManagedControls } from "./server-managed.operations";
 import { hostControlDisabled } from "@repo/adapters";
-import { assertSshSettings, normalizeSshTransport, safeErrorMessage } from "@repo/core";
+import { AppError, normalizeSshTransport, safeErrorMessage, type HostCapacity } from "@repo/core";
 import { invalidateOpenRestyPaths } from "../../lib/openresty-paths";
-import { invalidateHostCapacity } from "../../lib/host-capacity";
+import { getHostCapacity, invalidateHostCapacity } from "../../lib/host-capacity";
 import { sshManager, type ReachabilityDiagnosis } from "../../lib/ssh-manager";
+import { validateSshConnectionOptions } from "../../lib/ssh-validation";
 import { resolvesToLocalHost } from "../../lib/self-host";
 import { boxOwningOrgId } from "../../lib/box-org";
+import { assertOperatorSshAccess } from "../../lib/operator-ssh-access";
 import { ensureLocalServer, localServerHostChannel } from "../../lib/startup/self-server";
 import { encryptSecretField } from "../../lib/credential-encryption";
 import { audit, operationAuditContext } from "../../lib/audit-emitter";
-import { assertSelfHosted, assertServerExecution, assertNativeSshSettings } from "./server-access";
+import { assertServerExecution, assertNativeSshSettings, assertDeploymentServer } from "./server-access";
 import {
   serverContainerCollection,
   serverContainerResources,
   serverContainerStreams,
 } from "./server-containers.operations";
-import { primeGeo, countryForIp } from "../../lib/geo-ip";
+import { primeGeo } from "../../lib/geo-ip";
+import { serializeServer } from "./server-view";
 import { execOnHost } from "../../lib/agent-exec";
 import { serverMaintenanceResources } from "./server-maintenance.operations";
 import { serverCheckResources, testConnection } from "./server-check.operations";
@@ -50,64 +66,61 @@ import { clusterRuntimeCollection } from "./cluster-runtime.operations";
 import { clusterStorageCollection } from "./cluster-storage.operations";
 import { withServerInventoryLock } from "../../lib/server-inventory-lock";
 import { authorization } from "../../lib/authorization";
+import { mergeCloudServerInventory } from "../../lib/cloud/server-inventory";
 
-function validateConnectionOptions(settings: Parameters<typeof assertSshSettings>[0]): void {
+/** GET /servers - list servers in the caller's active organization. */
+/** A dead box must not stall the whole server list: the GPU annotation is the least important thing on it. */
+const CAPACITY_PROBE_TIMEOUT_MS = 4000;
+
+/**
+ * Daemon-reported capacity for one server, or `null` when it could not be read in time. Never throws:
+ * the probe is an annotation, so a failure degrades to "unknown", not to a 500. Cached 5 minutes by
+ * getHostCapacity; `localFallback: false` so an unreachable remote is never described by THIS
+ * machine's hardware (the reason `getTrustedHostCapacity` exists).
+ */
+async function probeServerCapacity(serverId: string, organizationId: string): Promise<HostCapacity | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), CAPACITY_PROBE_TIMEOUT_MS);
+  });
+  const probe = getHostCapacity(serverId, organizationId, { localFallback: false }).catch(
+    (diagnosticFailure) => {
+      observeCaughtError(diagnosticFailure, "platform/engine/modules/system/server.operations");
+      return null;
+    },
+  );
   try {
-    assertSshSettings(settings);
-  } catch (error) {
-    failServer({ error: safeErrorMessage(error) }, 400);
+    const got = await Promise.race([probe, timeout]);
+    return got && got.source === "docker" ? got : null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
-/** Public shape - what the controller returns to clients (no SSH secrets). */
-function serializeServer(s: Awaited<ReturnType<typeof repos.server.get>>) {
-  if (!s) return null;
-  return {
-    id: s.id,
-    name: s.name,
-    // The auto-registered host row (VPS / server-host mode). The dashboard
-    // badges it "This Server" and hides SSH-credential fields for it.
-    isLocal: s.isLocal,
-    sshHost: s.sshHost,
-    sshPort: s.sshPort,
-    sshUser: s.sshUser,
-    sshAuthMethod: s.sshAuthMethod,
-    sshKeyPath: s.sshKeyPath,
-    // Never return the key material itself — only whether one is stored, so the
-    // edit form can offer "a key is stored; leave blank to keep it" (same idea as
-    // the password field, which is simply absent from this shape).
-    hasStoredKeyMaterial: !!s.sshPrivateKey,
-    sshJumpHost: s.sshJumpHost,
-    sshTransport: s.sshTransport ?? "direct",
-    sshArgs: s.sshArgs,
-    createdAt: s.createdAt,
-    // ISO country for the row's flag; null for hostnames/private IPs or until
-    // the geo DB is warmed (callers prime it via primeGeo before serializing).
-    country: countryForIp(s.sshHost),
-  };
-}
-
-/** GET /servers - list servers in the caller's active organization. */
-async function listServers(ctx: ExecutionContext) {
-  assertSelfHosted();
+async function listServers(ctx: ExecutionContext, live = true) {
 
   // Org-scoped: only the caller's org's servers.
   // Self-heal: "this box is a deploy target" is an invariant about the MACHINE, so
   // materialize it on read instead of trusting whichever install branch ran (that
   // trust is why a free-domain install listed no servers). Idempotent, single-flight
   // and a no-op — one findLocal — once the row exists.
-  await ensureLocalServer().catch(() => null);
-  const rows = await repos.server.listByOrganization(ctx.organizationId);
+  if (!env.CLOUD_MODE) await ensureLocalServer().catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/system/server.operations"); return null; });
+  const rows = await repos.server.listByOrganization(ctx.organizationId, true);
   // Host control off (`openship up --no-host-control`): this box is not a deploy
   // target and every host operation refuses, so the local row is hidden rather
   // than listed-but-dead. Enforced by createHostExecutor throwing — this only
   // stops the UI from offering something the API will reject.
-  const all = hostControlDisabled() ? rows.filter((s) => !s.isLocal) : rows;
+  const eligible = rows.filter((s) => !env.CLOUD_MODE || !s.isLocal);
+  const all = [];
+  for (const server of eligible) {
+    if (server.isLocal && hostControlDisabled()) continue;
+    if (await authorization.checkPermissionOnResource(ctx, { resourceType: "server", resourceId: server.id, action: "read" })) all.push(server);
+  }
   await primeGeo();
   // Projects currently deployed to each server (active deployment → meta.serverId).
   const projectCounts = await repos.project
     .countActiveByServer(ctx.organizationId)
-    .catch(() => ({}) as Record<string, number>);
+    .catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/system/server.operations"); return ({}) as Record<string, number>; });
   // The local row's container→host channel, as an ANNOTATION (#509). Never a filter:
   // ordinary container deploys run over the mounted Docker socket and survive a dead
   // channel, so hiding the row would break them — only `hostControlDisabled()` above
@@ -115,23 +128,25 @@ async function listServers(ctx: ExecutionContext) {
   const channels = await Promise.all(
     // `.catch` at the call site as well as inside: one rejected probe must not 500 the
     // whole list. An annotation that can break the page it annotates is a gate.
-    all.map((s) => (s.isLocal ? localServerHostChannel(s.id).catch(() => null) : null)),
+    all.map((s) => (s.isLocal ? localServerHostChannel(s.id).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/system/server.operations"); return null; }) : null)),
   );
-  return all.map((s, i) => ({
-    ...serializeServer(s),
-    projectCount: projectCounts[s.id] ?? 0,
-    hostChannel: channels[i] ?? null,
+  const local = await Promise.all(all.map(async (s, i) => {
+    const cloud = s.workspaceId ? await managed.summary(await requireCloudWorkspace(ctx.organizationId, s.workspaceId), live) : null;
+    const capacity = s.workspaceId ? null : await probeServerCapacity(s.id, ctx.organizationId);
+    return { ...serializeServer(s, cloud, capacity)!, projectCount: cloud?.projectCount ?? projectCounts[s.id] ?? 0, hostChannel: channels[i] ?? null };
   }));
+  return mergeCloudServerInventory(ctx, local);
 }
 
 /** GET /servers/:id - get a single server. */
 async function getServer(ctx: ExecutionContext, id: string) {
-  assertSelfHosted();
 
   // Primary gate: permission resolver (404 on deny, IDOR-safe).
   // Org-scoped: out-of-org server ids 404 indistinguishably from missing.
   const server = await repos.server.getInOrganization(id, ctx.organizationId);
   if (!server) return failServer({ error: "Server not found" }, 404);
+  if (env.CLOUD_MODE && server.isLocal) return failServer({ error: "Server not found" }, 404);
+  const cloud = server.workspaceId ? await managed.get(ctx, server.workspaceId) : null;
 
   await primeGeo();
   // Same name, same source, same meaning as the list's `projectCount` — the detail
@@ -143,11 +158,14 @@ async function getServer(ctx: ExecutionContext, id: string) {
   // report different numbers.
   const projectCounts = await repos.project
     .countActiveByServer(ctx.organizationId)
-    .catch(() => ({}) as Record<string, number>);
+    .catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/system/server.operations"); return ({}) as Record<string, number>; });
+  const routedCounts = await repos.project.countActiveByServer(ctx.organizationId, { withRoutes: true })
+    .catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/system/server.operations"); return null; });
   return {
-    ...serializeServer(server),
-    projectCount: projectCounts[id] ?? 0,
-    hostChannel: server.isLocal ? await localServerHostChannel(server.id).catch(() => null) : null,
+    ...serializeServer(server, cloud, server.workspaceId ? null : await probeServerCapacity(server.id, ctx.organizationId)),
+    projectCount: cloud?.projectCount ?? projectCounts[id] ?? 0,
+    ...(routedCounts ? { edgeRequired: (routedCounts[id] ?? 0) > 0 } : {}),
+    hostChannel: server.isLocal ? await localServerHostChannel(server.id).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/system/server.operations"); return null; }) : null,
   };
 }
 
@@ -163,14 +181,23 @@ async function getServer(ctx: ExecutionContext, id: string) {
  * supposed to be closed, on the wrong machine (#490).
  */
 async function probeReachability(ctx: ExecutionContext, id: string) {
-  assertSelfHosted();
 
   const server = await repos.server.getInOrganization(id, ctx.organizationId);
   if (!server) return failServer({ error: "Server not found" }, 404);
+  if (env.CLOUD_MODE && server.isLocal) return failServer({ error: "Server not found" }, 404);
+  if (server.workspaceId) {
+    try {
+      await withServerExecution(ctx.organizationId, id, executor => executor.exec("true", { timeout: 10_000 }));
+      return { reachable: true, code: "ok", target: null, port: null, hint: null, rule: null, channel: null };
+    } catch (error) {
+      observeCaughtError(error, "platform/engine/modules/system/server.operations");
+      return { reachable: false, code: "managed_unavailable", target: null, port: null, hint: safeErrorMessage(error), rule: null, channel: null };
+    }
+  }
 
   const d: ReachabilityDiagnosis = await sshManager
     .diagnoseReachability(id)
-    .catch(() => ({ reachable: false, code: "unknown" }));
+    .catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/system/server.operations"); return ({ reachable: false, code: "unknown" }); });
   return {
     reachable: d.reachable,
     code: d.code,
@@ -184,18 +211,26 @@ async function probeReachability(ctx: ExecutionContext, id: string) {
 
 /** POST /servers - create a new server */
 async function createServer(ctx: ExecutionContext, body: CreateServerInput) {
-  assertSelfHosted();
+  if (!env.CLOUD_MODE) return createConnectedServer(ctx, body);
+  return withServerInventoryLock(ctx.organizationId, async () => {
+    await assertManagementAccess(ctx.organizationId);
+    const { settings, hostKey } = await verifyCustomerSshConnection(body);
+    return createConnectedServer(ctx, { ...body, ...settings }, hostKey);
+  });
+}
+
+async function createConnectedServer(ctx: ExecutionContext, body: CreateServerInput, sshHostKey?: string) {
 
   const host = (body.sshHost as string)?.trim();
   if (!host) return failServer({ error: "SSH host is required" }, 400);
-  validateConnectionOptions({ ...body, sshHost: host });
+  validateSshConnectionOptions({ ...body, sshHost: host });
 
   // Adding THIS host as a server (loopback / the box's own SERVER_IP on a
   // server-host) must NOT create a plain SSH row — deploys/probes would dial the
   // API's own loopback (the container's, when compose-deployed) where there is no
   // sshd → the "Can't reach 127.0.0.1" failure.
   if (
-    resolvesToLocalHost({
+    !env.CLOUD_MODE && resolvesToLocalHost({
       sshHost: host,
       sshPort: body.sshPort,
       sshJumpHost: body.sshJumpHost,
@@ -239,8 +274,10 @@ async function createServer(ctx: ExecutionContext, body: CreateServerInput) {
   }
 
   assertNativeSshSettings(body);
+  await assertOperatorSshAccess(body, ctx.organizationId);
   const server = await repos.server.create({
     organizationId: ctx.organizationId,
+    sshHostKey,
     name: body.name?.trim() || null,
     sshHost: host,
     sshPort: body.sshPort ?? 22,
@@ -262,7 +299,7 @@ async function createServer(ctx: ExecutionContext, body: CreateServerInput) {
   // createServer upserts, so this id may now point at DIFFERENT hardware —
   // re-probe rather than validate resource limits against the old box's specs.
   await invalidateHostCapacity(ctx.organizationId, server.id).catch((err: unknown) =>
-    console.error("[server.create] capacity cache cleanup failed:", err),
+    errorDiagnostics.error("platform/engine/modules/system/server.operations", "[server.create] capacity cache cleanup failed:", err),
   );
 
   // Names + non-secret connection details only. SSH passwords & key
@@ -306,12 +343,19 @@ const LOCAL_ROW_READONLY_FIELDS = [
 ] as const;
 
 async function updateServer(ctx: ExecutionContext, id: string, body: UpdateServerInput) {
-  assertSelfHosted();
 
   // Primary gate: permission resolver. Updating server config is a write.
   // Org-scoped: refuse to update a server outside the caller's org.
   const existing = await repos.server.getInOrganization(id, ctx.organizationId);
   if (!existing) return failServer({ error: "Server not found" }, 404);
+  if (existing.workspaceId) {
+    if (Object.keys(body).some(key => key !== "name") || !body.name?.trim())
+      return failServer({ error: "Managed server connections are configured by Openship Cloud. Only the name can be edited.", code: "MANAGED_SERVER_CONNECTION" }, 400);
+    const cloud = await managed.rename(ctx, existing.workspaceId, { name: body.name });
+    audit.recordAsync(operationAuditContext(ctx), { eventType: "server:write", resourceType: "server", resourceId: id, after: { name: cloud.name } });
+    return serializeServer({ ...existing, name: cloud.name }, cloud);
+  }
+  if (env.CLOUD_MODE) await assertServerExecution(existing);
 
   // #527: an isLocal row's ssh* fields are DISPLAY-ONLY. Every operation on this box goes
   // through the container→host channel, whose credentials come from OPENSHIP_HOST_SSH_*
@@ -339,16 +383,24 @@ async function updateServer(ctx: ExecutionContext, id: string, body: UpdateServe
     }
   }
 
-  if (LOCAL_ROW_READONLY_FIELDS.some((field) => body[field] !== undefined))
+  if (LOCAL_ROW_READONLY_FIELDS.some((field) => body[field] !== undefined)) {
     assertNativeSshSettings({ ...existing, ...body });
+    await assertOperatorSshAccess({ ...existing, ...body }, ctx.organizationId);
+  }
   if (LOCAL_ROW_READONLY_FIELDS.some((field) => body[field] !== undefined))
-    validateConnectionOptions({
+    validateSshConnectionOptions({
       ...existing,
       ...body,
       sshHost: body.sshHost?.trim() || existing.sshHost,
     });
 
   const patch: Record<string, unknown> = {};
+  if (env.CLOUD_MODE && LOCAL_ROW_READONLY_FIELDS.some(field => body[field] !== undefined)) {
+    const connection = { ...existing, ...body, sshHost: body.sshHost?.trim() || existing.sshHost! };
+    const changedDestination = body.sshHost !== undefined && body.sshHost !== existing.sshHost || body.sshPort !== undefined && body.sshPort !== existing.sshPort;
+    const { hostKey } = await verifyCustomerSshConnection(connection, "deployment", changedDestination ? undefined : existing.sshHostKey ?? undefined);
+    patch.sshHostKey = hostKey;
+  }
 
   if (body.name !== undefined) patch.name = body.name?.trim() || null;
   if (body.sshHost !== undefined) patch.sshHost = body.sshHost?.trim() || existing.sshHost;
@@ -366,22 +418,28 @@ async function updateServer(ctx: ExecutionContext, id: string, body: UpdateServe
   if (body.sshTransport !== undefined)
     patch.sshTransport = normalizeSshTransport(body.sshTransport);
   if (body.sshArgs !== undefined) patch.sshArgs = body.sshArgs?.trim() || null;
+  // Manual GPU mark. Deliberately not a "connection" field (it is allowed on the local row too).
+  if (body.gpuOverride !== undefined) patch.gpuOverride = body.gpuOverride;
 
   if (Object.keys(patch).length === 0) {
     return failServer({ error: "No fields to update" }, 400);
   }
 
   const updated = await repos.server.update(id, patch);
-  sshManager.invalidate(id);
-  await invalidateOpenRestyPaths(id);
+  // Metadata-only edits must not terminate retained terminals, builds or deployments.
+  if (LOCAL_ROW_READONLY_FIELDS.some((field) => body[field] !== undefined)) {
+    sshManager.invalidate(id);
+    await invalidateOpenRestyPaths(id);
+  }
   // Edited connection details can repoint this row at another machine (and a
   // resize changes the specs of the same one) — re-probe capacity either way.
   await invalidateHostCapacity(ctx.organizationId, id).catch((err: unknown) =>
-    console.error("[server.update] capacity cache cleanup failed:", err),
+    errorDiagnostics.error("platform/engine/modules/system/server.operations", "[server.update] capacity cache cleanup failed:", err),
   );
 
   // Audit only the fields the caller intended to touch. Skip secrets entirely.
   const auditAfter: Record<string, unknown> = {};
+  if (body.gpuOverride !== undefined) auditAfter.gpuOverride = updated?.gpuOverride ?? null;
   if (body.name !== undefined) auditAfter.name = updated?.name ?? null;
   if (body.sshHost !== undefined) auditAfter.sshHost = updated?.sshHost ?? null;
   if (body.sshPort !== undefined) auditAfter.sshPort = updated?.sshPort ?? null;
@@ -403,7 +461,10 @@ async function updateServer(ctx: ExecutionContext, id: string, body: UpdateServe
     after: auditAfter,
   });
 
-  return serializeServer(updated);
+  // Re-read the probe (cache was just invalidated) so the response carries the GPU annotation the
+  // client renders; without it a manual mark would flash "could not check this server".
+  const capacity = updated?.workspaceId ? null : await probeServerCapacity(id, ctx.organizationId);
+  return serializeServer(updated, null, capacity);
 }
 
 /**
@@ -420,20 +481,20 @@ async function updateServer(ctx: ExecutionContext, id: string, body: UpdateServe
  * lossy in secrets.
  */
 async function serverDeletionPreview(ctx: ExecutionContext, id: string) {
-  assertSelfHosted();
 
   const server = await repos.server.getInOrganization(id, ctx.organizationId);
   if (!server) return failServer({ error: "Server not found" }, 404);
+  if (server.workspaceId) return failServer({ error: "Delete this server through its Cloud workspace", code: "MANAGED_SERVER_LIFECYCLE_REQUIRED" }, 409);
 
   const [workloads, mail, tunnels, github, destinations] = await Promise.all([
-    repos.project.listActiveByServer(ctx.organizationId, id).catch(() => []),
-    repos.mailServer.get(id).catch(() => undefined),
-    repos.serverTunnel.listByServer(id).catch(() => []),
-    repos.serverGithubAuth.getByServer(id).catch(() => undefined),
+    repos.project.listActiveByServer(ctx.organizationId, id).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/system/server.operations"); return []; }),
+    repos.mailServer.get(id).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/system/server.operations"); return undefined; }),
+    repos.serverTunnel.listByServer(id).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/system/server.operations"); return []; }),
+    repos.serverGithubAuth.getByServer(id).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/system/server.operations"); return undefined; }),
     // No by-server lookup exists on the backup repo and an org has few
     // destinations, so filter the org list rather than add a method for one line
     // of confirm copy.
-    repos.backupDestination.listByOrganization(ctx.organizationId).catch(() => []),
+    repos.backupDestination.listByOrganization(ctx.organizationId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/system/server.operations"); return []; }),
   ]);
 
   // Gates the "also destroy on the server" option: offering to stop containers on a
@@ -444,7 +505,7 @@ async function serverDeletionPreview(ctx: ExecutionContext, id: string) {
     : await sshManager
         .diagnoseReachability(id)
         .then((d: ReachabilityDiagnosis) => d.reachable)
-        .catch(() => null);
+        .catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/system/server.operations"); return null; });
 
   return {
     ok: true,
@@ -509,7 +570,6 @@ async function deleteServer(
   id: string,
   input: Parameters<ServerOperations["remove"]>[1] = {},
 ) {
-  assertSelfHosted();
   return withServerInventoryLock(ctx.organizationId, () => deleteServerUnderLock(ctx, id, input));
 }
 
@@ -519,13 +579,16 @@ async function deleteServerUnderLock(
   input: NonNullable<Parameters<ServerOperations["remove"]>[1]>,
 ) {
   // A queued operation must recheck access after acquiring the shared lock.
-  assertSelfHosted();
   await authorization.authorize(ctx, { resourceType: "server", resourceId: id, action: "admin" });
 
   // Primary gate: deleting a server is admin-tier (destructive).
   // Org-scoped: refuse to delete a server outside the caller's org.
   const existing = await repos.server.getInOrganization(id, ctx.organizationId);
   if (!existing) return failServer({ error: "Server not found" }, 404);
+  assertDeploymentServer(existing);
+  // Refuse the wrong lifecycle before touching projects, not at the final row
+  // deletion after their teardown has already happened.
+  if (existing.workspaceId) throw new AppError("Manage this server through its Cloud workspace", 409, "MANAGED_SERVER_LIFECYCLE_REQUIRED");
   // The auto-registered host ("This Server") is not user-removable — it IS the
   // machine OpenShip runs on, and the boot reconcile would just recreate it.
   // Checked before any teardown so a refused removal never destroys a workload.
@@ -533,6 +596,10 @@ async function deleteServerUnderLock(
     return failServer({ error: "This is the current host and can't be removed." }, 400);
   }
 
+  if (await repos.ingress.byServer(id)) return failServer({
+    error: "Disconnect this server’s Cloudflare Tunnel and finish its hostname cleanup before deleting the server.",
+    code: "SERVER_INGRESS_CONNECTED",
+  }, 409);
   const destroyOnSource = input.destroyOnSource === true;
 
   if (await repos.serverCluster.membership(id)) {
@@ -586,14 +653,14 @@ async function deleteServerUnderLock(
       // NOT forceOrphan: an orphan recorded here can never be reclaimed once the
       // server row goes, so a stubborn resource must surface as a retryable failure
       // rather than a silent leak.
-    }).catch((err: unknown) => ({
+    }).catch((err: unknown) => { observeCaughtError(err, "platform/engine/modules/system/server.operations"); return ({
       ok: false,
       rowDeleted: false,
       unrecoverable: [
         { step: "teardown", status: "failed" as const, error: safeErrorMessage(err) },
       ],
       orphaned: [],
-    }));
+    }); });
 
     results.push({
       id: p.id,
@@ -647,11 +714,11 @@ async function deleteServerUnderLock(
   // id need cleanup too since they share the server's id.
   await repos.resourceGrant
     .deleteForResource(ctx.organizationId, "server", id)
-    .catch((err: unknown) => console.error("[server.delete] grant cleanup failed:", err));
+    .catch((err: unknown) => errorDiagnostics.error("platform/engine/modules/system/server.operations", "[server.delete] grant cleanup failed:", err));
   await repos.resourceGrant
     .deleteForResource(ctx.organizationId, "mail_server", id)
     .catch((err: unknown) =>
-      console.error("[server.delete] mail_server grant cleanup failed:", err),
+      errorDiagnostics.error("platform/engine/modules/system/server.operations", "[server.delete] mail_server grant cleanup failed:", err),
     );
   sshManager.invalidate(id);
   await invalidateOpenRestyPaths(id);
@@ -659,7 +726,7 @@ async function deleteServerUnderLock(
   // reused id) re-probes instead of validating resource limits against the
   // hardware of a machine that's gone.
   await invalidateHostCapacity(ctx.organizationId, id).catch((err: unknown) =>
-    console.error("[server.delete] capacity cache cleanup failed:", err),
+    errorDiagnostics.error("platform/engine/modules/system/server.operations", "[server.delete] capacity cache cleanup failed:", err),
   );
 
   audit.recordAsync(operationAuditContext(ctx), {
@@ -706,7 +773,6 @@ async function execOnServer(
   id: string,
   body: Parameters<ServerOperations["exec"]>[1],
 ) {
-  assertSelfHosted();
 
   // Primary gate: permission resolver (404 on deny, IDOR-safe). Asserted BEFORE the
   // row is read, so a caller without access cannot distinguish "no such server"
@@ -717,17 +783,17 @@ async function execOnServer(
   const command = body.command?.trim();
   if (!command) return failServer({ error: "command required", code: "COMMAND_REQUIRED" }, 400);
 
-  await assertServerExecution(server);
-  const result = await sshManager
-    .withExecutor(id, (executor) =>
+  const result = await withServerExecution(ctx.organizationId, id, (executor) =>
       execOnHost(executor, {
         command,
         cwd: body.cwd,
         timeoutMs: body.timeoutMs,
         maxOutputBytes: body.maxOutputBytes,
       }),
+      { mutation: true },
     )
     .catch((err: unknown) => {
+      if (err instanceof AppError) throw err;
       const message = err instanceof Error ? err.message : String(err);
       return { transportError: message };
     });
@@ -774,7 +840,12 @@ export const serverDependencies: ServerDependencies = {
   networks: networkSetupStreams,
   collection: {
     list: listServers,
+    async destinations(ctx) {
+      const servers = await listServers(ctx, false);
+      return { servers };
+    },
     create: createServer,
+    ...managedServerCollection,
     testConnection,
     ...serverContainerCollection,
     ...serverClusterCollection,
@@ -787,7 +858,12 @@ export const serverDependencies: ServerDependencies = {
     ...networkSetupMemberCollection,
   },
   resources: {
+    ...serverSecurityResources,
+    ...serverLifecycleResources,
+    ...serverNetworkSettings,
+    ...serverManagedControls,
     ...infrastructureResources,
+    ...serverSwarmResources,
     get: getServer,
     reachability: probeReachability,
     update: updateServer,
@@ -800,6 +876,9 @@ export const serverDependencies: ServerDependencies = {
     ...serverTunnelResources,
     ...serverClusterResources,
     ...serverGitHubResources,
+  },
+  async securityRunEvents(ctx, id, runId, signal) {
+    return (await import("../updates/host-security")).hostPatchRunEvents(ctx, id, runId, signal);
   },
   installations: serverInstallationDependencies,
   containers: serverContainerStreams,

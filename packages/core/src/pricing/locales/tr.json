@@ -19,6 +19,10 @@
     "enterprise": {
       "name": "Enterprise",
       "tagline": "Özel limitler, size ayrılmış altyapı ve SLA."
+    },
+    "hobby": {
+      "name": "Hobby",
+      "tagline": "Kişisel projeler ve günlük uygulamalar için küçük bir yönetilen sunucu."
     }
   },
   "features": {
@@ -27,9 +31,9 @@
     "anyWorkload": "Her şeyi çalıştırın — container, Compose, worker, Postgres, Redis",
     "runningServices": "{runningServices} çalışan uygulama, veritabanı veya worker",
     "buildMinutes": "Ayda {buildMinutes} build dakikası",
+    "sharedBuilds": "Derlemeler sunucunuzu paylaşır; aylık süre sınırı yoktur",
     "power": "Uygulama başına en fazla {powerCpu} vCPU ve {powerRamGb} GB RAM",
     "projects": "{maxProjects} proje",
-    "projectsUnlimited": "Sınırsız proje",
     "freeSubdomains": "{freeSubdomains} ücretsiz {freeDomainSuffix} alt alan adı",
     "freeSubdomainsUnlimited": "Sınırsız ücretsiz {freeDomainSuffix} alt alan adı",
     "gitDeploys": "GitHub, GitLab veya herhangi bir Git uzak deposundan dağıtın",
@@ -49,7 +53,9 @@
     "selfHostedUnlimited": "Sınırsız dağıtım, proje, sunucu ve alan adı",
     "selfHostedServices": "Tüm yönetilen servisler — Postgres, Redis, posta",
     "selfHostedClients": "CLI, web ve masaüstü — tek backend",
-    "selfHostedFreeSubdomains": "Cloud'a bağlandığınızda {freeSubdomains} ücretsiz {freeDomainSuffix} alt alan adı"
+    "selfHostedFreeSubdomains": "Cloud'a bağlandığınızda {freeSubdomains} ücretsiz {freeDomainSuffix} alt alan adı",
+    "monthlyCoverage": "Ödenen dönem boyunca CPU, RAM ve depolama dahildir",
+    "namespaceCapacity": "Toplam: {namespaceCpu} vCPU, {namespaceRamGb} GB RAM, {namespaceDiskGb} GB disk"
   },
   "selfHosted": {
     "name": "Kendi sunucunuzda",
@@ -61,7 +67,12 @@
   "creditPacks": {
     "pack_5k": "{credits} kredi",
     "pack_25k": "{credits} kredi",
-    "pack_100k": "{credits} kredi"
+    "pack_100k": "{credits} kredi",
+    "pack_500": "{credits} kredi",
+    "pack_2k": "{credits} kredi",
+    "pack_400": "{credits} kredi",
+    "pack_1700": "{credits} kredi",
+    "pack_4500": "{credits} kredi"
   },
   "ui": {
     "perMonth": "/ay",

@@ -5,7 +5,9 @@
  * SSL operations live in ssl.service.ts.
  */
 
+import { reportCaughtError as observeCaughtError, diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import { findProjectDeployment } from "../../lib/active-deployment";
+import { withProjectRuntimeLock } from "../../lib/project-runtime-lock";
 import { existsSync, readFileSync } from "node:fs";
 import { repos, type Deployment } from "@repo/db";
 import { NotFoundError, ForbiddenError, deploymentBelongsToProject, type DeploymentHistoryQuery } from "@repo/core";
@@ -140,8 +142,13 @@ export async function getDeployment(deploymentId: string, organizationId: string
 export async function deleteDeployment(deploymentId: string, organizationId: string) {
   const dep = await getDeployment(deploymentId, organizationId);
   await requireGitopsRelease(dep.projectId);
+  return withProjectRuntimeLock(dep.projectId, () => deleteDeploymentLocked(deploymentId, organizationId));
+}
 
-  const project = await repos.project.findById(dep.projectId);
+async function deleteDeploymentLocked(deploymentId: string, organizationId: string) {
+  let dep = await getDeployment(deploymentId, organizationId);
+
+  let project = await repos.project.findById(dep.projectId);
   assertNotControlPlane(project);
 
   if (
@@ -149,6 +156,14 @@ export async function deleteDeployment(deploymentId: string, organizationId: str
     (await repos.deployment.hasLiveBuildExecution(dep.id, dep.projectId))
   ) {
     throw new ForbiddenError("Cannot delete a deployment that is in progress. Cancel it first.");
+  }
+  if (dep.roleHandover && dep.roleHandover.phase !== "complete") {
+    const { recoverProjectRoleHandovers } = await import("./role-handover");
+    // Explicit deletion also discards a kept candidate. Restore its predecessor
+    // safely before dropping the only record of the interrupted handover.
+    await recoverProjectRoleHandovers(dep.projectId, { discardDeploymentId: dep.id });
+    dep = await getDeployment(deploymentId, organizationId);
+    project = await repos.project.findById(dep.projectId);
   }
 
   // protectRetained: a compose service that didn't change carries its container
@@ -304,10 +319,10 @@ async function describeRestoreConsequences(
       untouchedServices,
     };
   } catch (err) {
-    console.warn(
+    errorDiagnostics.warn("platform/engine/modules/deployments/deployment.service",
       `[rollback] restore preview for ${target.id} could not describe its consequences: ${
         err instanceof Error ? err.message : String(err)
-      }`,
+      }`, err,
     );
     return { untouchedServices: [] };
   }
@@ -464,16 +479,8 @@ export async function skipPortCheck(
   organizationId: string,
   target: number | string,
 ) {
-  const dep = await getDeployment(deploymentId, organizationId);
-  const meta = (dep.meta as Record<string, unknown> | null) ?? {};
-  const existing = Array.isArray(meta.portCheckSkipped)
-    ? (meta.portCheckSkipped as (number | string)[])
-    : [];
-  if (!existing.includes(target)) {
-    await repos.deployment.updateStatus(deploymentId, dep.status, {
-      meta: { ...meta, portCheckSkipped: [...existing, target] },
-    });
-  }
+  await getDeployment(deploymentId, organizationId);
+  await repos.deployment.skipPortCheck(deploymentId, target);
   return { success: true };
 }
 
@@ -489,7 +496,8 @@ function readInstanceLog(tail?: number): LogEntry[] {
   let text: string;
   try {
     text = readFileSync(path, "utf8");
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "platform/engine/modules/deployments/deployment.service");
     return [];
   }
   const lines = text.split(/\r?\n/).filter((l) => l.length > 0);

@@ -209,6 +209,46 @@ describe("severity is defined once, across all sources", () => {
 });
 
 describe("one row per cause", () => {
+  const networkIncident = (serverId: string) => incident({
+    id: `network-${serverId}`, projectId: null, serverId, serviceKey: `server:${serverId}`,
+    serviceName: serverId, kind: "server_unreachable",
+    reason: `Cannot reach Docker over SSH (connect ENETUNREACH 192.0.2.1:22 - Local (0.0.0.0:63263))`,
+  });
+
+  it("combines three explicit network failures and stale mail health into one connection notice", async () => {
+    incidentListByOrg.mockResolvedValue(["srv-1", "srv-2", "srv-3"].map(networkIncident));
+    loadOrgContainerIssues.mockResolvedValue({ servers: [component({ component: "mail" })] });
+    const result = await listOrganizationIssues(ctx);
+    expect(result.counts).toEqual({ outage: 0, actionRequired: 1, advisory: 0, total: 1 });
+    expect(result.issues).toMatchObject([{ kind: "monitoring_offline", scope: "platform", resolveWith: [] }]);
+    expect(result.issues[0].details?.affectedServers).toHaveLength(3);
+    expect(result.issues[0].infraFix).toBeUndefined();
+    expect(result.issues[0].message).toContain("health is unknown");
+    disconnected.mockReturnValue(true);
+    expect((await listOrganizationIssues(ctx)).counts.total).toBe(1);
+  });
+
+  it("keeps independently confirmed workload and host-specific failures visible", async () => {
+    incidentListByOrg.mockResolvedValue([
+      networkIncident("srv-1"),
+      incident({ id: "app-down" }),
+      incident({ id: "other-server", projectId: null, serverId: "srv-other", kind: "server_unreachable", reason: "connect ECONNREFUSED 192.0.2.2:22" }),
+    ]);
+    const result = await listOrganizationIssues(ctx);
+    expect(result.issues.map((issue) => issue.kind)).toEqual(["workload_down", "monitoring_offline", "server_unreachable"]);
+    expect(result.counts).toMatchObject({ outage: 1, actionRequired: 2, total: 3 });
+  });
+
+  it("does not include inaccessible targets in the grouped notice or count", async () => {
+    incidentListByOrg.mockResolvedValue([networkIncident("srv-1"), networkIncident("secret-server")]);
+    checkPermissionOnResource.mockImplementation(async (_context, input) => input.resourceId !== "secret-server");
+    const result = await listOrganizationIssues({ ...ctx, role: "restricted" } as RequestContext);
+    expect(result.issues[0].details?.affectedServers).toHaveLength(1);
+    expect(JSON.stringify(result)).not.toContain("secret-server");
+    checkPermissionOnResource.mockImplementation(async (_context, input) => input.resourceId === "*");
+    expect((await listOrganizationIssues({ ...ctx, role: "restricted" } as RequestContext)).issues).toEqual([]);
+  });
+
   it("shows an observation gap for an offline desktop and removes it when connectivity returns", async () => {
     disconnected.mockReturnValue(true);
     const offline = await listOrganizationIssues(ctx);
@@ -317,18 +357,16 @@ describe("the infra gate mirrors the endpoints it replaces", () => {
     expect(listBehindByOrg).not.toHaveBeenCalled();
   });
 
-  it("drops them on cloud without asking about permissions at all", async () => {
-    // Managed containers and the health watcher are self-hosted concepts; the
-    // endpoints behind them `assertNotCloud`, so the feed must not call them.
+  it("keeps customer-server monitoring available in hosted mode with permission checks", async () => {
     envMock.CLOUD_MODE = true;
     incidentListByOrg.mockResolvedValue([incident()]);
     getOrgPendingActions.mockResolvedValue(new Map([["proj-1", [pendingAction()]]]));
 
     const { issues } = await listOrganizationIssues(ctx);
 
-    expect(issues.map((i) => i.source)).toEqual(["domain"]);
-    expect(checkPermissionOnResource).not.toHaveBeenCalled();
-    expect(loadOrgContainerIssues).not.toHaveBeenCalled();
+    expect(issues.map((i) => i.source)).toEqual(["incident", "domain"]);
+    expect(checkPermissionOnResource).toHaveBeenCalled();
+    expect(loadOrgContainerIssues).toHaveBeenCalled();
   });
 
   it("checks server:read as a list-scope read, not against one server", async () => {
@@ -503,6 +541,19 @@ describe("every row carries its own fix", () => {
     listOrganizationUpdates.mockResolvedValue([update({ behind: false })]);
 
     expect((await listOrganizationIssues(ctx)).issues).toEqual([]);
+  });
+
+  it.each([true, false])("keeps an updating row visible with behind=%s", async (behind) => {
+    listOrganizationUpdates.mockResolvedValue([update({
+      behind, latestInProgress: true, inProgressDeploymentId: "dep_update",
+    })]);
+    const { issues } = await listOrganizationIssues(ctx);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({
+      id: "update:proj-2",
+      details: { latestInProgress: true, inProgressDeploymentId: "dep_update" },
+      target: { href: "/build/dep_update" },
+    });
   });
 });
 

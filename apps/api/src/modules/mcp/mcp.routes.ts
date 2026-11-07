@@ -5,8 +5,10 @@
  * request that re-runs the full auth + permission stack (see mcp-dispatch.ts).
  */
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { Hono, type Context } from "hono";
 import { repos, type Permission } from "@repo/db";
+import { isCapability, type Capability, type GrantPermission } from "@repo/core";
 import { secureRouter } from "../../lib/secure-router";
 import { parseBearerToken } from "../../lib/bearer";
 import {
@@ -22,8 +24,12 @@ import { resolveBearerIdentity } from "../../middleware/auth";
 import { recordToolCall } from "./mcp-audit";
 import { handleMcpMessage, jsonRpcError } from "./mcp-server";
 import type { McpPrincipal } from "./mcp-tools";
+import { instanceAuthorization } from "../../lib/instance-authorization";
+import { mcpGuideRoutes } from "./mcp-guide.routes";
 
 const r = secureRouter(new Hono(), { module: "mcp", basePath: "/api/mcp" });
+
+r.hono.route("/", mcpGuideRoutes);
 
 /**
  * The caller, as this endpoint needs them: their effective capability plus the
@@ -72,12 +78,18 @@ async function resolveMcpCaller(token: string, headers: Headers): Promise<McpCal
   }
 
   let grantedRootTypes: ReadonlySet<string> = new Set();
-  let wildcardGrants: ReadonlyMap<string, readonly Permission[]> = new Map();
+  let wildcardGrants: ReadonlyMap<string, readonly GrantPermission[]> = new Map();
+  let grantedCapabilities: ReadonlySet<Capability> = new Set();
   let canCreateProjects = false;
   let sourceCapabilities: ReadonlySet<"content" | "write"> = new Set();
   if (role === "restricted" && id.hasBinding) {
     const grants = await repos.patGrant.listByToken(id.tokenId);
-    grantedRootTypes = new Set(grants.map((g) => g.resourceType));
+    // A capability-only grant (`{project, P, ["domains:read"]}`) reaches only its
+    // capability's routes, so it does not make the whole root type "granted".
+    grantedRootTypes = new Set(
+      grants.filter((g) => (g.permissions ?? []).some((p) => !isCapability(p))).map((g) => g.resourceType),
+    );
+    grantedCapabilities = new Set(grants.flatMap((g) => (g.permissions ?? []).filter(isCapability)));
     // Wildcard rows carry their permissions so the tool filter can answer the same
     // verb question the wildcard arm of `checkPermission` answers. One row per type
     // at most — `pat_grant_unique` is on (token, type, id).
@@ -110,10 +122,16 @@ async function resolveMcpCaller(token: string, headers: Headers): Promise<McpCal
 
   return {
     principal: {
+      instanceAdmin: await instanceAuthorization.allows({
+        userId: id.userId,
+        tokenScope: id.scoped ? { tokenId: id.tokenId } : null,
+        credential: { organizationId: id.organizationId, readOnly: id.readOnly },
+      }, "read"),
       role,
       readOnly: id.readOnly,
       grantedRootTypes,
       wildcardGrants,
+      grantedCapabilities,
       canCreateProjects,
       sourceCapabilities,
     },
@@ -151,8 +169,8 @@ function unauthorized(c: Context, message: string) {
  * RFC 8707 audience check. A token minted for a DIFFERENT resource must not be
  * accepted here — that's the resource server's half of the contract, and it's
  * what stops a token phished by another MCP server from being replayed against
- * this one. A token with no audience (opaque, issued before audience binding
- * existed) is unconstrained and passes, so existing clients keep working.
+ * this one. Opaque PATs pass this hint check and still require normal PAT
+ * authentication. Legacy OAuth tokens have no live receipt and are rejected.
  * Comparison is on canonicalized URLs, never raw strings.
  */
 function audienceAccepted(token: string, req: Request): boolean {
@@ -202,7 +220,8 @@ r.public("post", "/", { reason: PUBLIC_REASON, rateLimit: "mcp" }, async (c) => 
   let payload: unknown;
   try {
     payload = await c.req.json();
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "api/modules/mcp/mcp.routes");
     return c.json(jsonRpcError(null, -32700, "Parse error"), 400);
   }
 
@@ -220,7 +239,9 @@ r.public("post", "/", { reason: PUBLIC_REASON, rateLimit: "mcp" }, async (c) => 
   // never-used in Settings. `tools/call` is excluded because its sub-request stamps
   // it in authMiddleware — counting both would double every tool call.
   if (caller.hasBinding && message?.method !== "tools/call") {
-    void repos.personalAccessToken.touchLastUsed(caller.tokenId).catch(() => {});
+    void repos.personalAccessToken.touchLastUsed(caller.tokenId).catch((diagnosticFailure) => {
+      observeCaughtError(diagnosticFailure, "api/modules/mcp/mcp.routes");
+    });
   }
 
   // Read off the OUTER request — a real HTTP request from the real client. The

@@ -1,9 +1,11 @@
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import type { Context } from "hono";
 import { z } from "zod";
 import { AppError } from "@repo/core";
 import { getRequestContext } from "../../lib/request-context";
 import { ensureNamespace } from "@repo/platform/engine/lib/openship-cloud";
 import { createTenantCloudAdmin } from "@repo/platform/engine/lib/cloud-tenant-admin";
+import { authorizeCloudRelayWorkspace } from "./cloud-relay-access";
 
 const id = z.string().regex(/^[a-zA-Z0-9_-]{1,128}$/);
 const path = z.string().min(1).max(2048);
@@ -31,13 +33,14 @@ export const cloudResourceInput = z.discriminatedUnion("operation", [
 ]);
 
 async function tenant(c: Context) {
-  const { organizationId } = getRequestContext(c);
-  return createTenantCloudAdmin(organizationId, await ensureNamespace(organizationId));
+  const ctx = getRequestContext(c);
+  const workspaceId = await authorizeCloudRelayWorkspace(ctx, c.req.query("serverId"));
+  return createTenantCloudAdmin(ctx.organizationId, await ensureNamespace(ctx.organizationId, workspaceId), workspaceId);
 }
 
 /** Each operation validates ownership through the same SaaS tenant delegate. */
 export async function cloudResourceProxy(c: Context) {
-  const parsed = cloudResourceInput.safeParse(await c.req.json().catch(() => null));
+  const parsed = cloudResourceInput.safeParse(await c.req.json().catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "api/modules/cloud/cloud-resource.controller"); return null; }));
   if (!parsed.success) return c.json({ error: "Invalid Cloud resource operation", code: "CLOUD_RESOURCE_INVALID" }, 400);
   return providerResponse(async () => {
     const proxy = await tenant(c);

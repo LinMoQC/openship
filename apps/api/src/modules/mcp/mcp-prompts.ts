@@ -1,5 +1,5 @@
 import { getMcpTools } from "./mcp-tools";
-import { env } from "@repo/platform/engine/config/index";
+import { env, cloudRuntimeTarget } from "@repo/platform/engine/config/index";
 
 /**
  * MCP `prompts` — the guided-flow catalog. Tools tell an agent WHAT it can do
@@ -46,7 +46,16 @@ export function workspaceInstructions(workspace?: { organizationId: string | nul
     "Match the user's requested workspace to that list. If several workspaces are available and the destination is unspecified or ambiguous, ask which one to use before creating resources. Never substitute the default when the requested workspace is unavailable.",
     "Pass the chosen organizationId as a TOP-LEVEL argument alongside body/query on every tool call in the flow (scan, create/ensure, install, service changes, deploy and status). It is fixed scope for that call; no active-workspace switch is persisted. For an authenticated out-of-band upload, also send X-Organization-Id and X-Openship-Scope: fixed.",
     "If boundOrganizationId is set, this credential only accesses that workspace. To use another, the user must authorize a connection or create a token in that workspace; passing a different ID cannot widen access.",
-    "organizationId selects the request's workspace; it does not move an existing app. Existing project transfer endpoints handle Cloud/self-hosted moves. Cross-workspace app transfer is not currently exposed through MCP.",
+    "Workspace grants cannot authorize instance-wide administration. If an operation returns INSTANCE_SCOPE_REQUIRED, do not request broader workspace permissions or retry it; use available workspace project and server tools for the task, and explain any information you cannot inspect.",
+    `If a task requires unavailable permissions, call ${toolRef("GET", "/api/permissions/access-request")} once with query.reason and query.access explaining the minimum actions and resources needed, then wait for the user. It only presents a request, never grants access. Do not repeatedly retry denied actions, ask for credentials, or bypass the normal permission editor.`,
+    "organizationId selects the request's workspace; serverId selects where the app runs. Neither moves existing project records between Openship instances.",
+    ...(env.CLOUD_MODE ? [
+      "This is Openship Cloud. Local filesystem paths are not accessible here; use uploaded source or a git repository. Managed servers build on the server (buildStrategy:'server').",
+    ] : [
+      `To run a desktop/self-hosted project on Cloud, call ${toolRef("GET", "/api/system/servers/destinations")} and select an accessible managed server. Pass its local serverId when creating/importing the project, then deploy that project with buildStrategy:'server'. The project and source stay controlled by this instance; no transfer_to_cloud is needed. The credential must have project creation/write and destination server write permissions.`,
+      `If the server is not connected here, an authorized administrator can select it from ${toolRef("GET", "/api/system/servers/managed/available")} and use ${toolRef("POST", "/api/system/servers/managed/connect")}. Use the returned LOCAL serverId, not the remote Cloud ID.`,
+      `A Cloud account link does not grant this credential access to projects stored in Cloud. For those projects, authorize a separate MCP connection to ${cloudRuntimeTarget.api}/api/mcp and select its Cloud organizationId. CLOUD_SCOPE_UNAVAILABLE cannot be bypassed by omitting organizationId or by sending the Cloud ID to this local connection.`,
+    ]),
   ].join("\n");
 }
 
@@ -60,15 +69,44 @@ const BUG_REPORT =
 
 const PROMPTS: PromptDef[] = [
   {
+    name: "agents-and-automations",
+    title: "Specialists, tasks and automations",
+    description: "Create a scoped specialist, delegate a task, inspect and continue its conversation, or prepare an incident-triggered automation.",
+    build: (_args, ref) => [
+      "The general OpenShip assistant manages the workspace. A saved agent is a specialist with instructions, an AI connection/model, and explicitly assigned resources. A task is one inspectable conversation. An automation is an event trigger that starts a fresh task, not another execution engine.",
+      `First use ${ref("GET", "/api/assistant/agents/")} to reuse an appropriate specialist. Use ${ref("POST", "/api/assistant/agents/")} to create one when requested: name, purpose, instructions, provider/model, readOnly, and named project/server/github_repository grants. All grants must fit both your current access and the user's Assistant consent. Reuse requestId for retries. Prefer read-only for investigations; never grant unrelated resources. Creating an agent does not start work.`,
+      `Before selecting a provider or model, call ${ref("GET", "/api/assistant/agents/models")}. Use a ready provider and its defaultModel or an exact listed ID; model="" uses that connected native provider's default. Never guess model names. ASSISTANT_MODEL_UNAVAILABLE means the selected model is invalid, not that the assistant is disconnected: refresh the catalog and retry the saved request with an available choice. ASSISTANT_PROVIDER_UNAVAILABLE means that provider is unavailable on the selected host; ASSISTANT_SIGN_IN means its credentials need attention. Another ready provider can still be used when the user has not required a specific one.`,
+      `Assign work with ${ref("POST", "/api/assistant/agents/:id/tasks")}. Report acceptance accurately and return the task's conversation link. Use ${ref("GET", "/api/assistant/agents/:id/tasks/:chatId")} to inspect actual progress and results. Use ${ref("POST", "/api/assistant/agents/:id/tasks/:chatId/messages")} to send follow-up instructions to that same conversation, including during a running task. Do not busy-poll or create a second task for a follow-up.`,
+      `For recurring incident handling, inspect ${ref("GET", "/api/assistant/automations")} and check ${ref("GET", "/api/assistant/automation-permissions/:projectId")} with query.agentId. Create through ${ref("POST", "/api/assistant/automations")} using the selected agentId, app, deployment.failed or service.unhealthy trigger, response mode and existing notification channel IDs. Save enabled=false and automaticConsent=false. If the request includes activation, call ${ref("POST", "/api/assistant/automation-activation-review")} with all requested automationIds. This offers an inline Enable & continue review of the saved configuration; use it instead of refusing or sending the user through manual toggles. The review itself enables nothing. After the user approves, read the actual state and continue the remaining authorized task. Never submit approval yourself.`,
+      "Investigations and their follow-ups are read-only for the original app. Approved recovery and repository actions go through the existing reviewed automation pipeline. Agent instructions cannot expand permissions or bypass approval. Changing a specialist invalidates its old task execution scope; start a new task after reviewing the change. Each incident has its own conversation with optional existing notification channels.",
+      "Agents execute on the same Mindwire host as the assistant. Cloud can use the customer's existing paid Cloud instance directly, or a connected server they select; a separate server is not required for paid Cloud instances. Cloud never runs a customer's native agent on the shared SaaS host. Native tool setup, sign-in, provider secrets and permission approvals remain in the existing UI, outside these tools.",
+    ].join("\n\n"),
+  },
+  {
+    name: "chat-apps",
+    title: "Connect a chat app to OpenShip",
+    description: "Set up Slack, Discord, Telegram or Teams for deployment commands, assistant conversations, or both. These are interactive control-plane connections, separate from notification channels.",
+    build: (_args, ref) => [
+      `OpenShip has built-in chat-app connectors in Settings → Chat apps. Read ${ref("GET", "/api/chat-apps")} to check the current workspace's connections and this user's linking status. Never propose building another backend for this feature.`,
+      `For a new connection, call ${ref("GET", "/api/chat-apps/setup")} with query.provider and query.purpose ('commands' for the control plane, 'assistant' for AI conversations, or 'both'). It prepares the ordinary connection form and returns the exact fields and setup steps. This does not create or enable a bot. Present its inline Connect action, or setupPath in external clients, so the user can enter credentials privately. Never ask for bot tokens in conversation.`,
+      "Slack, Discord and Telegram support direct outbound connections without a public OpenShip URL. Teams uses public HTTPS webhooks. Deployment commands run through OpenShip and do not require AI or Mindwire. Assistant conversations use the sender's separately connected agent and approved access.",
+      "After saving, the connector starts paused. The user enables it in Settings → Chat apps. Each sender runs /openship link, opens the supplied URL, reviews the normal OpenShip permissions and sends the verification command back from their own chat account. Bot installation never grants a sender account access.",
+      "Use /openship help for the shared command catalog, including projects, status, logs, redeploy and restart. Destructive changes use the normal confirmation flow. Account consent and changes to bot credentials, destinations or roles stay in the existing settings form.",
+      `After the user finishes setup, call ${ref("GET", "/api/chat-apps")} again and report only the observed connection state. Connected is not proof that account linking or assistant setup is complete.`,
+    ].join("\n\n"),
+  },
+  {
     name: "openship-overview",
     title: "Openship: how to drive it via MCP",
     description:
       "Orientation: the main tool groups, the entry points for each flow, and how permission scoping (incl. per-repo GitHub grants) affects what you can see and do.",
     build: (_args, ref) =>
       [
-        "You are driving Openship (deploy/host platform) through its MCP tools. Everything you call re-runs the real API's auth + permission checks, so you can only do what this token allows — `tools/list` already hides what you can't use.",
+        "Carry out the user’s requested work with these tools, then verify the result. Prepare any required review as an actionable handoff rather than a blanket refusal. You are driving Openship (deploy/host platform) through its MCP tools. Everything you call re-runs the real API's auth + permission checks, so you can only do what this token allows — `tools/list` already hides what you can't use.",
         "",
         "Main tool groups:",
+        `- Agents and automations — ${ref("GET", "/api/assistant/agents/")} and ${ref("GET", "/api/assistant/automations")}. Read the agents-and-automations guide to delegate scoped tasks or prepare incident flows.`,
+        `- Chat apps — ${ref("GET", "/api/chat-apps")} (connection status), ${ref("GET", "/api/chat-apps/setup")} (prepare Slack/Discord/Telegram/Teams setup). Interactive deployment commands and assistant conversations are distinct from notification delivery. Read the chat-apps guide for the complete flow.`,
         `- Projects — ${ref("GET", "/api/projects")} (list), ${ref("GET", "/api/projects/:id")} (detail), config/env/resources/branch setters.`,
         `- Deployments — ${ref("POST", "/api/deployments/build/access")} (deploy), ${ref("GET", "/api/deployments/:id")} (status), ${ref("GET", "/api/deployments/:id/logs")} (logs), rollback/redeploy/restart.`,
         `- GitHub — ${ref("GET", "/api/github/home")} (accounts + repos in one call), browse repos/branches, and ${ref("GET", "/api/github/repos/:owner/:repo/detect")} for build config (read-only; you cannot create/delete repos via MCP).`,
@@ -78,7 +116,7 @@ const PROMPTS: PromptDef[] = [
         "",
         "Guided flows (fetch these prompts for step-by-step chains):",
         "- `deploy-from-git` — deploy a GitHub/linked repo.",
-        "- `deploy-a-folder` — deploy a local source folder (has an out-of-band upload step).",
+        "- `deploy-a-folder` — deploy a controller-local source folder, or upload from another machine using an authenticated HTTP client.",
         "- `install-catalog-app` — install a one-click app.",
         "- `cluster-and-scale` — private networking → server cluster → optional shared files → application deployment → scale → recovery/cleanup (self-hosted).",
         "- `cluster-database` — provision, connect, back up and recover a managed database (self-hosted).",
@@ -111,7 +149,7 @@ const PROMPTS: PromptDef[] = [
         `1. Confirm GitHub is connected and find the repo: call ${ref("GET", "/api/github/home")} (returns connection state, accounts, and repos). If you need branches, ${ref("GET", "/api/github/repos/:owner/:repo/branches")}. To learn the build config, use ${ref("GET", "/api/github/repos/:owner/:repo/detect")} — it works on a deploy-only grant and returns the detected framework/commands directly, so you do NOT need to read files to configure a deploy.`,
         `2. Detect the stack/build config before committing: ${ref("POST", "/api/deployments/prepare")} with the repo/branch. Use what it returns (framework, install/build/start commands, port) in the next step.`,
         `3. Create the project from the git source: ${ref("POST", "/api/projects")}. Bake in the detected build config. (If the project already exists, skip to step 4; you can link a repo to an existing project with ${ref("POST", "/api/projects/:id/git/link")}.)`,
-        `4. Deploy: ${ref("POST", "/api/deployments/build/access")} with the projectId from step 3. Optional wizard settings: envVars, publicEndpoints (omit to auto-derive a free subdomain), buildStrategy, runtimeMode, cloudResourceTier. Do NOT set deployTarget:'cloud' on a self-hosted instance. To redeploy an already-linked project later, ${ref("POST", "/api/deployments")} is the shortcut.`,
+        `4. Deploy: ${ref("POST", "/api/deployments/build/access")} with the projectId from step 3. The project's selected serverId determines the destination; deployTarget alone does not select a managed server. Managed servers use buildStrategy:'server'. Optional wizard settings: envVars, publicEndpoints (omit to auto-derive a free subdomain), runtimeMode, cloudResourceTier. To redeploy an already-linked project later, ${ref("POST", "/api/deployments")} is the shortcut.`,
         `5. Watch it: poll ${ref("GET", "/api/deployments/:id")} for status/urls and ${ref("GET", "/api/deployments/:id/logs")} for build/runtime logs.`,
         `6. A deploy can STOP AND ASK — it is not always running or finished. If it seems stuck, or ends up \`action_required\`, call ${ref("GET", "/api/deployments/:id/pending")}. A held deploy is waiting on a decision (e.g. the port is already in use) and will ABORT on its own at the item's \`expiresAt\`; answer it with ${ref("POST", "/api/deployments/:id/build/respond")} using an action id from that item's \`resolveWith\` — never an id you guessed. Other items there resolve the same way, each carrying the exact call to make. ${ref("GET", "/api/projects/:id/pending-actions")} is the whole-project version (also covers domains, certificates and routing) — worth a look before reporting a deploy as simply failed.`,
       ].join("\n");
@@ -119,18 +157,27 @@ const PROMPTS: PromptDef[] = [
   },
   {
     name: "deploy-a-folder",
-    title: "Deploy a local source folder (upload)",
+    title: "Deploy a local source folder",
     description:
-      "The 4-step folder-upload flow. Note step 1b: the raw tarball upload is NOT an MCP tool — you POST the bytes yourself with an HTTP client.",
+      "Use a controller-local path on desktop, or the authenticated upload flow for a folder on another machine. Source location and build location are separate choices.",
     build: (_args, ref) =>
       [
-        "Deploy a local folder that isn't in git. This flow has an out-of-band byte upload — raw binary can't cross JSON-RPC, so you upload the tarball yourself.",
+        ...(env.CLOUD_MODE ? [] : [
+          "DESKTOP / SAME MACHINE — when the folder is readable by this Openship controller, no byte upload or bearer-token extraction is needed:",
+          `1. Choose an accessible destination with ${ref("GET", "/api/system/servers/destinations")} if deploying to a server or Cloud.`,
+          `2. For a new project, call ${ref("POST", "/api/projects/import")} with name, localPath and the selected serverId. It detects the source and returns the created project. For an existing local project, use its projectId instead of creating a duplicate.`,
+          `3. Call ${ref("POST", "/api/deployments/build/access")} with that projectId and buildStrategy:'server' for a managed server. Openship reads the local source and transfers it to the selected server for the build. 'local' describes the source, not the build strategy. Do not transfer the project to Cloud.`,
+          `4. Poll ${ref("GET", "/api/deployments/:id")} and ${ref("GET", "/api/deployments/:id/logs")}.`,
+          "",
+        ]),
+        "UPLOAD — for a folder on a different machine, raw binary cannot cross JSON-RPC. Use an authenticated HTTP uploader (SDK, CLI or browser). OAuth bearer tokens stay in the MCP client; do not ask the assistant to extract them. If no authenticated uploader is available, use the desktop connection on the folder's machine or a git source.",
         "",
-        `1. Open an upload session: ${ref("POST", "/api/projects/folder/session")}. It returns \`upload\` = { url, absoluteUrl, method, headers, requiresAuth } and a sessionId.`,
+        `Before opening a session, choose or create a project with ${ref("POST", "/api/projects")} (name, gitProvider:'upload', serverId). A credential limited to its own projects must create the project first, then pass that projectId through session and ensure; an unbound session requires wildcard project write access.`,
+        `1. Open an upload session: ${ref("POST", "/api/projects/folder/session")} with projectId. It returns \`upload\` = { url, absoluteUrl, method, headers, requiresAuth } and a sessionId.`,
         "1b. OUT OF BAND — gzip your folder into a tarball and POST the bytes to `upload.absoluteUrl` (the ready-to-use URL; `upload.url` is the same target relative to your API base) with the returned headers and Content-Type: application/gzip, plus your `Authorization: Bearer <token>` when `upload.requiresAuth` is true. Use a plain HTTP client; there is no MCP tool for this.",
         `2. Detect the uploaded source's stack: ${ref("POST", "/api/projects/folder/scan/:sessionId")} (body may be {}). Returns framework, package manager, install/build/start commands, output dir, port — plus a \`services\` array for a docker-compose folder.`,
-        `3. Create/update the project that carries the build config: ${ref("POST", "/api/projects/ensure")}. Map the scan fields in (framework = the scan's stack id) and set gitProvider:'upload'. If the scan returned \`services\`, pass that array through verbatim AND include \`uploadSessionId\` — env values come back masked ("••••••••"), and the session is what restores the real ones. Returns the project id.`,
-        `4. Deploy: ${ref("POST", "/api/deployments/build/access")} with the projectId (step 3) and uploadSessionId (step 1). Then watch with ${ref("GET", "/api/deployments/:id")} and ${ref("GET", "/api/deployments/:id/logs")}.`,
+        `3. Update that project's build config: ${ref("POST", "/api/projects/ensure")} with its explicit projectId and name. Map the scan fields in (framework = the scan's stack id) and set gitProvider:'upload'. If the scan returned \`services\`, pass that array through verbatim AND include \`uploadSessionId\` — env values come back masked ("••••••••"), and the session is what restores the real ones.`,
+        `4. Deploy: ${ref("POST", "/api/deployments/build/access")} with projectId and uploadSessionId (step 1); use buildStrategy:'server' for a managed server. Then watch with ${ref("GET", "/api/deployments/:id")} and ${ref("GET", "/api/deployments/:id/logs")}.`,
       ].join("\n"),
   },
   {

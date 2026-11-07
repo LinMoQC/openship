@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, onTestFinished, vi } from "vitest";
 import { initPlatform, resetPlatform } from "@repo/adapters";
 import { OpenshipClient } from "@repo/sdk/client";
 import { makeApp, seedOwner, seedServer, resetJobs, installFakeRunner, repos } from "../jobs/_harness";
@@ -8,6 +8,7 @@ import { healthRoutes } from "../../../src/modules/health/health.routes";
 const h = vi.hoisted(() => ({
   offline: false,
   fail: false,
+  failureReason: "Cannot reach the SSH server: Timed out while waiting for handshake",
   reads: vi.fn(),
   dispose: vi.fn(),
   notify: vi.fn(),
@@ -29,7 +30,7 @@ vi.mock("@repo/platform/engine/lib/deployment-runtime", async (original) => ({
       listAllContainers: async () => {
         h.reads();
         if (h.gate) await h.gate;
-        if (h.fail) throw new Error("Cannot reach the SSH server: Timed out while waiting for handshake");
+        if (h.fail) throw new Error(h.failureReason);
         return [{ id: "observed-container", names: ["/observed-container"], state: "running", status: "Up", labels: { "openship.project": h.projectId } }];
       },
       dispose: h.dispose,
@@ -92,17 +93,49 @@ describe("desktop monitoring recovery through HTTP and the SDK", () => {
     expect(await repos.serviceIncident.findOpenForServer(serverId)).toBeUndefined();
 
     h.offline = false;
+    // A live network interface does not establish a route. Exercise the actual
+    // serialized SSH/Docker error through persistence, HTTP and the SDK too.
     h.fail = true;
-    expect(await scan()).toMatchObject({ offline: 0, unreachable: 1, opened: 1 });
+    h.failureReason = "(HTTP code 502) unexpected - Could not reach Docker over SSH: connect ENETUNREACH 192.0.2.1:22 - Local (0.0.0.0:63263)";
+    expect(await scan()).toMatchObject({ offline: 1, unreachable: 0, opened: 1 });
+    const connection = await client.issues.list();
+    expect(connection.issues).toMatchObject([{
+      kind: "monitoring_offline", severity: "action_required",
+      details: { affectedServers: [{ id: serverId }] }, resolveWith: [],
+    }]);
+    expect(connection.counts).toMatchObject({ outage: 0, actionRequired: 1, total: 1 });
+    expect(await repos.serviceIncident.findOpenForServer(serverId)).toMatchObject({ notifiedAt: null });
+    expect(h.notify).not.toHaveBeenCalled();
+
+    h.fail = false;
+    expect(await scan()).toMatchObject({ offline: 0, unreachable: 0, resolved: 1 });
+    expect(await repos.serviceIncident.findOpenForServer(serverId)).toBeUndefined();
+    expect((await client.issues.list()).issues).toEqual([]);
+    expect(h.notify).not.toHaveBeenCalled();
+
+    // Keep job scheduling real while advancing only the observation clock. A
+    // single missed probe is pending; a later agreeing scan confirms the outage.
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() });
+    onTestFinished(() => vi.useRealTimers());
+    h.fail = true;
+    h.failureReason = "Cannot reach the SSH server: Timed out while waiting for handshake";
+    expect(await scan()).toMatchObject({ offline: 0, unreachable: 1, opened: 0, pending: 1 });
+    expect(await repos.serviceIncident.findOpenForServer(serverId)).toBeUndefined();
+    expect((await client.issues.list()).issues).toEqual([]);
+    expect(h.notify).not.toHaveBeenCalled();
+
+    vi.setSystemTime(Date.now() + 5_000);
+    expect(await scan()).toMatchObject({ offline: 0, unreachable: 1, opened: 1, pending: 0 });
     const failure = await client.issues.list();
     expect(failure.issues).toMatchObject([{ kind: "server_unreachable", severity: "action_required" }]);
     expect(await repos.serviceIncident.findOpenForServer(serverId)).toBeDefined();
+    expect(h.notify.mock.calls.map(([event]) => event.eventType)).toEqual(["server.unreachable"]);
 
     h.fail = false;
     let release!: () => void;
     h.gate = new Promise<void>(resolve => { release = resolve; });
     const accepted = await client.issues.rescan({ healthOnly: true });
-    await vi.waitFor(() => expect(h.reads).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(h.reads).toHaveBeenCalledTimes(5));
     try {
       // Older SDKs send Content-Type: application/json with no body. Keep that
       // valid, and attach concurrent callers to the existing scanner admission.
@@ -118,9 +151,13 @@ describe("desktop monitoring recovery through HTTP and the SDK", () => {
     expect(await finishScan()).toMatchObject({ unreachable: 0, resolved: 1 });
     expect(await repos.serviceIncident.findOpenForServer(serverId)).toBeUndefined();
     expect((await client.issues.list()).issues).toEqual([]);
-    expect((await client.issues.list({ status: "resolved" })).issues).toMatchObject([{ kind: "server_unreachable", resolvedAt: expect.any(String) }]);
-    expect(h.reads).toHaveBeenCalledTimes(2);
-    expect(h.dispose).toHaveBeenCalledTimes(2);
+    expect((await client.issues.list({ status: "resolved" })).issues).toMatchObject([
+      { kind: "server_unreachable", resolvedAt: expect.any(String) },
+      { kind: "server_unreachable", resolvedAt: expect.any(String) },
+    ]);
+    expect(h.notify.mock.calls.map(([event]) => event.eventType)).toEqual(["server.unreachable", "server.reachable"]);
+    expect(h.reads).toHaveBeenCalledTimes(5);
+    expect(h.dispose).toHaveBeenCalledTimes(5);
   });
 
   it("retains instance authority for health-only scans", async () => {

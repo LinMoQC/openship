@@ -9,25 +9,27 @@ import { usePlatform } from "@/context/PlatformContext";
 import { getFrameworkConfig } from "@/components/import-project/Frameworks";
 import { STACKS } from "@repo/core";
 import { useI18n, interpolate } from "@/components/i18n-provider";
+import { resolveBuildLocation } from "@/components/import-project/deploy-target-label";
 
 const BuildSummary: React.FC = () => {
   const { config } = useDeployment();
   const { t } = useI18n();
   const { baseDomain } = usePlatform();
-  const isServices = usesServiceDeployment(config);
-  const isApp = config.projectType === "app" || (config.projectType === "services" && !isServices);
+  const isMonorepo = config.projectType === "monorepo" && config.serviceDeploymentMode !== "single";
+  const isServices = usesServiceDeployment(config) || isMonorepo;
+  const isApp =
+    config.projectType === "app" ||
+    ((config.projectType === "services" || config.projectType === "monorepo") && !isServices);
   const isDocker = config.projectType === "docker";
 
   const fw = isApp ? getFrameworkConfig(config.framework) : null;
   const stackDef = STACKS[config.framework as keyof typeof STACKS];
 
-  const services = config.services || [];
-  const exposedServices = services.filter((s) => s.exposed);
-  // Build location follows buildStrategy FIRST: a "local" build runs on this
-  // machine even when the deploy target is Openship Cloud (local-orchestrated
-  // cloud — build here, upload the output to the cloud workspace). Only a
-  // SERVER build takes the target's name ("Openship Cloud" vs generic "Server").
-  const buildLocation = config.buildStrategy === "local"
+  const services = isMonorepo
+    ? (config.monorepoApps ?? []).filter((app) => app.enabled)
+    : config.services || [];
+  const exposedServices = services.filter((s) => s.exposed !== false);
+  const buildLocation = resolveBuildLocation(config) === "local"
     ? {
         label: t.deploy.buildSummary.localMachine,
         icon: <UiIcon name="monitor" className="size-3.5 text-muted-foreground" />,
@@ -85,7 +87,7 @@ const BuildSummary: React.FC = () => {
       : (endpointHosts[0] ?? "—");
   const extraEndpointCount = endpointHosts.length > 1 ? endpointHosts.length - 1 : 0;
   return (
-    <div className="p-4 rounded-xl bg-gradient-to-br from-primary/5 via-primary/3 to-transparent border border-primary/10 space-y-3">
+    <div className="p-4 rounded-2xl bg-card space-y-3">
       <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
         {t.deploy.buildSummary.title}
       </p>
@@ -138,7 +140,7 @@ const BuildSummary: React.FC = () => {
 
         {/* Compact app details */}
         {isApp && (
-          <div className="rounded-lg border border-border/40 bg-background/40 p-3">
+          <div className="rounded-xl bg-card p-3">
             <div className="space-y-1.5">
               {appDetailItems.map((item) => (
                 <div key={item.label} className="flex items-start gap-2 text-xs min-w-0">
@@ -154,20 +156,18 @@ const BuildSummary: React.FC = () => {
         )}
 
         {/* Compact stack/runtime details for non-app projects */}
-        {!isApp && (
-          <div className="rounded-lg border border-border/40 bg-background/40 p-3 space-y-2">
+        {!isApp && !isMonorepo && (
+          <div className="rounded-xl bg-card p-3 space-y-2">
             <div className="flex items-center gap-2.5 min-w-0">
               <div
                 className={`w-7 h-7 rounded-md flex items-center justify-center overflow-hidden shrink-0 ${
                   isServices || isDocker
-                    ? "bg-[#2496ED]/12 ring-1 ring-inset ring-[#2496ED]/25"
+                    ? "bg-info-bg"
                     : "bg-muted/60"
                 }`}
               >
                 {isServices || isDocker ? (
-                  // Docker / Compose: the whale in its brand blue on a faint
-                  // tinted chip — a light brand touch, not the full logo lockup.
-                  <UiIcon name="docker" className="size-4 text-[#2496ED]" />
+                  <UiIcon name="docker" className="size-4 text-info" />
                 ) : (
                   <UiIcon name="window" className="size-3.5 text-muted-foreground" />
                 )}

@@ -1,10 +1,13 @@
+import { createHash } from "node:crypto";
+import { startWorkflowJob, workflowJobRuns } from "./job-workflow";
+import { workflowJobConfig } from "./job.types";
 /**
  * Custom (command) job execution.
  *
  * A custom job runs a shell command — which may be `docker run --rm <image>
- * <cmd>` — on one or more servers over the pooled SSH executor, streaming each
+ * <cmd>` — on one or more connected or managed servers, streaming each
  * output line to the job-run SSE bus and storing captured output on the row.
- * Reuses the platform's `sshManager.withExecutor → streamExec` primitive.
+ * Reuses the shared server connection and streamExec primitive.
  *
  * Advanced policies handled here:
  *   - timeout    aborts the executor stream and awaits settlement before releasing
@@ -21,32 +24,31 @@
  *   - dependencies   on success, fire jobs whose dependsOn is now all-green.
  */
 
+import { reportCaughtError as observeCaughtError, diagnostics as errorDiagnostics, reportError } from "@repo/core/diagnostics";
+import { enrichErrorContext } from "@repo/core/diagnostics/node";
 import { repos, type Job, type JobRun } from "@repo/db";
 import { deferBackgroundWork } from "../../lib/background-work";
 import { assertNativeJobs } from "../../native/execution-policy";
-import { safeErrorMessage } from "@repo/core";
+import { AppError, NotFoundError, safeErrorMessage, shellQuote } from "@repo/core";
+import { OperationError } from "@repo/contracts";
 import type { LogEntry } from "@repo/adapters";
-import { sshManager } from "../../lib/ssh-manager";
+import { withServerExecution } from "../../lib/server-execution";
+import { env } from "../../config";
+import { assertManagedServerCanWork } from "../../lib/cloud-workspace-access";
 import { decryptEnvMap } from "../../lib/encryption";
 import { notification } from "../../lib/notification-dispatcher";
-import { jobRunBus } from "./job-run.sse";
+import { createJobRunRecorder } from "./job-run-recorder";
 import { boundedStorableText } from "../deployments/build-log-sanitize";
 import {
   resolveServerIds,
+  jobTargetsOrganization,
   type CommandConfig,
   type JobNotifyConfig,
   type JobRunState,
 } from "./job.types";
 
-/** Cap stored output so a chatty command can't bloat the row. */
-const MAX_OUTPUT = 200_000;
 const MAX_ERROR = 4_096;
 const VALID_ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
-
-/** Stand-in when the captured text is the reason the row won't write. */
-const OUTPUT_UNSTORABLE =
-  "[output omitted — the captured command output could not be stored; see server logs]";
-const ERROR_UNSTORABLE = "Command failed (details could not be stored; see server logs)";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -55,11 +57,6 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 function primaryServerId(cfg: CommandConfig): string | null {
   const ids = resolveServerIds(cfg);
   return ids.length === 1 ? ids[0] : null;
-}
-
-/** Single-quote a value for a POSIX shell (escaping embedded quotes). */
-function shellQuote(v: string): string {
-  return `'${v.replace(/'/g, `'\\''`)}'`;
 }
 
 /** Prepend `export K='v';` for each (valid-identifier) env var. */
@@ -73,8 +70,36 @@ function buildCommand(cfg: CommandConfig): string {
   return exports ? `${exports}; ${command}` : command;
 }
 
+async function commandTargets(cfg: CommandConfig) {
+  const ids = resolveServerIds(cfg);
+  const servers = await repos.server.getMany(ids);
+  const organizationId = jobTargetsOrganization(ids, servers);
+  if (!organizationId || ids.some(id => !servers.has(id) || (env.CLOUD_MODE && !servers.get(id)?.workspaceId)))
+    throw new NotFoundError("Job target server");
+  return { organizationId, servers: ids.map(id => servers.get(id)!) };
+}
+
+/** Check every target before starting any command, including every retry. */
+async function assertCommandTargetsReady(cfg: CommandConfig, expectedOrganizationId?: string) {
+  const targets = await commandTargets(cfg);
+  if (expectedOrganizationId && targets.organizationId !== expectedOrganizationId)
+    throw new NotFoundError("Job target server");
+  for (const server of targets.servers) {
+    if (!server.workspaceId) continue;
+    try {
+      await assertManagedServerCanWork(targets.organizationId, server.workspaceId);
+    } catch (error) {
+      if (error instanceof AppError && error.code === "CLOUD_BILLING_BLOCKED")
+        throw new OperationError(error.message, error.statusCode, error.code, { workspaceId: server.workspaceId, serverId: server.id });
+      throw error;
+    }
+  }
+  return targets;
+}
+
 /** Run the command on one server, holding the pooled connection for the run. */
 async function runOnServer(
+  organizationId: string,
   serverId: string,
   command: string,
   onLine: (entry: LogEntry) => void,
@@ -82,13 +107,11 @@ async function runOnServer(
 ): Promise<{ code: number; output: string }> {
   const abort = new AbortController();
   const timer = timeoutMs ? setTimeout(() => abort.abort(), timeoutMs) : undefined;
-  let retained = false;
   try {
-    sshManager.retain(serverId);
-    retained = true;
-    const result = await sshManager.withExecutor(serverId, (executor) =>
-      executor.streamExec(command, onLine, { signal: abort.signal }),
-    );
+    const result = await withServerExecution(organizationId, serverId, executor => {
+      abort.signal.throwIfAborted();
+      return executor.streamExec(command, onLine, { signal: abort.signal });
+    }, { mutation: true, scope: "job" });
     if (abort.signal.aborted) throw new Error(`Command timed out after ${timeoutMs}ms`);
     return result;
   } catch (error) {
@@ -96,7 +119,6 @@ async function runOnServer(
     throw error;
   } finally {
     if (timer) clearTimeout(timer);
-    if (retained) sshManager.release(serverId);
   }
 }
 
@@ -107,30 +129,32 @@ async function runOnServer(
  *  retry. Never throws. */
 async function executeAttempt(
   cfg: CommandConfig,
-  streamId: string,
+  publish: (line: string, level: LogEntry["level"]) => void,
+  organizationId: string | null,
 ): Promise<{ status: JobRunState; output: string; error?: string; exitCode?: number }> {
-  const publish = (line: string, level: LogEntry["level"]) =>
-    jobRunBus.publish(streamId, { type: "log", line, level });
   try {
     const servers = resolveServerIds(cfg);
     if (!servers.length || !cfg.command?.trim()) {
       throw new Error("Custom job is missing a target server or command.");
     }
+    if (!organizationId) throw new NotFoundError("Job target server");
+    await assertCommandTargetsReady(cfg, organizationId);
     const command = buildCommand(cfg);
 
     let code: number | null;
     let output: string;
     if (servers.length === 1) {
-      const r = await runOnServer(servers[0], command, (e) => publish(e.message, e.level), cfg.timeoutMs);
+      const r = await runOnServer(organizationId, servers[0], command, (e) => publish(e.message, e.level), cfg.timeoutMs);
       output = r.output;
       code = r.code;
     } else {
       const results = await Promise.all(
         servers.map(async (sid) => {
           try {
-            const r = await runOnServer(sid, command, (e) => publish(`[${sid}] ${e.message}`, e.level), cfg.timeoutMs);
+            const r = await runOnServer(organizationId, sid, command, (e) => publish(`[${sid}] ${e.message}`, e.level), cfg.timeoutMs);
             return { sid, code: r.code, output: r.output };
           } catch (err) {
+            observeCaughtError(err, "platform/engine/modules/jobs/job-command");
             const msg = safeErrorMessage(err);
             publish(`[${sid}] ${msg}`, "error");
             return { sid, code: null, output: msg };
@@ -151,6 +175,7 @@ async function executeAttempt(
           error: code === null ? "Command failed without an exit status" : `Command exited with code ${code}`,
         };
   } catch (err) {
+    observeCaughtError(err, "platform/engine/modules/jobs/job-command");
     const message = safeErrorMessage(err);
     publish(message, "error");
     return { status: "failed", output: message, error: message };
@@ -168,23 +193,28 @@ async function runLoop(row: Job, run: JobRun): Promise<void> {
   const maxAttempts = Math.max(1, cfg.retry?.maxAttempts ?? 1);
   const backoffMs = Math.max(0, (cfg.retry?.backoffSeconds ?? 0) * 1000);
   const startedMs = Date.now();
+  const organizationId = await commandTargets(cfg).then(targets => targets.organizationId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/jobs/job-command"); return null; });
 
-  await emitJobRun(row, run.id, "running");
+  await emitJobRun(row, run.id, "running", organizationId);
+  enrichErrorContext({ jobId: row.key, runId: run.id, organizationId: organizationId ?? undefined });
 
   let finalStatus: JobRunState = "failed";
   let exitCode: number | undefined;
   let lastError: string | undefined;
   let attemptsUsed = 0;
   const chunks: string[] = [];
+  const recorder = createJobRunRecorder({ ...run, startedAt: run.startedAt ?? new Date(startedMs) });
+  const publish = (message: string, level: LogEntry["level"]) =>
+    recorder.onLog({ timestamp: new Date().toISOString(), message, level });
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     attemptsUsed = attempt;
     if (attempt > 1) {
       const marker = `── retry ${attempt}/${maxAttempts} ──`;
-      jobRunBus.publish(run.id, { type: "log", line: marker, level: "info" });
+      publish(marker, "info");
       chunks.push(marker);
     }
-    const res = await executeAttempt(cfg, run.id);
+    const res = await executeAttempt(cfg, publish, organizationId);
     chunks.push(res.output);
     exitCode = res.exitCode;
     if (res.status === "success") {
@@ -198,76 +228,19 @@ async function runLoop(row: Job, run: JobRun): Promise<void> {
   }
 
   const durationMs = Date.now() - startedMs;
-  await finishRunRow(run.id, row.key, {
-    status: finalStatus,
-    durationMs,
-    summary: { exitCode, attempts: attemptsUsed },
-    output: boundedStorableText(chunks.join("\n"), MAX_OUTPUT),
-    error:
-      finalStatus === "failed"
-        ? boundedStorableText(lastError ?? "Command failed", MAX_ERROR)
-        : undefined,
+  if (finalStatus === "failed") reportError(lastError ?? "Job command failed", {
+    kind: "background", component: "job-command", jobId: row.key, runId: run.id,
+    organizationId: organizationId ?? undefined, durationMs, attempt: attemptsUsed, handled: true,
   });
-  try {
-    jobRunBus.publish(run.id, { type: "complete", status: finalStatus, error: lastError });
-  } catch (err) {
-    console.error(
-      `[job] ${row.key} run ${run.id}: terminal SSE publish failed: ${safeErrorMessage(err)}`,
-    );
-  }
+  await recorder.finish(finalStatus, { exitCode, attempts: attemptsUsed }, lastError, chunks.join("\n"));
 
-  await emitJobRun(row, run.id, finalStatus, {
+  await emitJobRun(row, run.id, finalStatus, organizationId, {
     durationMs,
     exitCode,
     error: lastError ? boundedStorableText(lastError, MAX_ERROR) : undefined,
     output: chunks.join("\n"),
   });
-  if (finalStatus === "success") await fireDependents(row.key);
-}
-
-type FinishData = {
-  status: "success" | "failed";
-  durationMs: number;
-  summary: Record<string, unknown>;
-  output: string;
-  error?: string;
-};
-
-/**
- * Close the run row without ever letting its OUTPUT strand it at "running".
- *
- * `output`/`error` are raw remote command bytes and `job_run.output` is a text
- * column: a NUL makes the UPDATE throw, and that throw used to precede the
- * terminal `complete` SSE event, the notification, and the dependency fan-out —
- * so the row sat "running" forever, the stream never closed, and dependents
- * never fired. The outcome is therefore retried with progressively less payload
- * until the row is terminal; only a dead database can defeat all three.
- */
-async function finishRunRow(runId: string, jobKey: string, data: FinishData): Promise<void> {
-  const attempts: FinishData[] = [
-    data,
-    { ...data, output: OUTPUT_UNSTORABLE },
-    {
-      status: data.status,
-      durationMs: data.durationMs,
-      summary: data.summary,
-      output: OUTPUT_UNSTORABLE,
-      error: data.status === "failed" ? ERROR_UNSTORABLE : undefined,
-    },
-  ];
-  for (const attempt of attempts) {
-    try {
-      await repos.jobRun.finish(runId, attempt);
-      return;
-    } catch (err) {
-      console.error(
-        `[job] ${jobKey} run ${runId}: finish write rejected: ${safeErrorMessage(err)}`,
-      );
-    }
-  }
-  console.error(
-    `[job] ${jobKey} run ${runId}: could not record the terminal status — the row is left "running" for the boot sweep to reconcile`,
-  );
+  if (finalStatus === "success" && organizationId) await fireDependents(row.key, organizationId, run.id);
 }
 
 /** Scheduled tick — awaited (inside a runner timer). Reads the latest row so
@@ -275,7 +248,7 @@ async function finishRunRow(runId: string, jobKey: string, data: FinishData): Pr
 export async function runCommandJobTick(key: string): Promise<void> {
   assertNativeJobs();
   const row = await repos.job.findByKey(key);
-  if (!row || !row.enabled || row.actionType !== "command") return;
+  if (!row || !row.enabled || row.actionType !== "command" || row.scheduleType !== "recurring") return;
   const cfg = (row.actionConfig ?? {}) as CommandConfig;
   const single = primaryServerId(cfg);
   const run = await repos.jobRun.start({ jobId: key, kind: "custom", trigger: "schedule", serverId: single, serverIds: resolveServerIds(cfg) });
@@ -287,13 +260,18 @@ export async function runCommandJobTick(key: string): Promise<void> {
 export async function startCommandRun(
   row: Job,
   trigger: "manual" | "dependency" | "event" | "once" = "manual",
+  identity?: string,
 ): Promise<string> {
   assertNativeJobs();
   const cfg = (row.actionConfig ?? {}) as CommandConfig;
+  if (trigger === "manual") await assertCommandTargetsReady(cfg);
   const single = primaryServerId(cfg);
-  const run = await repos.jobRun.start({ jobId: row.key, kind: "custom", trigger, serverId: single, serverIds: resolveServerIds(cfg) });
+  const input = { jobId: row.key, kind: "custom", trigger, serverId: single, serverIds: resolveServerIds(cfg) };
+  const receipt = identity ? `jrun_${createHash("sha256").update(`${row.key}:${row.updatedAt.toISOString()}:${identity}`).digest("hex")}` : undefined;
+  const run = receipt ? await repos.jobRun.startOnce(input, receipt) : await repos.jobRun.start(input);
+  if (!run) return receipt!;
   void deferBackgroundWork(() => runLoop(row, run)).catch((err) =>
-      console.error(`[job] ${row.key} run failed:`, safeErrorMessage(err)),
+      errorDiagnostics.error("platform/engine/modules/jobs/job-command", `[job] ${row.key} run failed:`, safeErrorMessage(err), err),
   );
   return run.id;
 }
@@ -305,9 +283,10 @@ export async function runDueOnceJobs(): Promise<{ fired: number }> {
   const jobs = await repos.job.listAll();
   let fired = 0;
   for (const job of jobs) {
-    if (job.scheduleType !== "once" || !job.enabled || job.actionType !== "command") continue;
+    if (job.scheduleType !== "once" || !job.enabled || !["command", "workflow"].includes(job.actionType)) continue;
     if (!job.runAt || job.runAt.getTime() > now) continue;
-    await startCommandRun(job, "once");
+    if (job.actionType === "workflow") await startWorkflowJob(job, "once");
+    else await startCommandRun(job, "once");
     await repos.job.update(job.key, { enabled: false, runAt: null });
     fired++;
   }
@@ -321,11 +300,6 @@ const STATE_EVENT: Record<JobRunState, string> = {
   success: "job_run.succeeded",
   failed: "job_run.failed",
 };
-
-async function resolveOrgIdForUser(userId: string): Promise<string | null> {
-  const members = await repos.member.listByUser(userId).catch(() => []);
-  return members[0]?.organizationId ?? null;
-}
 
 const MAX_NOTIFY_LOG_LINES = 20;
 const MAX_NOTIFY_LOG_CHARS = 2000;
@@ -342,10 +316,11 @@ function extractLogExcerpt(output?: string): string | undefined {
 
 /** Notify on a run state. Per-job `notifyConfig` (if present) OVERRIDES the
  *  global Settings subscriptions — its channels/states win, no double-fire. */
-async function emitJobRun(
-  row: Job,
+export async function emitJobRun(
+  row: Pick<Job, "key" | "label" | "notifyConfig">,
   runId: string,
   status: JobRunState,
+  organizationId: string | null,
   meta?: {
     durationMs?: number;
     exitCode?: number;
@@ -353,6 +328,7 @@ async function emitJobRun(
     output?: string;
   },
 ): Promise<void> {
+  if (!organizationId) return;
   try {
     const logExcerpt = extractLogExcerpt(meta?.output);
     const payload: Record<string, unknown> = {
@@ -373,11 +349,10 @@ async function emitJobRun(
       for (const channelId of notify.channels) {
         const channel = await repos.notificationChannel.findById(channelId);
         if (!channel || !channel.enabled || !channel.verified) continue;
-        const orgId = await resolveOrgIdForUser(channel.userId);
-        if (!orgId) continue;
+        if (!(await repos.member.isMember(organizationId, channel.userId))) continue;
         await repos.notificationDelivery.create({
           userId: channel.userId,
-          organizationId: orgId,
+          organizationId,
           auditEventId: null,
           category: `job.run.${status === "success" ? "succeeded" : status === "failed" ? "failed" : "started"}`,
           channelId: channel.id,
@@ -391,17 +366,15 @@ async function emitJobRun(
     }
 
     // Global: route through the dispatcher (maps eventType → category → subs).
-    const orgId = row.createdBy ? await resolveOrgIdForUser(row.createdBy) : null;
-    if (!orgId) return;
     notification.emit({
-      organizationId: orgId,
+      organizationId,
       eventType: STATE_EVENT[status],
       resourceType: "job",
       resourceId: row.key,
       payload,
     });
   } catch (err) {
-    console.warn(`[job] notify failed for ${row.key}: ${safeErrorMessage(err)}`);
+    errorDiagnostics.warn("platform/engine/modules/jobs/job-command", `[job] notify failed for ${row.key}: ${safeErrorMessage(err)}`, err);
   }
 }
 
@@ -410,22 +383,29 @@ async function emitJobRun(
 /** On a job's success, fire any enabled job that depends on it — but only once
  *  ALL of that dependent's dependencies are currently green. Cycles are
  *  rejected at create/update time, so this terminates. */
-async function fireDependents(jobKey: string): Promise<void> {
-  try {
-    const jobs = await repos.job.listAll();
-    for (const dep of jobs) {
-      if (!dep.enabled || dep.actionType !== "command") continue;
-      const deps = dep.dependsOn ?? [];
-      if (!deps.includes(jobKey)) continue;
-      const greens = await Promise.all(
-        deps.map(async (k) => {
-          const [last] = await repos.jobRun.listRecent({ jobId: k, limit: 1 });
-          return last?.status === "success";
-        }),
-      );
-      if (greens.every(Boolean)) await startCommandRun(dep, "dependency");
+export async function fireDependents(jobKey: string, organizationId: string, sourceRunId?: string): Promise<void> {
+  // The calling controller owns reporting and recovery. A dispatch failure must
+  // keep an Actions run unsettled; retries reuse each dependent's run identity.
+  const jobs = await repos.job.listAll();
+  const ids = new Map(jobs.map(job => [job.key, resolveServerIds((job.actionConfig ?? {}) as CommandConfig)]));
+  const servers = await repos.server.getMany([...new Set([...ids.values()].flat())]);
+  const owner = (row: Job) => workflowJobConfig(row)?.authority.organizationId ?? jobTargetsOrganization(ids.get(row.key) ?? [], servers);
+  for (const dep of jobs) {
+    if (!dep.enabled || !["command", "workflow"].includes(dep.actionType)) continue;
+    if (owner(dep) !== organizationId) continue;
+    const deps = dep.dependsOn ?? [];
+    if (!deps.includes(jobKey)) continue;
+    const greens = await Promise.all(
+      deps.map(async (k) => {
+        const dependency = jobs.find(row => row.key === k);
+        if (!dependency || owner(dependency) !== organizationId) return false;
+        const [last] = dependency.actionType === "workflow" ? await workflowJobRuns(dependency, 1) : await repos.jobRun.listRecent({ jobId: k, limit: 1 });
+        return last?.status === "success";
+      }),
+    );
+    if (greens.every(Boolean)) {
+      if (dep.actionType === "workflow") await startWorkflowJob(dep, "dependency", sourceRunId);
+      else await startCommandRun(dep, "dependency", sourceRunId);
     }
-  } catch (err) {
-    console.warn(`[job] dependency dispatch failed for ${jobKey}: ${safeErrorMessage(err)}`);
   }
 }

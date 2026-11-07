@@ -1,6 +1,6 @@
 {
   "name": "@repo/platform",
-  "version": "0.8.0",
+  "version": "0.9.10",
   "private": true,
   "type": "module",
   "main": "src/index.ts",
@@ -30,7 +30,12 @@
     "build:native": "bun run build-native.ts"
   },
   "dependencies": {
-    "@better-auth/drizzle-adapter": "^1.5.4",
+    "@actions/expressions": "0.3.61",
+    "@actions/workflow-parser": "0.3.61",
+    "@better-auth/core": "1.7.15",
+    "@better-auth/drizzle-adapter": "1.7.15",
+    "@better-auth/oauth-provider": "1.7.15",
+    "@better-auth/passkey": "1.7.15",
     "@octokit/auth-oauth-device": "^8.0.3",
     "@octokit/request": "^10.0.8",
     "@repo/adapters": "workspace:*",
@@ -38,26 +43,31 @@
     "@repo/core": "workspace:*",
     "@repo/db": "workspace:*",
     "@sinclair/typebox": "^0.34.48",
-    "better-auth": "^1.5.4",
+    "better-auth": "1.7.15",
     "bullmq": "^5.70.4",
     "cron-parser": "^4.9.0",
     "dockerode": "^4.0.9",
+    "drizzle-orm": "^0.45.1",
     "ioredis": "^5.10.0",
-    "ipaddr.js": "^2.4.0",
+    "jose": "6.2.0",
     "maxmind": "^5.0.6",
-    "nodemailer": "^9.0.3",
+    "nodemailer": "^10.1.7",
     "pino": "^10.3.1",
     "ssh2": "^1.17.0",
     "stripe": "^20.4.0",
     "tar": "^7.5.22",
     "yaml": "^2.8.2",
-    "zod": "^4.3.6"
+    "zod": "^4.3.6",
+    "mindwire": "0.1.60"
   },
   "devDependencies": {
+    "@actions/artifact": "2.3.2",
+    "@actions/cache": "4.1.0",
+    "@better-auth/utils": "0.4.2",
     "@types/node": "^22.13.0",
+    "@types/ssh2": "^1.15.5",
     "tsup": "^8.5.1",
     "typescript": "^5.9.3",
-    "vitest": "^4.0.18",
-    "@types/nodemailer": "^8.0.1"
+    "vitest": "^4.1.12"
   }
 }

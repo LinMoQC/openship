@@ -1,6 +1,7 @@
 "use client";
 
 import { Icon as UiIcon } from "@repo/ui/icons";
+import { getPortCheckIssue, getPortCheckTarget } from "@repo/core";
 
 import Link from "next/link";
 import { useDeployment } from "@/context/DeploymentContext";
@@ -11,30 +12,44 @@ export function DeploymentHeader({
   onRedeploy,
   serviceCount,
   decisionPending = false,
+  isCompose = false,
+  warningResolved = false,
 }: {
-  onRedeploy: () => void | Promise<string | null>;
+  onRedeploy: (options?: { reuseBuild?: boolean }) => void | Promise<string | null>;
   serviceCount?: number;
   decisionPending?: boolean;
+  isCompose?: boolean;
+  warningResolved?: boolean;
 }) {
   const { config, state, deploymentStatus } = useDeployment();
   const { t } = useI18n();
   const copy = t.importProject.deploymentProcessing;
   const projectId = state.projectId || config.projectId;
-  const hasWarning = deploymentStatus === "ready" && !!state.warningMessage;
-  const working = deploymentStatus === "building" || deploymentStatus === "deploying";
-  const status = decisionPending
-    ? t.importProject.composeDeployment.title.actionRequired
-    : deploymentStatus === "cancelled"
-      ? copy.status.cancelled
-      : deploymentStatus === "failed"
-        ? copy.status.failed
-        : hasWarning
-          ? copy.status.readyWarnings
-          : deploymentStatus === "ready"
-            ? copy.status.ready
-            : t.importProject.serviceStatus[deploymentStatus];
+  const hasWarning = deploymentStatus === "ready" && !!state.warningMessage && !warningResolved;
+  const requiresPortReview =
+    deploymentStatus === "ready" &&
+    state.portCheck.some(
+      (check) =>
+        getPortCheckIssue(check) === "loopback-only" &&
+        !state.portCheckSkipped.includes(getPortCheckTarget(check, isCompose)),
+    );
+  const stopping = state.isStopping || state.cancellationPending;
+  const working = stopping || deploymentStatus === "building" || deploymentStatus === "deploying";
+  const status = stopping
+    ? copy.stopping
+    : decisionPending || requiresPortReview
+      ? t.importProject.composeDeployment.title.actionRequired
+      : deploymentStatus === "cancelled"
+        ? copy.status.cancelled
+        : deploymentStatus === "failed"
+          ? copy.status.failed
+          : hasWarning
+            ? copy.status.readyWarnings
+            : deploymentStatus === "ready"
+              ? copy.status.ready
+              : t.importProject.serviceStatus[deploymentStatus];
   const tone =
-    decisionPending || hasWarning
+    decisionPending || requiresPortReview || hasWarning
       ? "bg-warning-bg text-warning"
       : deploymentStatus === "failed"
         ? "bg-danger-bg text-danger"
@@ -44,7 +59,7 @@ export function DeploymentHeader({
             ? "bg-info-bg text-info"
             : "bg-muted text-muted-foreground";
   const StatusIcon =
-    decisionPending || hasWarning
+    decisionPending || requiresPortReview || hasWarning
       ? "warning"
       : working
         ? "spinner"
@@ -60,7 +75,7 @@ export function DeploymentHeader({
         className="flex min-w-0 items-center gap-3 text-sm text-muted-foreground"
       >
         <Link
-          href={projectId ? `/projects/${projectId}/deployments` : "/deployments"}
+          href={projectId ? `/projects/${projectId}/deployments` : "/monitoring?tab=deployments"}
           className="inline-flex shrink-0 items-center gap-1.5 transition-colors hover:text-foreground"
         >
           <UiIcon name="arrow-left" className="size-4 rtl:rotate-180" aria-hidden />
@@ -84,6 +99,7 @@ export function DeploymentHeader({
               {config.projectName || config.repo || t.projects.detail.projectFallback}
             </h1>
             <span
+              role="status"
               className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium ${tone}`}
             >
               <UiIcon

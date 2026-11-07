@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { baseDictionary } from "@/i18n";
 import type { Service } from "@/lib/api/services";
+import type { ProjectUpdateStatus } from "@/lib/api/projects";
 import { ApiError } from "@/lib/api/client";
 import { Deployments } from "./Deployments";
 
@@ -16,7 +17,10 @@ const mocks = vi.hoisted(() => ({
   setActiveTab: vi.fn(),
   openBuild: vi.fn(),
   showToast: vi.fn(),
-  commitStatus: vi.fn(),
+  applyUpdate: vi.fn(),
+  refreshUpdate: vi.fn(),
+  runtimeUpdate: vi.fn(),
+  push: vi.fn(),
 }));
 vi.mock("@/context/ProjectSettingsContext", () => ({ useProjectSettings: mocks.context }));
 vi.mock("@/context/ToastContext", () => ({ useToast: () => ({ showToast: mocks.showToast }) }));
@@ -27,13 +31,14 @@ vi.mock("@/lib/api", async () => {
   const { getApiErrorMessage } = await import("@/lib/api/client");
   return {
     deployApi: { trigger: mocks.trigger },
-    projectsApi: { getCommitStatus: mocks.commitStatus },
+    projectsApi: {},
     isAbortError: () => false,
     getApiErrorMessage,
   };
 });
+vi.mock("@/lib/api/updates", () => ({ updatesApi: { apply: mocks.applyUpdate, updateRuntime: mocks.runtimeUpdate } }));
 vi.mock("@/lib/deploy-nav", () => ({ openTriggeredBuild: mocks.openBuild }));
-vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }));
+vi.mock("next/navigation", () => ({ useRouter: () => ({ push: mocks.push }) }));
 vi.mock("@/components/i18n-provider", () => ({
   useI18n: () => ({ t: baseDictionary }),
   interpolate: (text: string, values: Record<string, string>) =>
@@ -68,12 +73,15 @@ let root: Root;
 let container: HTMLDivElement;
 let context: {
   id: string;
-  projectData: { id: string; name: string; port: number };
+  projectData: { id: string; name: string; port: number; activeDeploymentId?: string; runtimeMode?: string;
+    options?: { hasServer?: boolean; workloadType?: "static" | "web" | "worker" } };
   hasMultipleServices: boolean;
   servicesData: { services: Service[] };
   domainsData: { domains: Array<{ hostname: string; serviceId?: string; targetPort?: number }> };
   refreshServices: ReturnType<typeof vi.fn>;
   setActiveTab: typeof mocks.setActiveTab;
+  availableUpdate: ProjectUpdateStatus | null;
+  refreshUpdateStatus: typeof mocks.refreshUpdate;
 };
 
 beforeEach(() => {
@@ -90,10 +98,14 @@ beforeEach(() => {
     domainsData: { domains: [] },
     refreshServices: vi.fn().mockResolvedValue([service]),
     setActiveTab: mocks.setActiveTab,
+    availableUpdate: null,
+    refreshUpdateStatus: mocks.refreshUpdate,
   };
   mocks.context.mockImplementation(() => context);
   mocks.trigger.mockResolvedValue({ data: { deploymentId: "deployment" } });
-  mocks.commitStatus.mockResolvedValue({ data: { supported: false } });
+  mocks.applyUpdate.mockResolvedValue({ data: { deployment_id: "image-update" } });
+  mocks.runtimeUpdate.mockResolvedValue({ data: { deployment_id: "runtime-update", project_id: "project" } });
+  mocks.refreshUpdate.mockResolvedValue(undefined);
   mocks.showModal.mockReturnValue("warning");
 });
 
@@ -114,22 +126,41 @@ async function redeploy() {
   await act(async () => button(baseDictionary.projects.redeploy.redeployProject).click());
 }
 
+it("offers an explicit all-services runtime update without changing source", async () => {
+  context.projectData.activeDeploymentId = "active";
+  await act(async () => root.render(<Deployments />));
+  await act(async () => container.querySelector<HTMLButtonElement>('button[aria-expanded]')!.click());
+  await act(async () => button(baseDictionary.projectSettings.runtimeUpdates.refresh).click());
+  expect(mocks.runtimeUpdate).toHaveBeenCalledExactlyOnceWith("project", {});
+  expect(mocks.trigger).not.toHaveBeenCalled();
+  expect(mocks.push).toHaveBeenCalledWith("/build/runtime-update");
+});
+
+it("hides base image refresh for a bare app without container services", async () => {
+  context.projectData.activeDeploymentId = "active";
+  context.servicesData.services = [];
+  context.projectData.runtimeMode = "bare";
+  await act(async () => root.render(<Deployments />));
+  await act(async () => container.querySelector<HTMLButtonElement>('button[aria-expanded]')!.click());
+  expect(container.textContent).not.toContain(baseDictionary.projectSettings.runtimeUpdates.refresh);
+});
+
 it.each(["project", "new-commit"])(
   "shows the API rejection when deploying from %s",
   async (entry) => {
     context.hasMultipleServices = false;
     const reason = "Compose environment needs review (postgres: POSTGRES_PASSWORD).";
     mocks.trigger.mockRejectedValue(new ApiError(409, "Conflict", { error: reason }));
-    mocks.commitStatus.mockResolvedValue({
-      data: {
-        supported: true,
-        behind: true,
-        mode: "commit",
-        latestSha: "803526d",
-        deployedSha: "1d4bfc0",
-        branch: "main",
-      },
-    });
+    context.availableUpdate = {
+      supported: true,
+      behind: true,
+      latestInProgress: false,
+      mode: "commit",
+      latestSha: "803526d",
+      latestMessage: null,
+      deployedSha: "1d4bfc0",
+      branch: "main",
+    };
 
     await act(async () => root.render(<Deployments />));
     await act(async () =>
@@ -149,6 +180,38 @@ it.each(["project", "new-commit"])(
     expect(button(baseDictionary.projects.redeploy.redeployProject).disabled).toBe(false);
   },
 );
+
+it("shows the shared release update and clears the banner when that result clears", async () => {
+  context.availableUpdate = {
+    supported: true, mode: "release", behind: true, latestInProgress: false, pinned: false, currentVersion: "1.0.0", latestVersion: "1.1.0",
+  };
+  await act(async () => root.render(<Deployments />));
+  expect(mocks.refreshUpdate).toHaveBeenCalledOnce();
+  expect(container.textContent).toContain(baseDictionary.projects.redeploy.newVersionTitle);
+  expect(container.textContent).toContain("v1.1.0");
+  context.availableUpdate = null;
+  await act(async () => root.render(<Deployments />));
+  expect(container.textContent).not.toContain(baseDictionary.projects.redeploy.newVersionTitle);
+});
+
+it("makes a detected image update actionable through the shared update operation", async () => {
+  context.availableUpdate = {
+    supported: true, mode: "image", behind: true, latestInProgress: false,
+    services: [
+      { serviceId: "redis", name: "redis", ref: "redis:7", deployedDigest: "old", latestDigest: "new", behind: true },
+      { serviceId: "db", name: "db", ref: "postgres:16", deployedDigest: "same", latestDigest: "same", behind: false },
+    ],
+  };
+  await act(async () => root.render(<Deployments />));
+  expect(container.textContent).toContain("redis (redis:7)");
+  expect(container.textContent).not.toContain("db (postgres:16)");
+  await act(async () => button(baseDictionary.projectSettings.appSource.update).click());
+  expect(mocks.applyUpdate).toHaveBeenCalledExactlyOnceWith("project");
+  expect(mocks.trigger).not.toHaveBeenCalled();
+  expect(mocks.openBuild).toHaveBeenCalledWith(
+    expect.anything(), { data: { deployment: { id: "image-update" } } }, "project",
+  );
+});
 
 it.each([
   { hostname: "app.example.test", serviceId: "web", targetPort: 9000 },
@@ -183,4 +246,24 @@ it("keeps the warning for another service's route and sends the operator to Doma
   await act(async () => button(baseDictionary.projects.redeploy.openDomains).click());
   expect(mocks.setActiveTab).toHaveBeenCalledWith("domains");
   expect(mocks.hideModal).toHaveBeenCalledWith("warning");
+});
+
+
+it.each(["cancel", "configure"] as const)("reviews new Compose services before redeploy: %s", async (action) => {
+  context.hasMultipleServices = false;
+  mocks.trigger.mockRejectedValueOnce({ body: {
+    code: "COMPOSE_REVIEW_REQUIRED", projectId: "project",
+    composeChanges: { added: ["worker"], changed: ["db"], removed: ["old-worker"] },
+  } });
+  await redeploy();
+  expect(mocks.openBuild).not.toHaveBeenCalled();
+  const modal = mocks.showModal.mock.calls.at(-1)![0];
+  await act(async () => root.render(modal.customContent));
+  const copy = baseDictionary.projects.redeploy.composeReview;
+  expect(container.textContent).toContain(copy.addedTitle);
+  expect(container.textContent).toContain("old-worker");
+  await act(async () => button(copy[action]).click());
+  expect(mocks.trigger).toHaveBeenCalledTimes(1);
+  if (action === "cancel") expect(mocks.push).not.toHaveBeenCalled();
+  else expect(mocks.push).toHaveBeenCalledWith(expect.stringMatching(/^\/deploy\/.+\?reviewCompose=1$/));
 });

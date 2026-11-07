@@ -59,7 +59,12 @@ export function AccessEditorModal({
   initial: PickerGrant[];
   availableTypes?: ResourceType[];
   saveLabel?: string;
-  show?: { templates?: boolean; readOnlySwitch?: boolean; createCapability?: boolean };
+  show?: {
+    templates?: boolean;
+    readOnlySwitch?: boolean;
+    createCapability?: boolean;
+    capabilities?: boolean;
+  };
   suppressWildcardTypes?: ResourceType[];
   /** Called with the final selection. Throw to keep the modal open. */
   onSave: (grants: PickerGrant[]) => Promise<void> | void;
@@ -79,6 +84,7 @@ export function AccessEditorModal({
     (grants): AccessSelection => ({ grants, readOnly: false, template: "custom" }),
   );
 
+  // ResourcePicker reloads when this callback changes; label updates must not restart its fetch.
   const onCatalogLoaded = useCallback((type: ResourceType, entries: CatalogEntry[]) => {
     setLabels((prev) => {
       const next = new Map(prev);

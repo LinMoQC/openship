@@ -1,5 +1,6 @@
 "use client";
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { Icon as UiIcon } from "@repo/ui/icons";
 
 import type { ProjectCluster } from "@repo/contracts";
@@ -14,6 +15,7 @@ import { ServiceSettingsForm } from "@/app/(dashboard)/projects/[id]/components/
 import { serviceCanStartWithoutBuild, type Service, type ServiceInput } from "@/lib/api/services";
 import { TopologyResourceIcon, TopologyStatus } from "./TopologyCanvas";
 import { TopologyScaling } from "./TopologyScaling";
+import { RuntimeRoleReplicas } from "@/components/services/RuntimeRoles";
 import type {
   ProjectTopologyGraph,
   TopologyProject,
@@ -85,7 +87,11 @@ function Detail({
               try {
                 await copyText(value);
                 setCopied({ value });
-              } catch {
+              } catch (diagnosticFailure) {
+                observeCaughtError(
+                  diagnosticFailure,
+                  "dashboard/components/topology/TopologyInspector",
+                );
                 setCopied(null);
                 showToast(t.projectDetail.services.detail.networking.copyFailed, "error");
               }
@@ -153,7 +159,7 @@ export function TopologyInspector({
   onNavigate: (href: string) => void;
   onSave: (service: Service, patch: Partial<ServiceInput>) => Promise<void>;
   onResources: (
-    values: { cpuCores: number; memoryMb: number },
+    values: { cpuCores: number; memoryMb: number; swapDisabled?: boolean },
     before: ProjectResources,
     service?: Service,
   ) => void;
@@ -166,6 +172,7 @@ export function TopologyInspector({
 }) {
   const [tab, setTab] = useState(initialTab);
   const [savedNotice, setSavedNotice] = useState(false);
+  const { t } = useI18n();
   const service = resource?.service;
   const editable =
     resource &&
@@ -238,13 +245,15 @@ export function TopologyInspector({
               <Detail
                 label="Connection type"
                 value={
-                  relation.kind === "binding"
-                    ? "Environment binding"
-                    : relation.kind === "route"
-                      ? relation.scope === "instances"
-                        ? "Instance traffic"
-                        : "Public route"
-                      : "Startup dependency"
+                  relation.scope === "roles"
+                    ? relation.label
+                    : relation.kind === "binding"
+                      ? "Environment binding"
+                      : relation.kind === "route"
+                        ? relation.scope === "instances"
+                          ? "Instance traffic"
+                          : "Public route"
+                        : "Startup dependency"
                 }
               />
               {relation.connection && (
@@ -265,7 +274,7 @@ export function TopologyInspector({
                 <Detail label="Scope" value="Only the selected service" />
               )}
             </dl>
-            {relation.scope === "instances" ? (
+            {relation.scope === "roles" ? null : relation.scope === "instances" ? (
               <p className="text-xs leading-relaxed text-muted-foreground">
                 This connection follows instance health. Change the instance count from the
                 application's Scale tab.
@@ -312,6 +321,20 @@ export function TopologyInspector({
         )}
         {resource && (!editable || tab === "overview") && (
           <div className="space-y-5">
+            {editable && !resource.pending && service?.enabled !== false && (
+              <Button
+                className="w-full justify-between"
+                variant="secondary"
+                disabled={disabled || busy}
+                onClick={() => setTab("scaling")}
+              >
+                <span className="flex items-center gap-2">
+                  <UiIcon name="layers" />
+                  {t.projects.quickScale.scale}
+                </span>
+                <UiIcon name="arrow-right" />
+              </Button>
+            )}
             <div className="rounded-xl border border-border/50 bg-muted/20 p-3">
               {resource.kind === "application" &&
               resource.version &&
@@ -366,6 +389,14 @@ export function TopologyInspector({
               <Detail label="Ports" value={service?.ports?.join(", ")} copyable />
               <Detail label="Managed by" value={resource.ownerName} />
             </dl>
+            {resource.role && resource.deploymentId && (
+              <RuntimeRoleReplicas
+                projectId={project.id}
+                deploymentId={resource.deploymentId}
+                role={resource.role}
+                onNavigate={onNavigate}
+              />
+            )}
             {resource.clusterPod && (
               <>
                 {resource.clusterPod.serverId && (

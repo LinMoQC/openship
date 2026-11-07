@@ -20,7 +20,7 @@ export function DeploymentStepper() {
         {steps.map((step, index) => {
           const atCurrent = index === state.currentStepIndex;
           const completed = deploymentStatus === "ready" || index < state.currentStepIndex;
-          const active = atCurrent && !finished;
+          const active = atCurrent && !finished && !state.queue;
           const failed = atCurrent && deploymentStatus === "failed";
           const cancelled = atCurrent && deploymentStatus === "cancelled";
           const tone = completed
@@ -51,7 +51,7 @@ export function DeploymentStepper() {
               {index < steps.length - 1 && (
                 <span
                   aria-hidden="true"
-                  className={`absolute start-1/2 top-4 h-0.5 w-[calc(100%+0.5rem)] ${completed ? "bg-primary" : "bg-border/70"}`}
+                  className={`absolute start-1/2 top-1/2 h-0.5 w-[calc(100%+0.5rem)] -translate-y-1/2 ${completed ? "bg-primary" : "bg-border/70"}`}
                 />
               )}
               {/* An opaque ring cuts the track away from the icon in every theme. */}
@@ -75,7 +75,7 @@ export function DeploymentStepper() {
           );
         })}
       </ol>
-      {steps[currentIndex] && (
+      {!state.queue && steps[currentIndex] && (
         <p aria-hidden="true" className="mt-3 flex items-center justify-between gap-3 text-sm">
           <span className={deploymentStatus === "failed" ? "text-danger" : "text-foreground"}>
             {steps[currentIndex].label}

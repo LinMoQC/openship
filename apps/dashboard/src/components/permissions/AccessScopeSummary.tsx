@@ -1,5 +1,7 @@
 "use client";
 
+import { useAccessCopy } from "./access-copy";
+
 import { Icon as UiIcon } from "@repo/ui/icons";
 
 /**
@@ -32,6 +34,7 @@ import {
 } from "./mcp-access-templates";
 import { ResourceAvatar } from "./ResourceAvatar";
 import { resourceTypeLabel, type ResourceType } from "@/lib/api";
+import type { CapabilityArea } from "@repo/core";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 
 export function AccessScopeSummary({
@@ -54,8 +57,7 @@ export function AccessScopeSummary({
   onRemoveType: (resourceType: ResourceType) => void;
   onReadOnly: (on: boolean) => void;
 }) {
-  const { t } = useI18n();
-  const m = t.misc.mcpAuthorize;
+  const m = useAccessCopy();
 
   const unscoped = isUnscopedTemplate(selection.template);
   const rows = unscoped ? [] : summaryRows(wireGrants(selection), labels);
@@ -267,8 +269,9 @@ function SummaryGroupBlock({
   onRemove: (resourceType: ResourceType, resourceId: string) => void;
   onRemoveType: (resourceType: ResourceType) => void;
 }) {
+  const m = useAccessCopy();
   const { t } = useI18n();
-  const m = t.misc.mcpAuthorize;
+  const w = t.widgets.permissions.resourcePicker;
 
   // The capability bucket has no level to set — "create" is collection-only and
   // must stay exactly ["create"] or the mint 400s.
@@ -328,7 +331,15 @@ function SummaryGroupBlock({
               {row.wildcard ? `${m.wildcardTag} ${resourceTypeLabel(type).toLowerCase()}` : row.label}
             </span>
             {/* Only when the group's levels diverge — otherwise the header said it. */}
-            {!group.sharedLevel && <LevelTag level={row.level} />}
+            {!group.sharedLevel && row.level && <LevelTag level={row.level} />}
+            {row.capabilities.map((c) => (
+              <span
+                key={c}
+                className="shrink-0 rounded-md bg-muted/50 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
+              >
+                {`${w.capabilityAreas[c.split(":")[0] as CapabilityArea]} · ${w.capabilityLabels[c]}`}
+              </span>
+            ))}
             <RemoveButton
               onClick={() => onRemove(type, row.resourceId)}
               disabled={disabled}
@@ -344,8 +355,7 @@ function SummaryGroupBlock({
 
 /** The level a grant carries, as a read-only tag. */
 function LevelTag({ level }: { level: AccessLevel }) {
-  const { t } = useI18n();
-  const m = t.misc.mcpAuthorize;
+  const m = useAccessCopy();
   const label: Record<AccessLevel, string> = {
     view: m.levelView,
     manage: m.levelManage,

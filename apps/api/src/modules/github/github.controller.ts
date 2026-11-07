@@ -1,4 +1,5 @@
 /** HTTP input, status, and cookie adapters for shared GitHub operations. */
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import type { Context } from "hono";
 import { env, runtimeTarget } from "@repo/platform/engine/config/env";
 import { auth } from "@repo/platform/engine/lib/auth";
@@ -10,6 +11,10 @@ import type { RepoListParams } from "@repo/platform/engine/modules/github/repo-l
 const ops = () => getPlatformKernel().github;
 const call = (c: Context) => operationContext(c);
 const repo = (c: Context) => ({ owner: c.req.param("owner")!, repo: c.req.param("repo")! });
+export async function publishChange(c: Context) {
+  const data = await operationData(c, ops().publishChange(call(c), { ...await c.req.json(), ...repo(c) }));
+  return c.json({ data }, 200);
+}
 export async function getStatus(c: Context) {
   const data = await operationData(
     c,
@@ -31,7 +36,7 @@ export async function getLocalStatus(c: Context) {
 }
 export async function connect(c: Context) {
   
-  const data = await operationData(c, ops().connect(call(c), await c.req.json().catch(() => ({}))));
+  const data = await operationData(c, ops().connect(call(c), await c.req.json().catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "api/modules/github/github.controller"); return ({}); })));
   return c.json(data, 200);
 }
 export async function claimInstallation(c: Context) {
@@ -45,7 +50,7 @@ export async function setInstanceToken(c: Context) {
   return c.json(data, 200);
 }
 export async function disconnect(c: Context) {
-  const body = await c.req.json().catch(() => ({}));
+  const body = await c.req.json().catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "api/modules/github/github.controller"); return ({}); });
   const data = await operationData(c, ops().disconnect(call(c), { source: body.source ?? c.req.query("source") }));
   return c.json(data, 200);
 }
@@ -61,7 +66,7 @@ export async function listOrgRepos(c: Context) {
 }
 export async function getRepo(c: Context) {
   
-  const data = await operationData(c, ops().getRepo(call(c), { ...repo(c), branches: c.req.query("branches") === "true" }));
+  const data = await operationData(c, ops().getRepo(call(c), { ...repo(c), serverId: c.req.query("serverId"), branches: c.req.query("branches") === "true" }));
   return c.json({ data }, 200);
 }
 export async function createRepo(c: Context) {
@@ -77,6 +82,7 @@ export async function deleteRepo(c: Context) {
 export async function listBranches(c: Context) {
   const data = await operationData(c, ops().listBranches(call(c), {
     ...repo(c),
+    serverId: c.req.query("serverId"),
     page: Number(c.req.query("page") ?? 1),
   }));
   return c.json(data, 200);
@@ -88,22 +94,22 @@ export async function getCloneToken(c: Context) {
 }
 export async function detectStack(c: Context) {
   
-  const data = await operationData(c, ops().detectStack(call(c), { ...repo(c), branch: c.req.query("branch"), composePath: c.req.query("composePath") }));
+  const data = await operationData(c, ops().detectStack(call(c), { ...repo(c), serverId: c.req.query("serverId"), branch: c.req.query("branch"), composePath: c.req.query("composePath") }));
   return c.json({ data }, 200);
 }
 export async function listFiles(c: Context) {
   
-  const data = await operationData(c, ops().listFiles(call(c), { ...repo(c), branch: c.req.query("branch"), path: c.req.query("path") }));
+  const data = await operationData(c, ops().listFiles(call(c), { ...repo(c), serverId: c.req.query("serverId"), branch: c.req.query("branch"), path: c.req.query("path") }));
   return c.json({ data }, 200);
 }
 export async function listTree(c: Context) {
   
-  const data = await operationData(c, ops().listTree(call(c), { ...repo(c), branch: c.req.query("branch") }));
+  const data = await operationData(c, ops().listTree(call(c), { ...repo(c), serverId: c.req.query("serverId"), branch: c.req.query("branch") }));
   return c.json({ data }, 200);
 }
 export async function getFile(c: Context) {
   
-  const data = await operationData(c, ops().getFile(call(c), { ...repo(c), branch: c.req.query("branch"), file: c.req.query("file")! }));
+  const data = await operationData(c, ops().getFile(call(c), { ...repo(c), serverId: c.req.query("serverId"), branch: c.req.query("branch"), file: c.req.query("file")! }));
   return c.json({ data }, 200);
 }
 export async function listWebhooks(c: Context) {
@@ -122,7 +128,7 @@ export async function deleteWebhook(c: Context) {
   return c.json(data, 200);
 }
 export async function pollConnect(c: Context) {
-  const data = await operationData(c, ops().pollConnect(call(c)));
+  const data = await operationData(c, ops().pollConnect(call(c), { state: c.req.query("state") }));
   return c.json(data, data.status === "none" ? 404 : 200);
 }
 
@@ -154,6 +160,10 @@ function getSetCookieHeaders(headers: Headers): string[] {
  *  it's available when GitHub redirects back to the callback URL.
  */
 export async function connectRedirect(c: Context) {
+  if (env.CLOUD_MODE) {
+    const { startRepositoryAuthorization } = await import("./github-repository.controller");
+    return startRepositoryAuthorization(c);
+  }
   // HIGH #8 — connectRedirect runs per-user (the redirect is initiated
   // from a popup that carries the user's session cookies). The sync
   // `getGitHubAuthMode()` returns the LOCAL-only mode and reports "cli"
@@ -168,7 +178,8 @@ export async function connectRedirect(c: Context) {
   try {
     const ctx = getRequestContext(c);
     mode = await githubAuth.resolveGitHubAuthMode(ctx);
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "api/modules/github/github.controller");
     mode = githubAuth.getGitHubAuthMode();
   }
 
@@ -226,7 +237,8 @@ export async function connectRedirect(c: Context) {
       try {
         const body = (await result.json()) as { url?: string };
         redirectUrl = redirectUrl ?? body?.url ?? null;
-      } catch {
+      } catch (diagnosticFailure) {
+        observeCaughtError(diagnosticFailure, "api/modules/github/github.controller");
         // Ignore non-JSON bodies and fall back to headers-only handling.
       }
 
@@ -244,6 +256,7 @@ export async function connectRedirect(c: Context) {
       return c.redirect((result as { url: string }).url);
     }
   } catch (err) {
+    observeCaughtError(err, "api/modules/github/github.controller");
     /* fall through */
   }
 

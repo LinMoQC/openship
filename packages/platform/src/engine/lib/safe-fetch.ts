@@ -11,11 +11,11 @@
  * target whose host is influenced by user/remote input.
  */
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import http from "node:http";
 import https from "node:https";
-import { lookup } from "node:dns/promises";
-import net from "node:net";
-import { SsrfError, isPrivateIp, isBlockedHostname } from "./ssrf-guard";
+import { isIP } from "node:net";
+import { SsrfError, resolvePinnedHost } from "./ssrf-guard";
 
 export interface SafeFetchOptions {
   method?: string;
@@ -44,53 +44,6 @@ export interface SafeFetchResponse {
   /** Raw response bytes (NOT UTF-8 decoded) — for binary downloads. Bounded by
    *  `maxBodyBytes`, so raise that cap for large artifacts. */
   bytes(): Promise<Buffer>;
-}
-
-/** Resolve + validate a host, returning a pinned IP to connect to. */
-async function resolvePinnedIp(
-  host: string,
-  allowPrivate: boolean,
-  signal: AbortSignal,
-): Promise<{ ip: string; family: number }> {
-  const literal = net.isIP(host);
-  if (literal) {
-    if (!allowPrivate && isPrivateIp(host)) {
-      throw new SsrfError(`Refusing request to a private/loopback IP: ${host}`);
-    }
-    return { ip: host, family: literal };
-  }
-  if (!allowPrivate && isBlockedHostname(host)) {
-    throw new SsrfError(`Refusing request to an internal host: ${host}`);
-  }
-  let addrs: { address: string; family: number }[];
-  try {
-    // dns.lookup cannot be cancelled. Stop awaiting it at the deadline, and
-    // never start an HTTP request if the resolver eventually completes late.
-    addrs = await new Promise((resolve, reject) => {
-      signal.throwIfAborted();
-      const aborted = () => reject(signal.reason);
-      signal.addEventListener("abort", aborted, { once: true });
-      lookup(host, { all: true })
-        .then(resolve, reject)
-        .finally(() => {
-          signal.removeEventListener("abort", aborted);
-        });
-    });
-  } catch {
-    signal.throwIfAborted();
-    throw new SsrfError(`Cannot resolve host: ${host}`);
-  }
-  if (addrs.length === 0) throw new SsrfError(`Host does not resolve: ${host}`);
-  if (!allowPrivate) {
-    for (const a of addrs) {
-      if (isPrivateIp(a.address)) {
-        throw new SsrfError(`Host ${host} resolves to a private/loopback IP (${a.address})`);
-      }
-    }
-  }
-  // Prefer IPv4, else the first resolved address.
-  const chosen = addrs.find((a) => a.family === 4) ?? addrs[0];
-  return { ip: chosen.address, family: chosen.family };
 }
 
 /** Headers that must never cross a redirect to a DIFFERENT origin (credential
@@ -137,7 +90,8 @@ async function fetchHop(
   let url: URL;
   try {
     url = new URL(rawUrl);
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "platform/engine/lib/safe-fetch");
     throw new SsrfError(`Malformed URL: ${rawUrl}`);
   }
   const isHttps = url.protocol === "https:";
@@ -147,7 +101,7 @@ async function fetchHop(
 
   const host = url.hostname.replace(/^\[|\]$/g, "");
   const allowPrivate = opts.allowPrivate ?? false;
-  const { ip, family } = await resolvePinnedIp(host, allowPrivate, signal);
+  const { ip, family } = await resolvePinnedHost(host, allowPrivate, signal);
   signal.throwIfAborted();
 
   const mod = isHttps ? https : http;
@@ -170,7 +124,8 @@ async function fetchHop(
         path: `${url.pathname}${url.search}`,
         // Preserve the real hostname for virtual-host routing + cert validation.
         headers: reqHeaders,
-        ...(isHttps ? { servername: host, rejectUnauthorized: true } : {}),
+        // SNI carries DNS names. For literal IPs, TLS still verifies the IP SAN.
+        ...(isHttps ? { servername: isIP(host) ? "" : host, rejectUnauthorized: true } : {}),
       },
       (r) => {
         const status = r.statusCode ?? 0;
@@ -200,12 +155,12 @@ async function fetchHop(
             bytes: async () => body,
           });
         });
-        r.on("error", (e) => {
+        r.on("error", (e) => { observeCaughtError(e, "platform/engine/lib/safe-fetch");
           reject(e);
         });
       },
     );
-    req.on("error", (e) => {
+    req.on("error", (e) => { observeCaughtError(e, "platform/engine/lib/safe-fetch");
       reject(e);
     });
     if (opts.body !== undefined) req.write(opts.body);

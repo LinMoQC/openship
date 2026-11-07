@@ -20,10 +20,12 @@ import { exitCommand, rethrowCommandExit } from "../lib/command-exit";
  *   ssl renew  POST  /deployments/ssl/renew     { domain, includeWww? }
  */
 import { Command } from "commander";
-import { createInterface } from "node:readline";
+import { ListDeploymentsSchema, SkipPortCheckSchema, parseInput } from "@repo/contracts";
 import { getShipClient, assertLinkedProjectConnection, ApiError } from "../lib/ship-client";
 import { readProjectLink } from "../lib/project-link";
 import { isJsonMode, printJson, printTable, ok, err } from "../lib/output";
+import { confirmOrExit, printResult } from "../lib/cmd-helpers";
+import { positiveInteger, timeoutMilliseconds } from "../lib/command-input";
 
 /** Wrap a subcommand action so ApiError surfaces cleanly and exits non-zero. */
 function run<A extends unknown[]>(fn: (...args: A) => Promise<void>) {
@@ -48,27 +50,24 @@ function shortSha(v: unknown): string {
   return typeof v === "string" ? v.slice(0, 7) : "";
 }
 
-async function confirm(question: string): Promise<boolean> {
-  if (!process.stdin.isTTY) return true;
-  const rl = createInterface({ input: process.stdin, output: process.stderr });
-  const answer = await new Promise<string>((resolve) => rl.question(`${question} [y/N] `, resolve));
-  rl.close();
-  return /^y(es)?$/i.test(answer.trim());
-}
-
 const list = new Command("list")
   .description("List deployments (org-wide, or scoped to a project)")
   .option("--project <id>", "Scope to a project (defaults to the linked project)")
   .option("--env <environment>", "Filter by environment: production | preview")
-  .option("--limit <n>", "Max rows to fetch", "50")
+  .option("--limit <n>", "Page size (1–100)", positiveInteger, 50)
+  .option("--page <number>", "Page number", positiveInteger, 1)
+  .option("--status <status>", "Deployment history status filter")
+  .option("--search <text>", "Search deployment history")
+  .option("--page-info", "Return complete records and pagination as JSON")
   .action(
     run(async (opts) => {
       const link = opts.project ? null : readProjectLink();
       assertLinkedProjectConnection(link);
       const projectId: string | undefined = opts.project || link?.projectId;
-      const res = await getShipClient().deployments.list({
-        projectId, environment: opts.env, perPage: Math.min(Number(opts.limit) || 50, 100),
-      });
+      const res = await getShipClient().deployments.list(parseInput(ListDeploymentsSchema, {
+        projectId, environment: opts.env, perPage: opts.limit, page: opts.page, status: opts.status, search: opts.search,
+      }));
+      if (opts.pageInfo) return printJson(res);
       const rows = (res.data ?? []).map((d) => ({
         id: d.id,
         status: d.status,
@@ -128,9 +127,13 @@ const redeploy = new Command("redeploy")
   .description("Redeploy from an existing deployment")
   .argument("<id>", "Deployment ID")
   .option("--use-existing-commit", "Rebuild the same commit instead of the latest on the branch")
+  .option("--reuse-build", "Retry a failed attempt using its completed Docker images without rebuilding")
   .action(
     run(async (id: string, opts) => {
-      const res = await getShipClient().deployments.redeploy(id, { useExistingCommit: opts.useExistingCommit === true });
+      const res = await getShipClient().deployments.redeploy(id, {
+        useExistingCommit: opts.useExistingCommit === true,
+        reuseBuild: opts.reuseBuild === true,
+      });
       report({ success: true, ...res }, `Redeploy triggered for ${id}`);
     }),
   );
@@ -209,10 +212,7 @@ const rm = new Command("rm")
   .option("-y, --yes", "Skip the confirmation prompt")
   .action(
     run(async (id: string, opts) => {
-      if (!opts.yes && !isJsonMode() && !(await confirm(`Delete deployment ${id}?`))) {
-        err("Aborted.");
-        exitCommand(1);
-      }
+      await confirmOrExit(opts.yes, `Delete deployment ${id}?`);
       const res = await getShipClient().deployments.remove(id);
       report(res, `Deleted ${id}`);
     }),
@@ -273,6 +273,17 @@ const respond = new Command("respond")
     report(result, `Response accepted for ${id}`);
   }));
 
+const wait = new Command("wait")
+  .description("Wait for the persisted deployment outcome or a decision that needs your response")
+  .argument("<id>", "Deployment ID")
+  .option("--timeout <ms>", "Maximum wait duration; leaves the deployment running on timeout", timeoutMilliseconds, 600_000)
+  .option("--interval <ms>", "Status polling interval (minimum 10 ms)", positiveInteger, 1000)
+  .action(run(async (id: string, opts) => {
+    const result = await getShipClient().deployment(id).wait({ timeoutMs: opts.timeout, pollIntervalMs: opts.interval });
+    printJson(result);
+    if (!result.success) exitCommand(1);
+  }));
+
 export const deploymentCommand = new Command("deployment")
   .alias("deployments")
   .description("Manage deployments (list, inspect, redeploy, rollback, …)")
@@ -289,5 +300,23 @@ export const deploymentCommand = new Command("deployment")
   .addCommand(keep)
   .addCommand(pending)
   .addCommand(respond)
+  .addCommand(wait)
   .addCommand(rm)
   .addCommand(ssl);
+
+for (const [name, method, description] of [
+  ["restore-plan", "restorePlan", "Inspect retained artifacts and which services a rollback would rebuild"],
+  ["actions", "pendingActions", "Inspect pending deployment, routing and certificate actions"],
+  ["status", "buildStatus", "Read the complete persisted deployment state and outstanding prompts"],
+] as const) {
+  deploymentCommand.command(name).argument("<id>", "Deployment ID").description(description)
+    .action((id: string) => printResult(() => getShipClient().deployments[method](id)));
+}
+deploymentCommand.command("skip-port-check").argument("<id>", "Deployment ID").argument("<target>", "Port number or target offered by the deployment")
+  .option("-y, --yes", "Acknowledge skipping this readiness check")
+  .description("Skip one explicitly selected deployment port check")
+  .action((id: string, target: string, opts) => printResult(async () => {
+    const input = parseInput(SkipPortCheckSchema, { target: /^\d+$/.test(target) ? Number(target) : target });
+    await confirmOrExit(opts.yes, `Skip the ${target} readiness check on ${id}?`);
+    return getShipClient().deployments.skipPortCheck(id, input);
+  }));

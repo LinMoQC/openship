@@ -27,10 +27,12 @@
  * outage for nothing.
  */
 
-import { deriveProjectDeployTarget } from "@repo/core";
-import { repos } from "@repo/db";
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
+import { deriveProjectDeployTarget, type StackRole } from "@repo/core";
+import { repos, type Deployment, type Project } from "@repo/db";
 
-import { createServerDockerRuntime } from "../../lib/deployment-runtime";
+import { createMigrationDockerRuntime as createServerDockerRuntime } from "./migration-runtime";
+import { findActiveDeployment } from "../../lib/active-deployment";
 import { isControlPlaneProject } from "../../lib/resource-access";
 import { discoverServerStack } from "./docker-inspect.service";
 import type { AdoptResult } from "./migrate.service";
@@ -43,6 +45,7 @@ export class ProjectMoveRefused extends Error {
       | "not_server_hosted"
       | "same_server"
       | "control_plane"
+      | "has_roles"
       | "nothing_running"
       | "builds_from_source"
       | "scoped_move"
@@ -57,7 +60,7 @@ export class ProjectMoveRefused extends Error {
 /**
  * The project fields this decision needs — a subset, so tests need no full row.
  *
- * `cloudWorkspaceId` + `serverId` rather than a target string: the project table
+ * `workspaceId` + `serverId` rather than a target string: the project table
  * deliberately has NO `deployTarget` column, because the effective target is derived from
  * exactly these two by `deriveProjectDeployTarget`, and that rule is meant to have one
  * implementation. Taking the raw fields keeps this module a caller of that rule instead of
@@ -67,9 +70,60 @@ export interface MovableProject {
   id: string;
   name: string;
   slug: string;
-  cloudWorkspaceId?: string | null;
+  workspaceId?: string | null;
   clusterId?: string | null;
   serverId?: string | null;
+  runtimeMode?: string | null;
+  /** Declared worker and scheduler roles. Non-empty means the project cannot move yet. */
+  roles?: readonly StackRole[] | null;
+}
+
+/** The deployment fields the role check reads: its frozen `meta.roles` and recorded containers. */
+export type RoleWorkDeployment = Pick<Deployment, "id" | "status" | "meta" | "roleContainers">;
+
+/**
+ * Deployments whose role containers may still run on the source host. `active` is the
+ * project's active deployment. `unsettled` is every deployment that is not settled: queued,
+ * building, deploying or reconciling, a cancelled one whose execution is still live, and a
+ * cancelled one that kept its provisioned containers (`meta.cancellation.keepProvisioned`).
+ *
+ * Terminal historical deployments are excluded. After a clean role-free deploy, older refs
+ * were retired, and reading them would refuse the project forever.
+ */
+export interface ProjectRoleWork {
+  active: RoleWorkDeployment | null;
+  unsettled: readonly RoleWorkDeployment[];
+}
+
+/** Frozen roles OR recorded containers: containers can run before their refs are written. */
+function runsRoles(dep: RoleWorkDeployment): boolean {
+  const roles = (dep.meta as { roles?: unknown } | null)?.roles;
+  return (Array.isArray(roles) && roles.length > 0) || (dep.roleContainers?.length ?? 0) > 0;
+}
+
+/** A cancellation that kept its containers: only deleting that deployment retires them. */
+function keptOnCancel(dep: RoleWorkDeployment): boolean {
+  const cancellation = (dep.meta as { cancellation?: { keepProvisioned?: unknown } } | null)
+    ?.cancellation;
+  return dep.status === "cancelled" && cancellation?.keepProvisioned === true;
+}
+
+/** True when the active deployment or any unsettled one still carries role work. */
+export function roleWorkRunsRoles(roleWork: ProjectRoleWork): boolean {
+  return (
+    (roleWork.active !== null && runsRoles(roleWork.active)) || roleWork.unsettled.some(runsRoles)
+  );
+}
+
+/** Fetch {@link ProjectRoleWork} for the move guard. */
+export async function loadProjectRoleWork(
+  project: Pick<Project, "id" | "organizationId" | "activeDeploymentId">,
+): Promise<ProjectRoleWork> {
+  const [active, unsettled] = await Promise.all([
+    findActiveDeployment(project),
+    repos.deployment.listUnsettledByProject(project.id),
+  ]);
+  return { active: active ?? null, unsettled };
 }
 
 /**
@@ -127,6 +181,8 @@ export interface ProjectMoveWorkload {
 export function assertProjectMovable(input: {
   project: MovableProject;
   targetServerId: string;
+  /** Saved `roles` can be cleared before a redeploy retires the containers, so read these too. */
+  roleWork: ProjectRoleWork;
   isControlPlane?: boolean;
   intent?: ProjectMoveIntent;
   serviceNames?: string[];
@@ -144,18 +200,46 @@ export function assertProjectMovable(input: {
     );
   }
 
-  // Cloud (either direction) and server-host "local" are deliberately later work: the
-  // transfer core moves data between two SSH-reachable Docker hosts, which is not what
-  // either of those is.
+  // Docker migration is shared by connected and managed hosts. Bare processes
+  // and Kubernetes require a different workload conversion, before any stop.
   const target = deriveProjectDeployTarget(project);
-  if (target !== "server" || !project.serverId) {
+  if (target === "cluster" || project.runtimeMode === "bare" || !project.serverId) {
     throw new ProjectMoveRefused(
       "not_server_hosted",
-      target === "cloud"
-        ? `"${project.name}" runs on Openship Cloud. Moving between Cloud and a server isn't supported yet.`
+      project.runtimeMode === "bare"
+        ? `"${project.name}" runs directly on its server. Docker migration supports container workloads only.`
         : target === "cluster"
         ? `"${project.name}" runs on Kubernetes. Docker host migration cannot move its cluster workloads.`
         : `"${project.name}" isn't bound to a server, so there's no source host to move it from.`,
+    );
+  }
+
+  // Role containers are not part of the discovered workload the pipeline streams and
+  // redeploys, so a move would silently drop them. Refused for every intent until the
+  // pipeline learns to carry them.
+  if ((project.roles?.length ?? 0) > 0) {
+    throw new ProjectMoveRefused(
+      "has_roles",
+      `"${project.name}" runs worker or scheduler roles, and moving roles between servers is not supported yet. Remove its roles and redeploy before moving it.`,
+    );
+  }
+  if (input.roleWork.active && runsRoles(input.roleWork.active)) {
+    throw new ProjectMoveRefused(
+      "has_roles",
+      `"${project.name}" still runs worker or scheduler roles from its active deployment, and moving roles between servers is not supported yet. Redeploy it without roles before moving it.`,
+    );
+  }
+  const kept = input.roleWork.unsettled.find((dep) => keptOnCancel(dep) && runsRoles(dep));
+  if (kept) {
+    throw new ProjectMoveRefused(
+      "has_roles",
+      `"${project.name}" has a cancelled deployment (${kept.id}) that kept its worker or scheduler role containers, and moving roles between servers is not supported yet. Once its execution has stopped, remove any remaining worker or scheduler containers belonging to that deployment from the source server, then delete that deployment before moving the project.`,
+    );
+  }
+  if (input.roleWork.unsettled.some(runsRoles)) {
+    throw new ProjectMoveRefused(
+      "has_roles",
+      `"${project.name}" has an unfinished deployment with worker or scheduler roles, and moving roles between servers is not supported yet. Wait for it to finish, then redeploy without roles before moving it.`,
     );
   }
 
@@ -184,6 +268,8 @@ export function assertProjectMovable(input: {
 export function planProjectMove(input: {
   project: MovableProject;
   targetServerId: string;
+  /** See {@link assertProjectMovable}. */
+  roleWork: ProjectRoleWork;
   /** A flat-docker scan of the source server. */
   discovered: DiscoveredService[];
   /** Container ids carrying `openship.project=<project.id>` on the source host. */
@@ -313,16 +399,21 @@ export async function loadProjectMoveWorkload(
     throw new ProjectMoveRefused("not_server_hosted", "That project no longer exists.");
   }
 
+  const roleWork = await loadProjectRoleWork(project);
+
   // Checked before the scan: the refusals that need no host round trip should not cost one.
   // `planProjectMove` re-checks them (it is the single decision), this just fails faster.
   if (
-    deriveProjectDeployTarget(project) !== "server" ||
+    deriveProjectDeployTarget(project) === "cluster" || project.runtimeMode === "bare" ||
     !project.serverId ||
+    (project.roles?.length ?? 0) > 0 ||
+    roleWorkRunsRoles(roleWork) ||
     isControlPlaneProject(project)
   ) {
     return planProjectMove({
       project,
       targetServerId: input.targetServerId,
+      roleWork,
       discovered: [],
       ourContainerIds: [],
       isControlPlane: isControlPlaneProject(project),
@@ -343,7 +434,9 @@ export async function loadProjectMoveWorkload(
   try {
     ourContainerIds = await rt.listProjectContainerIds(project.id);
   } finally {
-    await rt.dispose().catch(() => {});
+    await rt.dispose().catch((diagnosticFailure) => {
+      observeCaughtError(diagnosticFailure, "platform/engine/modules/migration/project-move");
+    });
   }
 
   // Nothing of ours is running → don't scan at all. `planProjectMove` refuses on an empty
@@ -353,6 +446,7 @@ export async function loadProjectMoveWorkload(
     return planProjectMove({
       project,
       targetServerId: input.targetServerId,
+      roleWork,
       discovered: [],
       ourContainerIds: [],
       isControlPlane: false,
@@ -374,6 +468,7 @@ export async function loadProjectMoveWorkload(
   return planProjectMove({
     project,
     targetServerId: input.targetServerId,
+    roleWork,
     discovered: stack.services,
     ourContainerIds,
     isControlPlane: false,

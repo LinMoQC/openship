@@ -5,10 +5,12 @@ import { fileURLToPath } from "node:url";
 import { cliSurface, docsDirectory } from "./docs-surface.mjs";
 
 const categories = {
-  Connect: ["login", "logout", "context", "token", "api"],
+  Connect: ["login", "logout", "context", "token", "access", "credential", "github", "api"],
   Deploy: ["init", "config", "deploy", "deployment", "release", "logs"],
-  Applications: ["project", "app", "service", "domain"],
-  Infrastructure: ["job", "server", "backup", "edge", "mail", "system"],
+  Applications: ["project", "app", "service", "domain", "dns"],
+  Operations: ["monitoring", "notification", "webhook", "audit", "analytics", "settings"],
+  Cloud: ["billing"],
+  Infrastructure: ["job", "server", "backup", "edge", "mail", "migration", "system"],
   "Local installation": [
     "up",
     "stop",
@@ -23,10 +25,22 @@ const categories = {
   Shell: ["completion"],
 };
 const guides = {
+  billing: "cloud",
+  github: "access",
+  settings: "operations",
+  analytics: "operations",
+  migration: "self-host",
   login: "access",
   logout: "access",
   context: "access",
   token: "access",
+  access: "access",
+  credential: "access",
+  dns: "projects",
+  monitoring: "operations",
+  notification: "operations",
+  webhook: "operations",
+  audit: "operations",
   api: "access",
   init: "projects",
   config: "projects",
@@ -98,6 +112,11 @@ export function renderCliReference(catalog) {
     const guidePath = posix.join("/docs/cli", guides[family] ?? "");
     body += `See the [${guides[family] ? "workflow guide" : "CLI overview"}](${guidePath}) for examples. `;
     body += `Global flags such as \`--json\` go before the command; see [global options](/docs/cli/reference#global-options).\n\n`;
+    if (command === "openship edge rules") {
+      body +=
+        "For deployment-specific feature availability, see " +
+        "[Self-hosted vs Cloud](/docs/guides/the-edge#self-hosted-vs-cloud).\n\n";
+    }
     for (const entry of catalog.filter((entry) => owner(entry.command) === command)) {
       body += `## ${entry.command}\n\n${prose(entry.description) || "Use this command with the arguments below."}\n\n\`\`\`text\n${entry.usage}\n\`\`\`\n\n`;
       if (entry.children.length) {

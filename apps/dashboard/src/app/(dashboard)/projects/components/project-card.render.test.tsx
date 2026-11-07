@@ -1,11 +1,13 @@
 // No DOM needed: renderToStaticMarkup runs no effects, and the row is pure.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
 import { I18nProvider } from "@/components/i18n-provider";
 import { ModalProvider } from "@/context/ModalContext";
 import type { Project } from "@/constants/mock";
 import ProjectCard from "./ProjectCard";
 import ProjectGridCard from "./ProjectGridCard";
+
+vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }));
 
 /**
  * Two lies this row used to tell, both seen in the field on one Convex app:
@@ -64,19 +66,19 @@ describe("ProjectCard — hostname", () => {
 });
 
 describe("GitOps project cards", () => {
-  it.each([ProjectCard, ProjectGridCard])("names the precise environment and links its release plan", Card => {
+  it.each([ProjectCard, ProjectGridCard])("names the environment as a chip and opens the release workspace", Card => {
     const html = renderToStaticMarkup(<I18nProvider><ModalProvider><Card project={project({ name: "Admin", managementMode: "gitops", releaseEnvironment: "preview", activeVersion: 6 })} /></ModalProvider></I18nProvider>);
-    expect(text(html)).toContain("Admin · PRT");
-    expect(text(html)).toContain("Deployment number 6"); expect(text(html)).not.toContain("v6");
-    expect(text(html)).toContain("Version could not be verified");
-    expect(html).toContain('href="/projects/p1/release"');
-    expect(html).toContain('aria-label="View release plan · Admin · PRT"');
-  });
-  it("separates actual and target digests and the OSS source", () => {
-    const image = { image: "ghcr.io/example/web", digest: `sha256:${"a".repeat(64)}`, gitSha: "b".repeat(40) };
-    const html = render(project({ managementMode: "gitops", releaseEnvironment: "production", releaseOverview: { kind: "available", current: { images: { web: image }, deploymentId: "d", configurationHash: null, ossGitSha: "c".repeat(40), verified: true }, target: { images: { web: { ...image, gitSha: "d".repeat(40) } }, ossGitSha: "e".repeat(40) }, stale: false, checkedAt: "2026-10-07T00:00:00.000Z" } }));
     const out = text(html);
-    expect(out).toContain("Production"); expect(out).toContain("bbbbbbbbbbbb"); expect(out).toContain("dddddddddddd"); expect(out).toContain("OSS · cccccccccccc");
+    expect(out).toContain("Admin"); expect(out).toContain("PRT"); expect(out).not.toContain("·");
+    expect(out).toContain("Version could not be verified");
+    expect(html).toContain('href="/projects/p1/release"');
+  });
+  it("keeps the running and target revisions on one line with full identities on hover", () => {
+    const image = { image: "ghcr.io/example/web", digest: `sha256:${"a".repeat(64)}`, gitSha: "b".repeat(40) };
+    const html = render(project({ managementMode: "gitops", releaseEnvironment: "production", releaseOverview: { kind: "available", current: { images: { web: image }, deploymentId: "d", configurationHash: null, ossGitSha: "c".repeat(40), verified: true }, target: { images: { web: { ...image, gitSha: "d".repeat(40), digest: `sha256:${"e".repeat(64)}` } }, ossGitSha: "e".repeat(40) }, stale: false, checkedAt: "2026-10-07T00:00:00.000Z" } }));
+    const out = text(html);
+    expect(out).toContain("Production"); expect(out).toContain("Release available");
+    expect(out).toContain("bbbbbbbbbbbb"); expect(out).toContain("dddddddddddd"); expect(out).not.toContain("·");
     expect(html).toContain(image.digest);
   });
 });
@@ -135,5 +137,39 @@ describe("ProjectCard — status pill", () => {
       }),
     );
     expect(out).toContain('href="/projects/p1/domains"');
+  });
+});
+
+
+describe("ProjectGridCard — management shortcuts", () => {
+  function grid(over: Partial<Project>) {
+    return renderToStaticMarkup(
+      <I18nProvider><ProjectGridCard project={project(over)} /></I18nProvider>,
+    );
+  }
+
+  it("links to project services, deployments and logs with persisted counts", () => {
+    const html = grid({ activeDeploymentId: "d1", serviceCount: 3, activeVersion: 17 });
+    expect(html).toContain('href="/projects/p1/services"');
+    expect(html).toContain('href="/projects/p1/deployments"');
+    expect(html).toContain('href="/projects/p1/logs"');
+    expect(html).toContain('aria-label="Convex: Services"');
+    expect(text(html)).toContain("Services 3 Deployments v17 Logs");
+    // The whole-card link must not wrap the independently clickable shortcuts.
+    for (const anchor of html.matchAll(/<a\b[^>]*>([\s\S]*?)<\/a>/g)) {
+      expect(anchor[1]).not.toMatch(/<a\b/);
+    }
+  });
+
+  it.each([undefined, 0, -1, NaN])("hides the services shortcut when count is %s", (serviceCount) => {
+    const html = grid({ serviceCount });
+    expect(html).not.toContain('aria-label="Convex: Services"');
+    expect(text(html)).toContain("Deployments Logs");
+  });
+
+  it("opens topology for a draft with known services", () => {
+    const html = grid({ serviceCount: 2 });
+    expect(html).toContain('href="/projects/p1/topology"');
+    expect(text(html)).toContain("Services 2");
   });
 });

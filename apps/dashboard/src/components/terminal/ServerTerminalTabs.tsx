@@ -1,5 +1,6 @@
 "use client";
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { Icon as UiIcon } from "@repo/ui/icons";
 
 /**
@@ -12,11 +13,9 @@ import { Icon as UiIcon } from "@repo/ui/icons";
  * "tabs run in background" behavior). Switching tabs triggers a
  * re-fit + focus on the newly-visible terminal.
  *
- * Limits: the API caps active sessions per user at
- * TERMINAL_MAX_SESSIONS_PER_USER (default 3). When the user opens
- * three shells, the "+" button is disabled and we surface a tooltip
- * explaining why. The cap is enforced server-side regardless — the
- * client gate is purely UX.
+ * Limits: the API reports the supported concurrent shell count. The
+ * "+" button is disabled at that count, with a tooltip explaining why.
+ * The limit is enforced server-side regardless — the client gate is UX.
  *
  * Identity: each tab has a stable client-side `id` (used for React
  * keys + close lookups) plus a `label` (shown in the strip). Labels
@@ -36,9 +35,8 @@ interface ServerTerminalTabsProps {
   /** Drives WS lifecycle for ALL shells. When the host (Terminal page
    *  tab) hides this, every shell's WS closes. */
   enabled: boolean;
-  /** Hard upper bound — matches the server's per-user concurrent cap.
-   *  Default 3 mirrors the API's TERMINAL_MAX_SESSIONS_PER_USER. */
-  maxShells?: number;
+  /** Concurrent shell limit reported by this server's execution provider. */
+  maxShells: number;
   className?: string;
 }
 
@@ -96,7 +94,8 @@ function saveShells(serverId: string, shells: ShellEntry[], counter: number): vo
       storageKey(serverId),
       JSON.stringify({ shells, counter }),
     );
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "dashboard/components/terminal/ServerTerminalTabs");
     // localStorage can throw on quota / private mode — silently skip.
   }
 }
@@ -104,7 +103,7 @@ function saveShells(serverId: string, shells: ShellEntry[], counter: number): vo
 export function ServerTerminalTabs({
   serverId,
   enabled,
-  maxShells = 3,
+  maxShells,
   className = "",
 }: ServerTerminalTabsProps) {
   const { resolvedTheme } = useTheme();

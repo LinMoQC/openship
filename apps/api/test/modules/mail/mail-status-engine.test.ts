@@ -136,6 +136,17 @@ describe("GET /mail/status — engine state", () => {
     // The rest of the status still renders: one broken probe can't blank the panel.
     expect(body.serverId).toBe(SERVER);
     expect(body.domain).toBe("example.com");
+    expect(body.observationError).toContain("health is unknown");
+  });
+
+  it("rechecks current engine state on a pooled executor instead of reusing its old running flag", async () => {
+    expect((await callStatus()).engine).toEqual({ flavor: "container", running: true });
+    vi.mocked(detectMailEngine).mockRejectedValueOnce(new Error("connect ENETUNREACH 192.0.2.1:22"));
+    const failed = await callStatus();
+    expect(failed.engine).toBeUndefined();
+    expect(failed.observationError).toBeDefined();
+    expect(failed.domain).toBe("example.com");
+    expect((await callStatus()).engine).toEqual({ flavor: "container", running: true });
   });
 
   it("doesn't probe a server with no mail install at all", async () => {
@@ -148,14 +159,24 @@ describe("GET /mail/status — engine state", () => {
     expect(detectMailEngine).not.toHaveBeenCalled();
   });
 
-  it("still answers the no-install shell when the server is unreachable", async () => {
+  it("reports unavailable status instead of a fresh installation when SSH is unreachable", async () => {
     withExecutor.mockRejectedValue(new Error("connect ETIMEDOUT"));
 
     const body = await callStatus();
 
     expect("engine" in body).toBe(false);
-    expect(body.active).toBe(false);
-    expect(body.serverId).toBe(SERVER);
+    expect(body.code).toBe("MAIL_STATUS_UNAVAILABLE");
+    expect(body.active).toBeUndefined();
+    expect(body.steps).toBeUndefined();
+  });
+
+  it("requires an authoritative state read and preserves a read failure", async () => {
+    readState.mockRejectedValueOnce(new Error("connect ENETUNREACH 192.0.2.1:22"));
+    const c = context();
+    await getStatus(c);
+    expect(readState).toHaveBeenCalledWith(executor, { strict: true });
+    expect((c as { json: ReturnType<typeof vi.fn> }).json).toHaveBeenCalledWith(expect.objectContaining({ code: "MAIL_STATUS_UNAVAILABLE" }), 503);
+    expect(detectMailEngine).not.toHaveBeenCalled();
   });
 
   it("does not demote an install finished before the public-port step existed", async () => {

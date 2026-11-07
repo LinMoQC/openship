@@ -1062,8 +1062,519 @@
     {
       "idx": 151,
       "version": "7",
-      "when": 1791223200000,
-      "tag": "0151_gitops_releases",
+      "when": 1790436000002,
+      "tag": "0151_cloud_analytics",
+      "breakpoints": true
+    },
+    {
+      "idx": 152,
+      "version": "7",
+      "when": 1790436000003,
+      "tag": "0152_cloud_support",
+      "breakpoints": true
+    },
+    {
+      "idx": 153,
+      "version": "7",
+      "when": 1790605200000,
+      "tag": "0153_durable_credit_alerts",
+      "breakpoints": true
+    },
+    {
+      "idx": 154,
+      "version": "7",
+      "when": 1790670000000,
+      "tag": "0154_github_repository_authorization",
+      "breakpoints": true
+    },
+    {
+      "idx": 155,
+      "version": "7",
+      "when": 1790796653000,
+      "tag": "0155_cloud_workspaces",
+      "breakpoints": true
+    },
+    {
+      "idx": 156,
+      "version": "7",
+      "when": 1790840000000,
+      "tag": "0156_managed_servers",
+      "breakpoints": true
+    },
+    {
+      "idx": 157,
+      "version": "7",
+      "when": 1790857200000,
+      "tag": "0157_project_runtime_selection",
+      "breakpoints": true
+    },
+    {
+      "idx": 158,
+      "version": "7",
+      "when": 1790942000000,
+      "tag": "0158_linked_managed_servers",
+      "breakpoints": true
+    },
+    {
+      "idx": 159,
+      "version": "7",
+      "when": 1790944000000,
+      "tag": "0159_managed_server_coordination",
+      "breakpoints": true
+    },
+    {
+      "idx": 160,
+      "version": "7",
+      "when": 1790945000000,
+      "tag": "0160_linked_server_projects",
+      "breakpoints": true
+    },
+    {
+      "idx": 161,
+      "version": "7",
+      "when": 1790963755770,
+      "tag": "0161_migration_sources",
+      "breakpoints": true
+    },
+    {
+      "idx": 162,
+      "version": "7",
+      "when": 1790965146889,
+      "tag": "0162_migration_recovery",
+      "breakpoints": true
+    },
+    {
+      "idx": 163,
+      "version": "7",
+      "when": 1790982000000,
+      "tag": "0163_migration_placement",
+      "breakpoints": true
+    },
+    {
+      "idx": 164,
+      "version": "7",
+      "when": 1790990000000,
+      "tag": "0164_subscription_change_intent",
+      "breakpoints": true
+    },
+    {
+      "idx": 165,
+      "version": "7",
+      "when": 1791217188211,
+      "tag": "0165_project_cloud_promotion",
+      "breakpoints": true
+    },
+    {
+      "idx": 166,
+      "version": "7",
+      "when": 1791245533021,
+      "tag": "0166_account_security",
+      "breakpoints": true
+    },
+    {
+      "idx": 167,
+      "version": "7",
+      "when": 1791294467332,
+      "tag": "0167_cloud_support_customers",
+      "breakpoints": true
+    },
+    {
+      "idx": 168,
+      "version": "7",
+      "when": 1791473791431,
+      "tag": "0168_cloud_static_hosting",
+      "breakpoints": true
+    },
+    {
+      "idx": 169,
+      "version": "7",
+      "when": 1791473792431,
+      "tag": "0169_instance_controller",
+      "breakpoints": true
+    },
+    {
+      "idx": 170,
+      "version": "7",
+      "when": 1791473793431,
+      "tag": "0170_instance_controller_fields",
+      "breakpoints": true
+    },
+    {
+      "idx": 171,
+      "version": "7",
+      "when": 1791528946674,
+      "tag": "0171_openship_actions",
+      "breakpoints": true
+    },
+    {
+      "idx": 172,
+      "version": "7",
+      "when": 1791548680000,
+      "tag": "0172_action_webhook_inbox",
+      "breakpoints": true
+    },
+    {
+      "idx": 173,
+      "version": "7",
+      "when": 1791548680001,
+      "tag": "0173_action_billing",
+      "breakpoints": true
+    },
+    {
+      "idx": 174,
+      "version": "7",
+      "when": 1791559142293,
+      "tag": "0174_actions_payment_recovery",
+      "breakpoints": true
+    },
+    {
+      "idx": 175,
+      "version": "7",
+      "when": 1791569000000,
+      "tag": "0175_actions_prepaid_usage",
+      "breakpoints": true
+    },
+    {
+      "idx": 176,
+      "version": "7",
+      "when": 1791569000001,
+      "tag": "0176_actions_runner_readiness",
+      "breakpoints": true
+    },
+    {
+      "idx": 177,
+      "version": "7",
+      "when": 1791581000000,
+      "tag": "0177_actions_project_integration",
+      "breakpoints": true
+    },
+    {
+      "idx": 178,
+      "version": "7",
+      "when": 1791643200000,
+      "tag": "0178_actions_github_controller",
+      "breakpoints": true
+    },
+    {
+      "idx": 179,
+      "version": "7",
+      "when": 1791643200001,
+      "tag": "0179_actions_runner_sessions",
+      "breakpoints": true
+    },
+    {
+      "idx": 180,
+      "version": "7",
+      "when": 1791643200002,
+      "tag": "0180_actions_command_receipts",
+      "breakpoints": true
+    },
+    {
+      "idx": 181,
+      "version": "7",
+      "when": 1791643200003,
+      "tag": "0181_actions_command_job",
+      "breakpoints": true
+    },
+    {
+      "idx": 182,
+      "version": "7",
+      "when": 1791643200004,
+      "tag": "0182_cloud_build_activity",
+      "breakpoints": true
+    },
+    {
+      "idx": 183,
+      "version": "7",
+      "when": 1791643200005,
+      "tag": "0183_cloud_build_exclusive_preparation",
+      "breakpoints": true
+    },
+    {
+      "idx": 184,
+      "version": "7",
+      "when": 1791643200006,
+      "tag": "0184_action_workflow_notifications",
+      "breakpoints": true
+    },
+    {
+      "idx": 185,
+      "version": "7",
+      "when": 1791643200007,
+      "tag": "0185_deployment_github_checks",
+      "breakpoints": true
+    },
+    {
+      "idx": 186,
+      "version": "7",
+      "when": 1791643200008,
+      "tag": "0186_actions_access_policy",
+      "breakpoints": true
+    },
+    {
+      "idx": 187,
+      "version": "7",
+      "when": 1791643200009,
+      "tag": "0187_actions_oidc",
+      "breakpoints": true
+    },
+    {
+      "idx": 188,
+      "version": "7",
+      "when": 1791864000000,
+      "tag": "0188_project_runtime_version",
+      "breakpoints": true
+    },
+    {
+      "idx": 189,
+      "version": "7",
+      "when": 1791936000000,
+      "tag": "0189_native_database_connections",
+      "breakpoints": true
+    },
+    {
+      "idx": 190,
+      "version": "7",
+      "when": 1791936000001,
+      "tag": "0190_server_gpu_override",
+      "breakpoints": true
+    },
+    {
+      "idx": 191,
+      "version": "7",
+      "when": 1792022400000,
+      "tag": "0191_project_lifecycle_operation",
+      "breakpoints": true
+    },
+    {
+      "idx": 192,
+      "version": "7",
+      "when": 1792022400001,
+      "tag": "0192_runtime_roles",
+      "breakpoints": true
+    },
+    {
+      "idx": 193,
+      "version": "7",
+      "when": 1792022400002,
+      "tag": "0193_user_appearance",
+      "breakpoints": true
+    },
+    {
+      "idx": 194,
+      "version": "7",
+      "when": 1792022400003,
+      "tag": "0194_managed_ingress",
+      "breakpoints": true
+    },
+    {
+      "idx": 195,
+      "version": "7",
+      "when": 1792195200000,
+      "tag": "0195_role_handover",
+      "breakpoints": true
+    },
+    {
+      "idx": 196,
+      "version": "7",
+      "when": 1792195200001,
+      "tag": "0196_deployment_automation",
+      "breakpoints": true
+    },
+    {
+      "idx": 197,
+      "version": "7",
+      "when": 1792195200002,
+      "tag": "0197_preview_repository_identity",
+      "breakpoints": true
+    },
+    {
+      "idx": 198,
+      "version": "7",
+      "when": 1792247996238,
+      "tag": "0198_webmail_host_alias",
+      "breakpoints": true
+    },
+    {
+      "idx": 199,
+      "version": "7",
+      "when": 1792586110310,
+      "tag": "0199_management_billing",
+      "breakpoints": true
+    },
+    {
+      "idx": 200,
+      "version": "7",
+      "when": 1792670400000,
+      "tag": "0200_service_incident_identity",
+      "breakpoints": true
+    },
+    {
+      "idx": 201,
+      "version": "7",
+      "when": 1792670400001,
+      "tag": "0201_existing_swarm_runtime",
+      "breakpoints": true
+    },
+    {
+      "idx": 202,
+      "version": "7",
+      "when": 1792683952078,
+      "tag": "0202_route_protection",
+      "breakpoints": true
+    },
+    {
+      "idx": 203,
+      "version": "7",
+      "when": 1792683952079,
+      "tag": "0203_database_reader_bindings",
+      "breakpoints": true
+    },
+    {
+      "idx": 204,
+      "version": "7",
+      "when": 1792683952080,
+      "tag": "0204_automatic_push_admission",
+      "breakpoints": true
+    },
+    {
+      "idx": 205,
+      "version": "7",
+      "when": 1792683952081,
+      "tag": "0205_security_advisories",
+      "breakpoints": true
+    },
+    {
+      "idx": 206,
+      "version": "7",
+      "when": 1793102400000,
+      "tag": "0206_assistant",
+      "breakpoints": true
+    },
+    {
+      "idx": 207,
+      "version": "7",
+      "when": 1793102400001,
+      "tag": "0207_assistant_targets",
+      "breakpoints": true
+    },
+    {
+      "idx": 208,
+      "version": "7",
+      "when": 1793131200000,
+      "tag": "0208_chat_apps",
+      "breakpoints": true
+    },
+    {
+      "idx": 209,
+      "version": "7",
+      "when": 1793145600000,
+      "tag": "0209_assistant_automations",
+      "breakpoints": true
+    },
+    {
+      "idx": 210,
+      "version": "7",
+      "when": 1793196000000,
+      "tag": "0210_chat_assistant",
+      "breakpoints": true
+    },
+    {
+      "idx": 211,
+      "version": "7",
+      "when": 1793196000001,
+      "tag": "0211_chat_conversations",
+      "breakpoints": true
+    },
+    {
+      "idx": 212,
+      "version": "7",
+      "when": 1793196000002,
+      "tag": "0212_chat_outbound",
+      "breakpoints": true
+    },
+    {
+      "idx": 213,
+      "version": "7",
+      "when": 1793196000003,
+      "tag": "0213_automation_permissions",
+      "breakpoints": true
+    },
+    {
+      "idx": 214,
+      "version": "7",
+      "when": 1793196000004,
+      "tag": "0214_chat_transport",
+      "breakpoints": true
+    },
+    {
+      "idx": 215,
+      "version": "7",
+      "when": 1793196000005,
+      "tag": "0215_chat_experience",
+      "breakpoints": true
+    },
+    {
+      "idx": 216,
+      "version": "7",
+      "when": 1793327200000,
+      "tag": "0216_assistant_agents",
+      "breakpoints": true
+    },
+    {
+      "idx": 217,
+      "version": "7",
+      "when": 1793327200001,
+      "tag": "0217_assistant_agent_icon",
+      "breakpoints": true
+    },
+    {
+      "idx": 218,
+      "version": "7",
+      "when": 1793327200002,
+      "tag": "0218_two_factor_verification",
+      "breakpoints": true
+    },
+    {
+      "idx": 219,
+      "version": "7",
+      "when": 1793678400000,
+      "tag": "0219_oauth_provider",
+      "breakpoints": true
+    },
+    {
+      "idx": 220,
+      "version": "7",
+      "when": 1793714400000,
+      "tag": "0220_archive_compose_services",
+      "breakpoints": true
+    },
+    {
+      "idx": 221,
+      "version": "7",
+      "when": 1793714400001,
+      "tag": "0221_security_advisory_checks",
+      "breakpoints": true
+    },
+    {
+      "idx": 222,
+      "version": "7",
+      "when": 1793714400002,
+      "tag": "0222_host_security_advisories",
+      "breakpoints": true
+    },
+    {
+      "idx": 223,
+      "version": "7",
+      "when": 1793725200000,
+      "tag": "0223_cloud_customer_email",
+      "breakpoints": true
+    },
+    {
+      "idx": 224,
+      "version": "7",
+      "when": 1793725200001,
+      "tag": "0224_gitops_releases",
       "breakpoints": true
     }
   ]

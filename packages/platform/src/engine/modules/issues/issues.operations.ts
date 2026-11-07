@@ -1,7 +1,8 @@
+import { reportCaughtError as observeCaughtError, diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import { randomUUID } from "node:crypto";
 import { getPlatform } from "@repo/adapters";
 import { repos } from "@repo/db";
-import { safeErrorMessage } from "@repo/core";
+import { AppError, safeErrorMessage } from "@repo/core";
 import type { IssueRescan } from "@repo/contracts";
 import type { IssueDependencies } from "../../../issues";
 import type { ExecutionContext } from "../../../context";
@@ -13,8 +14,9 @@ import { assertNativeJobs } from "../../native/execution-policy";
 import { assertSelfHosted } from "../system/server-access";
 import { runJobNow, systemJobAvailability } from "../jobs/job.service";
 import { getCurrentHealthScan, listWorkloadHealthSnapshots, runCurrentHealthScan } from "../monitoring/health-watch";
-import { assertContainerHealthSupported, containerHealthSupported, continuousHealthAvailable, containerHealthEventsAvailable, HEALTH_WATCH_JOB, healthWatchActive } from "../monitoring/health-watch-policy";
+import { continuousHealthAvailable, containerHealthEventsAvailable, HEALTH_WATCH_JOB, healthWatchActive } from "../monitoring/health-watch-policy";
 import { listOrganizationIssues } from "./issues.service";
+import { env } from "../../config/env";
 
 const RESCAN_JOBS = [HEALTH_WATCH_JOB, "infra:scan", "domains:verify-pending", "updates:scan"] as const;
 let activeRescan: IssueRescan | null = null;
@@ -23,12 +25,35 @@ async function hasFullProjectRead(ctx: ExecutionContext) {
   return authorization.checkPermissionOnResource({ ...ctx, scopeMode: "fixed" }, { resourceType: "project", resourceId: "*", action: "read", scope: "all" });
 }
 
+async function canClearHistory(ctx: ExecutionContext) {
+  return !env.CLOUD_MODE && !ctx.tokenScope && ["owner", "admin"].includes(ctx.role) &&
+    await authorization.checkPermissionOnResource({ ...ctx, scopeMode: "fixed" }, {
+      resourceType: "project",
+      resourceId: "*",
+      action: "admin",
+      scope: "all",
+    });
+}
+
 export const issuesDependencies: IssueDependencies = {
   collection: {
-    async list(ctx, input = {}) { const status = input.status ?? "open"; return { ...await listOrganizationIssues(ctx, { status }), status }; },
+    async list(ctx, input = {}) { const status = input.status ?? "open"; return { ...await listOrganizationIssues(ctx, { status }), status, canClearHistory: await canClearHistory(ctx) }; },
+    async clearHistory(ctx) {
+      assertSelfHosted();
+      if (!await canClearHistory(ctx)) throw new AppError(
+        "An organization administrator is required to clear monitoring history",
+        403,
+        "MONITORING_HISTORY_ADMIN_REQUIRED",
+      );
+      const deleted = await repos.serviceIncident.clearResolvedByOrg(ctx.organizationId, new Date());
+      audit.recordAsync(operationAuditContext(ctx), {
+        eventType: "issues.history.clear",
+        after: { operation: "issues.clearHistory", deleted },
+      });
+      return { deleted };
+    },
     async summary(ctx) { return (await listOrganizationIssues(ctx)).counts; },
     async health(ctx) {
-      assertContainerHealthSupported();
       const available = continuousHealthAvailable();
       const [rows, job, servers, all, instanceAdmin, jobWrite] = await Promise.all([
         Promise.resolve(listWorkloadHealthSnapshots(ctx.organizationId)), repos.job.findByKey(HEALTH_WATCH_JOB),
@@ -44,7 +69,7 @@ export const issuesDependencies: IssueDependencies = {
       }
       return {
         workloads: visible, watching: healthWatchActive(job),
-        capabilities: { current: containerHealthSupported() && all, continuous: available },
+        capabilities: { current: all, continuous: available },
         currentScan: all ? getCurrentHealthScan(ctx.organizationId) : null,
         watcher: {
           key: HEALTH_WATCH_JOB, schedule: job?.cronExpression ?? null, available,
@@ -55,7 +80,6 @@ export const issuesDependencies: IssueDependencies = {
       };
     },
     async scanHealth(ctx) {
-      assertContainerHealthSupported();
       // This existing scanner covers the whole organization and returns aggregate counts.
       await authorization.authorize({ ...ctx, scopeMode: "fixed" }, { resourceType: "project", resourceId: "*", action: "read", scope: "all" });
       return runCurrentHealthScan(ctx.organizationId);
@@ -85,11 +109,12 @@ export const issuesDependencies: IssueDependencies = {
             const result = await runJobNow(key);
             stage.status = "completed";
             stage.summary = result.summary ?? {};
-          } catch (error) { stage.status = "failed"; stage.error = safeErrorMessage(error); }
+          } catch (error) {
+            observeCaughtError(error, "platform/engine/modules/issues/issues.operations"); stage.status = "failed"; stage.error = safeErrorMessage(error); }
         }));
         session.status = "completed";
         session.finishedAt = new Date().toISOString();
-      }).catch(error => { console.error("[issues] rescan failed:", safeErrorMessage(error)); });
+      }).catch(error => { errorDiagnostics.error("platform/engine/modules/issues/issues.operations", "[issues] rescan failed:", safeErrorMessage(error), error); });
       audit.recordAsync(operationAuditContext(ctx), { eventType: "job:write", resourceType: "job", after: { operation: "issues.rescan", scanSessionId: session.id, stages: available, skipped: RESCAN_JOBS.filter(key => !available.includes(key)) } });
       return session;
     },

@@ -9,6 +9,10 @@ import type { BackupDestinationSummary, BackupPolicy, BackupRun } from "@/lib/ap
 import { BackupSettings } from "@/app/(dashboard)/projects/[id]/components/BackupSettings";
 import { PolicyEditor } from "./PolicyEditor";
 
+vi.mock("@/context/PlatformContext", () => ({ usePlatform: () => ({ selfHosted: true, deployMode: "docker" }) }));
+vi.mock("@/lib/auth-client", () => ({ useSession: () => ({ data: null }) }));
+vi.mock("@/lib/api/system", () => ({ systemApi: { listServerDestinations: async () => ({ servers: [] }) } }));
+
 const api = vi.hoisted(() => ({
   destinations: vi.fn(),
   createDestination: vi.fn(),
@@ -420,6 +424,7 @@ function policy(patch: Partial<BackupPolicy> = {}): BackupPolicy {
 function run(patch: Partial<BackupRun> = {}): BackupRun {
   return {
     id: "run-1",
+    sourceKind: "service",
     policyId: "policy-1",
     destinationId: previousDestination.id,
     projectId: "project-1",

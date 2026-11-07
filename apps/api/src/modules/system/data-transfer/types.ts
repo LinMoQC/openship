@@ -3,8 +3,9 @@
  *
  * The export file wraps an UNCHANGED `DatabaseDump` (so restoreSubgraph's
  * format-version gate is untouched) plus a portable bundle of secret values.
- * Project files can carry these values as plain JSON; password-protected files
- * retain their sealed bundle. Imports encrypt values with the destination key.
+ * New files carry these values as plain JSON, including explicit empty values.
+ * Legacy password-protected files remain readable. Imports encrypt values with
+ * the destination key.
  */
 
 import type { DatabaseDump } from "@repo/db";
@@ -23,7 +24,7 @@ export type {
 export type ImportMode = "wipe" | "merge";
 
 /** How a given column is encrypted at rest — drives decrypt/re-encrypt dispatch. */
-export type SecretScheme = "scalar" | "enc1" | "map" | "notification-config" | "plaintext" | "json";
+export type SecretScheme = "scalar" | "enc1" | "map" | "notification-config" | "plaintext" | "json" | "better-auth";
 
 /** One secret cell's plaintext, keyed to its row. Only one payload field is set. */
 export interface SecretEntry {
@@ -32,11 +33,11 @@ export interface SecretEntry {
   column: string; // drizzle field name
   scheme: SecretScheme;
   /** scalar | enc1 | plaintext */
-  value?: string;
+  value?: string | null;
   /** map — e.g. deployment.envVars */
-  map?: Record<string, string>;
+  map?: Record<string, string> | null;
   /** notification-config — decrypted secret sub-fields (hmacSecret, webhookUrl, botToken) */
-  config?: Record<string, string>;
+  config?: Record<string, string> | null;
   /** JSON configuration that can contain literal passwords or private keys. */
   json?: unknown;
 }
@@ -65,7 +66,7 @@ export type TransferSecrets = SealedSecrets | PlaintextSecrets;
 
 export interface DataTransferFile {
   kind: "openship-instance-export" | "openship-project-export";
-  envelopeVersion: 1 | 2 | 3;
+  envelopeVersion: 1 | 2 | 3 | 4;
   createdAt: string;
   sourceDriver: "pg" | "pglite";
   /** Absent on legacy files, which always contained all history groups. */
@@ -73,7 +74,7 @@ export interface DataTransferFile {
   manifest?: TransferManifest;
   summary?: { rows: number; tables: number };
   dump: DatabaseDump;
-  /** Version 3 project files support plaintext values. null omits credentials. */
+  /** Version 4 files preserve plaintext and empty credentials for both scopes. */
   secrets: TransferSecrets | null;
 }
 

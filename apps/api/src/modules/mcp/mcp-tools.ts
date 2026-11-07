@@ -14,6 +14,7 @@ import {
   type CheckedResourceType,
 } from "../../lib/permission";
 import type { Permission } from "@repo/db";
+import { capabilityFor, type Capability, type GrantPermission } from "@repo/core";
 import { Type, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import { env } from "@repo/platform/engine/config/index";
@@ -62,6 +63,7 @@ export interface McpToolDef {
      *  Reachable by an "own projects" create-capable grant — see the
      *  canCreateProjects arm in filterToolsForPrincipal. */
     projectCreate: boolean;
+    instanceAdmin?: true;
     /** Repo content tier this route requires, mirrored from PermissionSpec.source.
      *  Set ⇒ the tool touches repository CONTENT and needs a source capability
      *  beyond the repo grant itself. Undefined ⇒ metadata tier. */
@@ -71,6 +73,8 @@ export interface McpToolDef {
 
 /** The caller's effective capability, resolved once per MCP request for `tools/list` filtering. */
 export interface McpPrincipal {
+  /** Resolved with the same persisted instance-authority policy as HTTP calls. */
+  instanceAdmin?: boolean;
   role: "owner" | "admin" | "member" | "restricted";
   readOnly: boolean;
   /** Resource types the token holds grants on — only consulted when role === "restricted". */
@@ -90,7 +94,10 @@ export interface McpPrincipal {
    * advertise/enforce drift as one that over-advertises. Making it required means
    * the compiler names every construction site instead.
    */
-  wildcardGrants: ReadonlyMap<string, readonly Permission[]>;
+  wildcardGrants: ReadonlyMap<string, readonly GrantPermission[]>;
+  /** Fine-grained capabilities held on any grant (`domains:delete`). A tool whose
+   *  tag maps to one is listed for its holder even without a coarse root grant. */
+  grantedCapabilities?: ReadonlySet<Capability>;
   /** True when the token holds a create-capable project wildcard grant
    *  ({project, "*", permissions:["create"]}) — the "own projects" scope. Lets a
    *  restricted token see the project-create routes and the project list (which
@@ -121,11 +128,8 @@ function includeRoute(route: RegisteredRoute): boolean {
   if (isPublicSpec(spec)) return false;
   if (HARD_DENY.has(route.module)) return false;
   // A `localOnly` route 404s on the hosted control plane, so advertising it there
-  // hands the agent a tool that can only ever fail. Not hypothetical: the jobs
-  // router is localOnly while `app.ts` mounts it unconditionally, so all 11 jobs
-  // tools were listed on the SaaS. Reading it from the spec is why router-level
-  // `localOnly` had to become a `secureRouter` option — as middleware it never
-  // reached the registry.
+  // hands the agent a tool that can only ever fail. Read availability from the
+  // registry; Hono middleware alone cannot describe it to MCP.
   if (spec.localOnly && env.CLOUD_MODE) return false;
   return spec.mcp != null; // opt-in allowlist
 }
@@ -283,6 +287,7 @@ export function getMcpTools(): McpToolDef[] {
             ? "project"
             : (parsed?.root ?? ""),
           projectCreate: !isPublicSpec(spec) && spec.projectCreate === true,
+          ...(!isPublicSpec(spec) && spec.instanceAdmin ? { instanceAdmin: true as const } : {}),
           // Repo content tier, declared once on the route and consumed both here
           // (advertisement) and by requirePermission (enforcement).
           source: isPublicSpec(spec) ? undefined : spec.source,
@@ -348,11 +353,12 @@ export function filterToolsForPrincipal(
     // Read-only tokens can only call GET — the runtime gate rejects mutations by
     // HTTP method, so mirror that exactly rather than guessing from the tag.
     if (principal.readOnly && t.method !== "GET") return false;
+    if (t.perm.instanceAdmin && !principal.instanceAdmin) return false;
 
-    // Self-discovery needs no resource grant. Its shared identity operation
-    // validates membership and confines the result to the credential's scope.
+    // Self-discovery and informational access requests need no resource grant.
+    // Shared identity operations validate membership and the credential's scope.
     // Keep this exception exact; other permission-management routes stay gated.
-    if (t.method === "GET" && t.path === "/api/permissions/workspaces") return true;
+    if (t.method === "GET" && (t.path === "/api/permissions/workspaces" || t.path === "/api/permissions/access-request" || t.path === "/api/mcp/guide")) return true;
 
     // Repo CONTENT is a capability of its own, orthogonal to role: a repo grant
     // authorises deploying and inspecting metadata, not crawling files. Hide the
@@ -397,7 +403,10 @@ export function filterToolsForPrincipal(
       const held = principal.wildcardGrants.get(t.perm.leaf);
       return held ? permitsAction(held, assertedAction(t.perm.action)) : false;
     }
-    return principalHasGrantFor(principal.grantedRootTypes, t.perm.grantRoot);
+    if (principalHasGrantFor(principal.grantedRootTypes, t.perm.grantRoot)) return true;
+    // Same mapping the permission check uses: `domain:admin` ⇒ `domains:delete`.
+    const capability = capabilityFor(t.perm.leaf, assertedAction(t.perm.action));
+    return !!capability && !!principal.grantedCapabilities?.has(capability);
   });
 }
 

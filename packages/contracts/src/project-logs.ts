@@ -1,5 +1,6 @@
 import { Type, type Static } from "@sinclair/typebox";
 import type { DeploymentEvent } from "./deployment-resources";
+import type { ProjectRuntimeLogsInput } from "./project-runtime";
 import type { ResourceOperationSchema, ResourceOperations } from "./resource-operations";
 
 export const ServerLogsInputSchema = Type.Object({
@@ -42,10 +43,10 @@ export interface ProjectLogStreams {
   ): AsyncIterable<DeploymentEvent>;
   streamRuntimeLogs(
     id: string,
-    input?: { tail?: number },
+    input?: ProjectRuntimeLogsInput,
     options?: { signal?: AbortSignal },
   ): AsyncIterable<DeploymentEvent>;
-  /** Self-hosted edge events. Cloud callers obtain a provider token through getServerLogStreamToken. */
+  /** Request-log events. The remote SDK selects the authorized self-hosted or Cloud stream. */
   streamServerLogs(
     id: string,
     input?: ServerLogsInput,

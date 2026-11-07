@@ -1,5 +1,6 @@
 "use client";
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Icon } from "@repo/ui/icons";
@@ -48,12 +49,17 @@ const initial = (cluster: ComputeCluster): ClusterStorageConfig => ({
   })),
 });
 
-export function ClusterStoragePanel({
+export function ClusterStoragePanel(props: { cluster: ComputeCluster; canManage: boolean; scalingReady: boolean; }) {
+  if (!props.cluster.network) return null;
+  return <NativeClusterStoragePanel {...props} cluster={{...props.cluster, network: props.cluster.network}} />;
+}
+
+function NativeClusterStoragePanel({
   cluster,
   canManage,
   scalingReady,
 }: {
-  cluster: ComputeCluster;
+  cluster: ComputeCluster & {network: NonNullable<ComputeCluster["network"]>};
   canManage: boolean;
   scalingReady: boolean;
 }) {
@@ -155,7 +161,9 @@ export function ClusterStoragePanel({
       setError(getApiErrorMessage(reason));
       try {
         receive(await clusterStorageApi.get(cluster.id));
-      } catch {}
+      } catch (diagnosticFailure) {
+        observeCaughtError(diagnosticFailure, "dashboard/components/servers/clusters/ClusterStoragePanel");
+      }
     } finally {
       pending.current = false;
       setBusy(false);

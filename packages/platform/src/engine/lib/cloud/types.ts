@@ -9,9 +9,19 @@ import type { DatabaseDump, SubgraphScope } from "@repo/db";
 import type { CloudPreflightData } from "../cloud-preflight";
 
 export interface CloudAccount {
+  id: string;
+  organizationId: string;
   name: string;
   email: string;
   image?: string | null;
+}
+
+/** Encrypted together so a credential cannot be reused with another target or tenant. */
+export interface StoredCloudSession {
+  token: string;
+  apiUrl: string;
+  userId: string;
+  organizationId: string;
 }
 
 /** Cached Oblien namespace token (the `oblien-ns-tokens` cacheStore). */
@@ -36,6 +46,7 @@ export interface CloudGithubInstallation {
 }
 
 export interface CloudGithubInstallationToken {
+  scope?: import("@repo/core").GitHubInstallationScope;
   token: string;
   /** ISO 8601 timestamp - GitHub install tokens expire in 60min. */
   expiresAt: string;
@@ -93,13 +104,14 @@ export type CloudClientScope = { userId: string } | { organizationId: string };
 export interface CloudClient {
   github: {
     installUrl(): Promise<{ url: string; state: string } | null>;
-    oauthHandoff(): Promise<{ url: string } | null>;
+    oauthHandoff(state?: string): Promise<{ url: string } | null>;
     userStatus(): Promise<CloudGithubUserStatus | null>;
     installations(): Promise<CloudGithubInstallation[] | null>;
     installationToken(
       owner: string,
       repos?: string[],
-    ): Promise<{ token: string; expiresAt: string } | null>;
+      permissions?: Record<string, "read" | "write">,
+    ): Promise<{ token: string; expiresAt: string; scope?: import("@repo/core").GitHubInstallationScope } | null>;
   };
   pages: {
     create(input: {
@@ -185,8 +197,10 @@ export interface CloudClient {
   ingestSubgraph(input: {
     dump: DatabaseDump;
     allowNonEmptyTarget?: boolean;
+    /** Require the retry-safe project promotion protocol. */
+    promotionId?: string;
   }): Promise<
-    | { ok: true; organizationId: string; publicUrl: string; imported: Record<string, number> }
+    | { ok: true; organizationId: string; publicUrl: string; imported: Record<string, number>; promotionId?: string }
     | { ok: false; error: string; code?: string; projectCount?: number }
   >;
   /**

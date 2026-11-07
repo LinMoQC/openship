@@ -1,5 +1,7 @@
 "use client";
 
+import { useComposeReview } from "@/hooks/useComposeReview";
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { Icon as UiIcon } from "@repo/ui/icons";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -7,16 +9,18 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import DeploymentDetails from "../DeploymentDetails";
 import BuildTerminal from "../BuildTerminal";
 import { DeploymentHeader } from "../DeploymentHeader";
+import { DeploymentHealthWarning } from "../DeploymentHealthWarning";
+import { CloudBuildQueueNotice } from "../CloudBuildQueueNotice";
+import { CloudDeploymentResourceNotice } from "../CloudDeploymentResourceNotice";
 import { DeploymentLayout } from "../DeploymentLayout";
 import { DeploymentLogsPanel } from "../DeploymentLogsPanel";
 import { PageContainer } from "@/components/ui/PageContainer";
 import { Tabs } from "@/components/ui/Tabs";
 import { ServiceStatusIndicator } from "@/components/services/ServiceStatusBadge";
 import { PortAdvisoryModal } from "../PortAdvisoryModal";
-import { PromptDetails } from "../PromptDetails";
+import { useDeploymentPrompt } from "../useDeploymentPrompt";
 import { useRouter } from "next/navigation";
 import { useDeployment } from "@/context/DeploymentContext";
-import { useModal } from "@/context/ModalContext";
 import { useCloudDeployPricing } from "@/hooks/useCloudDeployPricing";
 import { Modal } from "@/components/ui/Modal";
 import { useToast } from "@/context/ToastContext";
@@ -39,20 +43,23 @@ const PREPARE_TAB = "__prepare__";
 
 interface Props {
   // Resolves to the new deployment id (navigates on success) or null on failure.
-  onRedeploy: () => void | Promise<string | null>;
+  onRedeploy: (options?: { reuseBuild?: boolean }) => void | Promise<string | null>;
 }
 
 const ComposeDeploymentProcessing: React.FC<Props> = ({ onRedeploy }) => {
-  const { config, state, onTerminalReady, respondToPrompt, deploymentStatus } =
+  const { config, state, onTerminalReady, respondToPrompt, resolvePortCheck, deploymentStatus } =
     useDeployment();
-  const { showModal, hideModal } = useModal();
-  const showCloudPricing = useCloudDeployPricing();
+  const showCloudPricing = useCloudDeployPricing(config.workspaceId);
+  const showComposeReview = useComposeReview(state.projectId);
   const { showToast } = useToast();
   const { resolvedTheme } = useTheme();
   const { t } = useI18n();
   const cd = t.importProject.composeDeployment;
   const router = useRouter();
-  const promptModalRef = React.useRef<string | null>(null);
+  useDeploymentPrompt(
+    ["ready", "failed", "cancelled"].includes(deploymentStatus) ? null : state.pendingPrompt,
+    respondToPrompt,
+  );
   // Tracks which deployment's decision dialog we've already auto-opened, so it
   // pops once (not on every re-render) while staying re-openable via the banner.
   const autoOpenedDecisionRef = React.useRef<string | null>(null);
@@ -69,6 +76,12 @@ const ComposeDeploymentProcessing: React.FC<Props> = ({ onRedeploy }) => {
   // manual pin when this advances to a new service.
   const prevWorkingRef = useRef<string | undefined>(undefined);
 
+  const [resolvedWarning, setResolvedWarning] = useState<string | null>(null);
+  const warningKey = `${state.projectId || config.projectId}:${state.deploymentId}:${state.warningMessage}`;
+  const warningResolved = resolvedWarning === warningKey;
+  const handleWarningResolved = React.useCallback((resolved: boolean) => {
+    setResolvedWarning(resolved ? warningKey : null);
+  }, [warningKey]);
   const hasWarning = deploymentStatus === "ready" && !!state.warningMessage;
   // A partial-failure deploy held for an explicit keep/reject decision. Driven
   // by the server-backed `decisionPending` flag (survives refresh), suppressed
@@ -87,7 +100,8 @@ const ComposeDeploymentProcessing: React.FC<Props> = ({ onRedeploy }) => {
     if (deploymentStatus === "ready" && !showDecision && projectId && state.deploymentId) {
       void projectsApi.getInfo(projectId).then(response => {
         if (active) setLiveDeploymentId(response.data?.project?.activeDeploymentId ?? null);
-      }).catch(() => { /* Keep build history when current ownership cannot be verified. */ });
+      }).catch((diagnosticFailure) => {
+        observeCaughtError(diagnosticFailure, "dashboard/components/import-project/compose/ComposeDeploymentProcessing"); /* Keep build history when current ownership cannot be verified. */ });
     }
     return () => { active = false; };
   }, [deploymentStatus, showDecision, projectId, state.deploymentId]);
@@ -172,61 +186,12 @@ const ComposeDeploymentProcessing: React.FC<Props> = ({ onRedeploy }) => {
     }
   }, [userPinnedTab, services, logServiceNames, activeLogTab]);
 
-  // ── Pipeline prompt modal ──────────────────────────────────────────────
-  useEffect(() => {
-    if (!state.pendingPrompt) return;
-    const { promptId, title, message, actions, details } = state.pendingPrompt;
-    if (promptModalRef.current === promptId) return;
-    promptModalRef.current = promptId;
-
-    const modalId = showModal({
-      title,
-      icon: "warning",
-      customContent: (
-        <div className="p-6 space-y-5">
-          <div className="space-y-2">
-            <h3 className="text-xl font-bold text-foreground">{title}</h3>
-            <p className="text-sm leading-relaxed text-muted-foreground">{message}</p>
-          </div>
-
-          <PromptDetails details={details} />
-
-          <div className="flex items-center justify-end gap-3 pt-2">
-            {actions.map((action) => {
-              const variant = (action.variant || "secondary") as "secondary" | "danger" | "primary";
-              const styles =
-                variant === "danger"
-                  ? "bg-danger-solid text-white hover:bg-danger-solid/90"
-                  : variant === "primary"
-                    ? "bg-primary text-primary-foreground hover:bg-primary/90"
-                    : "bg-secondary text-secondary-foreground hover:bg-secondary/80";
-              return (
-                <button
-                  key={action.id}
-                  type="button"
-                  className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors ${styles}`}
-                  onClick={() => {
-                    hideModal(modalId);
-                    respondToPrompt(action.id);
-                  }}
-                >
-                  {action.label}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      ),
-      width: "560px",
-      maxWidth: "92vw",
-    });
-  }, [state.pendingPrompt, showModal, hideModal, respondToPrompt]);
-
   const handleKeepDeployment = React.useCallback(async () => {
     if (state.deploymentId) {
       try {
         await deployApi.keep(state.deploymentId);
-      } catch {
+      } catch (diagnosticFailure) {
+        observeCaughtError(diagnosticFailure, "dashboard/components/import-project/compose/ComposeDeploymentProcessing");
         // Best-effort: dismiss locally even if the confirm call fails — the
         // banner reappears from the server flag on refresh if it didn't persist.
       }
@@ -274,7 +239,8 @@ const ComposeDeploymentProcessing: React.FC<Props> = ({ onRedeploy }) => {
       const newId = res?.data?.deployment?.id;
       router.push(newId ? `/build/${newId}` : `/projects/${state.projectId}`);
     } catch (err) {
-      if (showCloudPricing(err)) {
+      observeCaughtError(err, "dashboard/components/import-project/compose/ComposeDeploymentProcessing");
+      if (showComposeReview(err) || showCloudPricing(err)) {
         // A quota refusal created no build. Keep the failed-service retry available.
         setDecisionResolved(false);
         return;
@@ -286,7 +252,7 @@ const ComposeDeploymentProcessing: React.FC<Props> = ({ onRedeploy }) => {
     } finally {
       retryInFlightRef.current = false;
     }
-  }, [state.serviceStatuses, state.decisionFailedServiceIds, state.projectId, router, showToast, showCloudPricing, cd]);
+  }, [state.serviceStatuses, state.decisionFailedServiceIds, state.projectId, router, showToast, showCloudPricing, showComposeReview, cd]);
 
   // Auto-open the decision dialog once per deployment when a partial failure is
   // awaiting a decision. Closing it leaves the persistent banner in place, so the
@@ -301,7 +267,13 @@ const ComposeDeploymentProcessing: React.FC<Props> = ({ onRedeploy }) => {
 
   return (
     <PageContainer>
-      <DeploymentHeader onRedeploy={onRedeploy} serviceCount={total} decisionPending={showDecision} />
+      <DeploymentHeader
+        warningResolved={warningResolved}
+        onRedeploy={onRedeploy}
+        serviceCount={total}
+        decisionPending={showDecision}
+        isCompose
+      />
 
       <ComposeDeploymentBody
         logs={state.buildLogs}
@@ -319,6 +291,7 @@ const ComposeDeploymentProcessing: React.FC<Props> = ({ onRedeploy }) => {
         isFinished={isFinished}
         terminalTheme={terminalTheme}
       >
+        {state.queue && state.isDeploying && <CloudBuildQueueNotice queue={state.queue} />}
         {/* Decision banner — persists while a partial deploy awaits keep/reject
             (survives refresh via the server flag). Re-opens the dialog. */}
         {showDecision ? (
@@ -342,23 +315,20 @@ const ComposeDeploymentProcessing: React.FC<Props> = ({ onRedeploy }) => {
             </div>
           </div>
         ) : hasWarning ? (
-          <div className="rounded-2xl border border-warning-border bg-warning-bg px-5 py-4">
-            <p className="text-sm font-medium text-warning">
-              {cd.warningTitle}
-            </p>
-            <p className="mt-1 text-sm text-warning">
-              {state.warningMessage}
-            </p>
-          </div>
+          <DeploymentHealthWarning key={warningKey} projectId={projectId}
+            deploymentId={state.deploymentId} warningMessage={state.warningMessage}
+            onResolved={handleWarningResolved} />
         ) : null}
 
-        {deploymentStatus === "ready" && (
+        {deploymentStatus === "ready" && !showDecision && (
           <PortAdvisoryModal
+            key={state.deploymentId}
             deploymentId={state.deploymentId}
             projectId={state.projectId || config.projectId}
             checks={state.portCheck}
             skipped={state.portCheckSkipped}
             isCompose
+            onResolved={resolvePortCheck}
           />
         )}
       </ComposeDeploymentBody>
@@ -605,6 +575,7 @@ function ComposeDeploymentBody({
 
   return (
     <DeploymentLayout
+      notice={<CloudDeploymentResourceNotice />}
       details={<DeploymentDetails />}
       navigation={
         <div className="rounded-2xl bg-card p-3">
@@ -694,7 +665,8 @@ function terminalBytes(log: ParsedLogLine) {
       bytes[index] = binary.charCodeAt(index);
     }
     return bytes;
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "dashboard/components/import-project/compose/ComposeDeploymentProcessing");
     return terminalLine(log);
   }
 }

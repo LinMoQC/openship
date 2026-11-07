@@ -1,5 +1,6 @@
 "use client";
 
+import { reportCaughtError as observeCaughtError, diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import { Icon as UiIcon } from "@repo/ui/icons";
 
 import React, { useState, useEffect, useRef, useCallback } from "react";
@@ -10,6 +11,7 @@ import { useLogStream } from "@/hooks/useSSEConnection";
 import { useToast } from "@/context/ToastContext";
 import { useProjectSettings } from "@/context/ProjectSettingsContext";
 import { useTheme } from "@/components/theme-provider";
+import { readTerminalTheme, observeTerminalAppearance } from "@/lib/terminal-appearance";
 import { api } from "@/lib/api";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 import { TerminalCardShell } from "@/components/terminal/TerminalCardShell";
@@ -42,7 +44,8 @@ const decodeLogEntry = (entry: any): string | null => {
                 bytes[i] = binary.charCodeAt(i);
             }
             return new TextDecoder().decode(bytes).replace(/\r?\n$/, '');
-        } catch {
+        } catch (diagnosticFailure) {
+          observeCaughtError(diagnosticFailure, "dashboard/app/(dashboard)/projects/[id]/components/logs/TerminalLogs");
             // Fall through to message below.
         }
     }
@@ -73,7 +76,6 @@ export const TerminalLogs: React.FC<TerminalLogsProps> = ({
     } = useProjectSettings();
 
     const { resolvedTheme } = useTheme();
-    const isDarkMode = resolvedTheme !== "light"; // dim + dark both use the dark terminal
 
     const [searchQuery, setSearchQuery] = useState("");
     const [hasMatches, setHasMatches] = useState(false);
@@ -87,57 +89,7 @@ export const TerminalLogs: React.FC<TerminalLogsProps> = ({
     const lastLogIndexRef = useRef(0); // Track last written log index to prevent duplicates
     const terminalLogCountRef = useRef(0);
     const effectShows = useRef(false);
-    const getDarkTheme = () => ({
-        background: '#060606',
-        foreground: '#e5e5e5',
-        cursor: '#ffffff',
-        cursorAccent: '#060606',
-        selectionBackground: 'rgba(255, 255, 255, 0.25)',
-        selectionForeground: '#ffffff',
-        black: '#000',
-        red: '#ff5556',
-        green: '#51fa7b',
-        yellow: '#f2fa8c',
-        blue: '#6372a4',
-        magenta: '#ff79c6',
-        cyan: '#86eafd',
-        white: '#d3d7cf',
-        brightBlack: '#6b7280',
-        brightRed: '#ff8888',
-        brightGreen: '#7dffaa',
-        brightYellow: '#f7ffb3',
-        brightBlue: '#8a9cd6',
-        brightMagenta: '#ffa1dd',
-        brightCyan: '#b0f3ff',
-        brightWhite: '#ffffff',
-    });
-
-    const getLightTheme = () => ({
-        background: '#ffffff',
-        foreground: '#1a1a1a',
-        cursor: '#1a1a1a',
-        cursorAccent: '#ffffff',
-        selectionBackground: 'rgba(59, 130, 246, 0.3)',
-        selectionForeground: '#1a1a1a',
-        black: '#1a1a1a',
-        red: '#dc2626',
-        green: '#16a34a',
-        yellow: '#ca8a04',
-        blue: '#2563eb',
-        magenta: '#c026d3',
-        cyan: '#0891b2',
-        white: '#6b7280',
-        brightBlack: '#4b5563',
-        brightRed: '#ef4444',
-        brightGreen: '#22c55e',
-        brightYellow: '#eab308',
-        brightBlue: '#3b82f6',
-        brightMagenta: '#d946ef',
-        brightCyan: '#06b6d4',
-        brightWhite: '#111827',
-    });
-
-    const getTerminalTheme = () => isDarkMode ? getDarkTheme() : getLightTheme();
+    const getTerminalTheme = () => readTerminalTheme(terminalRef.current);
     const initializeTerminal = async () => {
         if (!terminalRef.current) return;
 
@@ -180,7 +132,7 @@ export const TerminalLogs: React.FC<TerminalLogsProps> = ({
                     // Show visual feedback
                     showToast(t.projectDetail.logs.terminal.copiedToClipboard, 'success');
                 }).catch(err => {
-                    console.error('Failed to copy text:', err);
+                    errorDiagnostics.error("dashboard/app/(dashboard)/projects/[id]/components/logs/TerminalLogs", 'Failed to copy text:', err);
                 });
             }
         });
@@ -199,7 +151,7 @@ export const TerminalLogs: React.FC<TerminalLogsProps> = ({
                     }
                 }, 100);
             } catch (e) {
-                console.error('Resize error:', e);
+                errorDiagnostics.error("dashboard/app/(dashboard)/projects/[id]/components/logs/TerminalLogs", 'Resize error:', e);
             }
         };
 
@@ -270,7 +222,7 @@ export const TerminalLogs: React.FC<TerminalLogsProps> = ({
                     try {
                         xtermRef.current.xterm.write(log + '\r\n');
                     } catch (err) {
-                        console.error('Error writing log to terminal:', err);
+                        errorDiagnostics.error("dashboard/app/(dashboard)/projects/[id]/components/logs/TerminalLogs", 'Error writing log to terminal:', err);
                     }
                 }
             });
@@ -286,6 +238,13 @@ export const TerminalLogs: React.FC<TerminalLogsProps> = ({
             terminalLogsData.xtermInstance.options.theme = getTerminalTheme();
         }
     }, [resolvedTheme]);
+
+    useEffect(() => {
+        if (!terminalReady || !terminalRef.current || !xtermRef.current) return;
+        return observeTerminalAppearance(xtermRef.current.xterm, terminalRef.current, () =>
+            xtermRef.current?.fitAddon.fit(),
+        );
+    }, [terminalReady]);
 
     useEffect(() => {
         onLogsChange(terminalLogsData.logs);
@@ -336,7 +295,7 @@ export const TerminalLogs: React.FC<TerminalLogsProps> = ({
 
             setHasMatches(found);
         } catch (error) {
-            console.warn('Search addon error:', error);
+            errorDiagnostics.warn("dashboard/app/(dashboard)/projects/[id]/components/logs/TerminalLogs", 'Search addon error:', error);
             setHasMatches(false);
         }
     }, []);
@@ -385,7 +344,7 @@ export const TerminalLogs: React.FC<TerminalLogsProps> = ({
                 }
             });
         } catch (error) {
-            console.warn('Search next error:', error);
+            errorDiagnostics.warn("dashboard/app/(dashboard)/projects/[id]/components/logs/TerminalLogs", 'Search next error:', error);
         }
     };
 
@@ -407,7 +366,7 @@ export const TerminalLogs: React.FC<TerminalLogsProps> = ({
                 }
             });
         } catch (error) {
-            console.warn('Search previous error:', error);
+            errorDiagnostics.warn("dashboard/app/(dashboard)/projects/[id]/components/logs/TerminalLogs", 'Search previous error:', error);
         }
     };
 
@@ -432,7 +391,7 @@ export const TerminalLogs: React.FC<TerminalLogsProps> = ({
                 }
             },
             onError: (message) => {
-                console.error('Terminal logs error:', message);
+                errorDiagnostics.error("dashboard/app/(dashboard)/projects/[id]/components/logs/TerminalLogs", 'Terminal logs error:', message);
                 showToast(message, 'error', t.projectDetail.logs.terminal.logsErrorTitle);
             },
             onContainerExit: (exitCode, message) => {
@@ -451,7 +410,7 @@ export const TerminalLogs: React.FC<TerminalLogsProps> = ({
             setTerminalStreaming(false);
         },
         onError: (error) => {
-            console.error('Terminal logs stream error:', error);
+            errorDiagnostics.error("dashboard/app/(dashboard)/projects/[id]/components/logs/TerminalLogs", 'Terminal logs stream error:', error);
             setTerminalStreaming(false);
             showToast(t.projectDetail.logs.terminal.connectFailed, 'error', t.projectDetail.logs.terminal.connectFailedTitle);
         },
@@ -471,7 +430,7 @@ export const TerminalLogs: React.FC<TerminalLogsProps> = ({
                 if (text) addTerminalLog(text);
             }
         } catch (error) {
-            console.warn('Failed to load recent terminal logs:', error);
+            errorDiagnostics.warn("dashboard/app/(dashboard)/projects/[id]/components/logs/TerminalLogs", 'Failed to load recent terminal logs:', error);
         }
     }, [historyTarget, addTerminalLog]);
 
@@ -509,7 +468,7 @@ export const TerminalLogs: React.FC<TerminalLogsProps> = ({
                     }, 1500);
                 }
             } catch (error) {
-                console.error('Error starting stream:', error);
+                errorDiagnostics.error("dashboard/app/(dashboard)/projects/[id]/components/logs/TerminalLogs", 'Error starting stream:', error);
                 setTerminalStreaming(false);
             }
         }
@@ -542,7 +501,7 @@ export const TerminalLogs: React.FC<TerminalLogsProps> = ({
             await loadRecentLogs(true);
             await connectLiveStream();
         })().catch((error) => {
-            console.error('Error switching log stream:', error);
+            errorDiagnostics.error("dashboard/app/(dashboard)/projects/[id]/components/logs/TerminalLogs", 'Error switching log stream:', error);
             setTerminalStreaming(false);
         });
     }, [streamTarget, loadRecentLogs, connectLiveStream]);
@@ -556,7 +515,8 @@ export const TerminalLogs: React.FC<TerminalLogsProps> = ({
         void (async () => {
             await loadRecentLogs();
             await connectLiveStream();
-        })().catch(() => {
+        })().catch((diagnosticFailure) => {
+          observeCaughtError(diagnosticFailure, "dashboard/app/(dashboard)/projects/[id]/components/logs/TerminalLogs");
             setTerminalStreaming(false);
         });
     }, [terminalReady, streamTarget, loadRecentLogs, connectLiveStream]);
@@ -591,7 +551,7 @@ export const TerminalLogs: React.FC<TerminalLogsProps> = ({
     useEffect(() => {
         isStreamingRef.current = terminalLogsData.isStreaming;
     }, [terminalLogsData.isStreaming]);
-    
+
     const writeAnimated = async (term: any, text: any, delay = 5) => {
         for (const char of text) {
             if(isStreamingRef.current) return;
@@ -604,7 +564,7 @@ export const TerminalLogs: React.FC<TerminalLogsProps> = ({
         if (effectShows.current) return;
         const term = xtermRef.current.xterm;
         const fitAddon = xtermRef.current.fitAddon;
-      
+
         if (fitAddon) fitAddon.fit();
         term.reset();
         effectShows.current = true;

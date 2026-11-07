@@ -86,7 +86,8 @@
     "updateTo": "{version} sürümüne güncelle",
     "updating": "Güncelleniyor…",
     "updateFailed": "Güncelleme başarısız oldu",
-    "toastTitle": "Kaynak"
+    "toastTitle": "Kaynak",
+    "cliManaged": "Bu Openship kontrol panelidir — kendi kendini günceller. Yükseltmek için ana makinede \"openship update\" komutunu çalıştırın; burada değiştirilecek bir şey yoktur."
   },
   "appSettings": {
     "modeApp": "Uygulama ayarları",
@@ -109,6 +110,27 @@
     "unmanaged": "Bu uygulamanın henüz yapılandırılabilir bir ayarı yok."
   },
   "appInstall": {
+    "configurationLoading": "Uygulama yapılandırması yükleniyor…",
+    "catalogLoadFailed": "Uygulama ayrıntıları yüklenemedi. Yüklemeden önce yeniden deneyin.",
+    "routingLoadFailed": "Kaydedilmiş yönlendirme yüklenemedi. Yüklemeden önce yeniden deneyin.",
+    "retryConfiguration": "Yeniden dene",
+    "hostFitHint": "Devam edebilirsiniz. Bu makinede performans sınırlı olabilir.",
+    "cloudFitTitle": "Bu uygulama daha büyük bir Cloud planı gerektiriyor",
+    "upgradePlan": "Planı yükselt",
+    "checkingCapacity": "Kapasite kontrol ediliyor…",
+    "checkCapacityAgain": "Yeniden kontrol et",
+    "cloudFitUnavailable": "Kapasite kontrol edilemedi. Dağıtım sırasında yeniden kontrol edilecek.",
+    "withoutDomainsTitle": "Alan adları olmadan devam edilsin mi?",
+    "withoutDomainsBody": "Bu web uç noktalarına yalnızca yayınlanan bağlantı noktalarından erişilebilecek. Daha sonra projeden alan adları ekleyebilirsiniz.",
+    "withoutDomainsCloudBody": "Bu web uç noktalarının Cloud üzerinde herkese açık bir URL’si olmayacak. Bu uygulamadaki diğer hizmetler erişmeye devam edebilir. Daha sonra projeden alan adları ekleyebilirsiniz.",
+    "addDomains": "Alan adı ekle",
+    "continueWithoutDomains": "Alan adı olmadan devam et",
+    "generatedDomainsTitle": "Ücretsiz alan adları kullanılsın mı?",
+    "generatedDomainsBody": "Bu uç noktalar ücretsiz, herkese açık URL’ler alacak. Yüklemeden önce adlarını kendiniz seçebilirsiniz.",
+    "useGeneratedDomains": "Ücretsiz alan adları kullan",
+    "editDomains": "Alan adlarını düzenle",
+    "routePortCloudDesc": "Bu Cloud çalışma alanına özel. Herkese açık bir URL için alan adı ekleyin.",
+    "exposeTitle": "Alan adları ve yönlendirme",
     "install": "Kur",
     "installing": "Kuruluyor…",
     "advanced": "Gelişmiş dağıtım seçenekleri",
@@ -173,7 +195,7 @@
       "provider": "Sağlayıcı",
       "presets": {
         "custom": "Özel",
-        "ses": "Amazon SES",
+        "ses": "Amazon SES",
         "gmail": "Gmail",
         "fastmail": "Fastmail"
       },
@@ -192,7 +214,35 @@
       "deploying": "Dağıtılıyor…",
       "hostnameRequired": "Webmail adresini girin.",
       "hostsRequired": "Hem IMAP hem de SMTP sunucu adresini girin."
-    }
+    },
+    "nameLabel": "Ad",
+    "nameHint": "Bu uygulamanın Openship'te nasıl görüneceği.",
+    "showLogs": "Günlükleri göster",
+    "hideLogs": "Günlükleri gizle",
+    "deployLogs": "dağıtım günlükleri",
+    "needsTitle": "Gereksinimler",
+    "needsMemory": "{value} Bellek",
+    "needsCpu": "{value}",
+    "hostFitTitle": "Bu sunucu {app} için gerekenden daha küçük",
+    "hostFitMemory": "{needed} RAM gerekiyor — bu sunucuda {available} mevcut",
+    "hostFitCpu": "{needed} gerekiyor — bu sunucuda {available} mevcut",
+    "routePortLabel": "Yalnızca bağlantı noktası (etki alanı yok)",
+    "routePortDesc": "Ana makine adresi ve bağlantı noktasından erişilebilir — etki alanı veya Cloud gerekmez.",
+    "routeFreeLabel": "Ücretsiz alt etki alanı",
+    "routeFreeDesc": "Openship Cloud tarafından yönlendirilen, {domain} üzerinde ücretsiz bir alt etki alanı.",
+    "routeFreeNeedsCloud": "Ücretsiz bir alt etki alanı kullanmak için Openship Cloud'a bağlanın.",
+    "routeCustomLabel": "Kendi etki alanınız",
+    "routeCustomDesc": "Sahip olduğunuz bir etki alanını bu uygulamaya yönlendirin.",
+    "routeDomainLabel": "Etki alanı",
+    "routeDomainDesc": "Bir etki alanından erişin — ücretsiz bir alt etki alanı veya kendinize ait.",
+    "httpBadge": "Web",
+    "tcpBadge": "Veritabanı",
+    "tcpPublishLabel": "Bağlantı noktasını yayınla",
+    "tcpPublishDesc": "Harici araçların bağlanabilmesi için ana makinede yayınlayın.",
+    "tcpInternalLabel": "Yalnızca dahili",
+    "tcpInternalDesc": "Yalnızca bu uygulamadaki diğer hizmetler erişebilir.",
+    "tcpFirewallNote": "Dışarıdan bağlanmak için sunucu güvenlik duvarınızda {port} numaralı bağlantı noktasını açın.",
+    "desktopReachNote": "Masaüstünde localhost üzerinden açabilir — veya uzak bir sunucu için Sunucular → Bağlantı Noktaları bölümünden bağlantı noktasını iletebilirsiniz."
   },
   "advanced": {
     "projectInfo": {
@@ -346,6 +396,10 @@
         "failed": "Dahili ana bilgisayar adı güncellenemedi",
         "invalid": "En az bir harf veya rakam girin"
       }
+    },
+    "export": {
+      "title": "Projeyi dışa aktar",
+      "description": "Tüm proje ayarlarını, ortam değişkenlerini ve kimlik bilgilerini düz JSON olarak indirin."
     }
   },
   "routeRules": {
@@ -614,6 +668,12 @@
       "repository": "Depo",
       "open": "Aç"
     },
+    "branch": {
+      "label": "Dağıtım dalı",
+      "description": "Bu ortamın sonraki dağıtımlarında kullanılır. Kaydetmek uygulamayı yeniden dağıtmaz.",
+      "saved": "Dağıtım dalı kaydedildi",
+      "saveFailed": "Dağıtım dalı kaydedilemedi"
+    },
     "webhookEndpoint": {
       "title": "Webhook Uç Noktası",
       "descriptionSet": "GitHub push olaylarını doğrudan bu alan adına teslim eder",
@@ -621,6 +681,11 @@
       "updating": "Güncelleniyor...",
       "select": "Alan adı seçin...",
       "clear": "Seçimi temizle"
+    },
+    "buildQueue": {
+      "label": "Eski derlemeleri iptal et",
+      "description": "Yalnızca bekleyen en son push saklanır. Etkinleştirildiğinde yeni bir push, sürüm adımları başlamadan önce eski otomatik derlemeyi de iptal eder. Manuel dağıtımlar ve geri almalar korunur.",
+      "saveFailed": "Derleme iptal tercihi kaydedilemedi"
     },
     "autoDeployCard": {
       "title": "Otomatik Dağıtım",
@@ -661,13 +726,15 @@
       "increaseAria": "Geri alma geçmişini artır",
       "sizeEach": "paylaşılan katmanlar dahil imaj başına ~{size}",
       "diskFree": "{size} boş",
-      "autoBadge": "otomatik boyutlandırıldı",
+      "autoBadge": "Otomatik",
       "manualBadge": "elle ayarlandı",
       "kindFiles": "diskteki üretilmiş dosyalar",
       "kindImages": "sunucudaki imajlar",
       "descGitFiles": "Son sürümlerin dosyaları her durumda saklanır, böylece geri alma derlemeyi atlayabilir.",
       "retentionHint": "Hızlı geri dönüş için son dağıtımların çıktılarını saklayın.",
       "retentionDescription": "Saklanacak önceki sürümlerin en yüksek sayısıdır. Etkin ve sabitlenmiş sürümler bu sınıra dahil değildir. Eski çıktılar silinir; dağıtım geçmişi korunur. Yalnızca etkin ve sabitlenmiş sürümleri saklamak için 0 olarak ayarlayın.",
+      "automaticValue": "En fazla {count} sürüm",
+      "automaticDescription": "Varsayılan geçmiş sınırına kadar saklar. Disk alanı azaldığında yeniden oluşturulabilen çıktılar daha erken kaldırılabilir. Etkin ve sabitlenmiş sürümler sınıra dahil değildir. Commit ve yapılandırma geçmişi korunur; geri alma yeniden derleme gerektirebilir.",
       "defaultBadge": "örnek varsayılanı",
       "loadFailed": "Geri alma ayarları yüklenemedi."
     },
@@ -732,7 +799,7 @@
   },
   "resources": {
     "title": "Makine gücü",
-    "description": "Bu projenin konteynerleri için CPU ve bellek sınırları.",
+    "description": "Projeler bu sunucuyu paylaşır. Yalnızca gerekirse CPU veya bellek sınırı ekleyin.",
     "loading": "Hedef makine okunuyor…",
     "unavailable": "Makine gücü kullanılamıyor",
     "loadFailed": "Makine gücü yüklenemedi",
@@ -742,9 +809,9 @@
     "appliesOnNextDeploy": "Sınırlar konteyner yeniden oluşturulduğunda uygulanır — değişikliğin etkili olması için yeniden dağıtın.",
     "tiers": {
       "unlimited": {
-        "name": "Sınır yok",
-        "description": "Makinenin tamamını kullan (varsayılan)",
-        "spec": "Makine kapasitesi"
+        "name": "Tam kapasite",
+        "description": "Sunucunun kullanılabilir CPU ve RAM kapasitesini kullan (varsayılan)",
+        "spec": "Diğer projelerle paylaşılır"
       },
       "micro": {
         "name": "Micro",
@@ -786,6 +853,10 @@
       "updated": "Makine gücü güncellendi",
       "updateFailed": "Makine gücü güncellenemedi",
       "invalidValues": "CPU ve bellek 0 veya pozitif bir sayı olmalıdır"
+    },
+    "customized": {
+      "name": "Özelleştirilmiş",
+      "description": "Hazır ayar seçin veya kendi sınırlarınızı belirleyin"
     }
   },
   "sleep": {
@@ -838,7 +909,12 @@
     "linkedTitleOne": "{count} proje bu uygulamaya bağlı",
     "linkedTitleOther": "{count} proje bu uygulamaya bağlı",
     "linkedNote": "Verileri dokunulmadan çalışmaya devam eder — yalnızca bu bağlantıyı kaybederler. Uygulamak için yeniden dağıtın.",
-    "linkedNoteRecordOnly": "Çalışmaya devam ederler, ama bağlantı kayıtla birlikte gider — uygulamayı sonra yeniden içe aktarmak onu geri getirmez."
+    "linkedNoteRecordOnly": "Çalışmaya devam ederler, ama bağlantı kayıtla birlikte gider — uygulamayı sonra yeniden içe aktarmak onu geri getirmez.",
+    "recordOnlyLabel": "Yalnızca Openship'ten kaldır",
+    "recordOnlyDesc": "Uygulamayı ve verilerini sunucunuzda çalışır durumda tutar — yalnızca Openship kaydı kaldırılır. Daha sonra tekrar içe aktarabilirsiniz.",
+    "recordOnlyReversible": "Geri alınabilir — uygulama sunucunuzda kalır.",
+    "recordOnlyNote": "Sunucudaki hiçbir şeye dokunulmaz — uygulama verileriyle çalışmaya devam eder. Yalnızca Openship'in kaydı kaldırılır ve daha sonra tekrar içe aktarılabilir.",
+    "confirmRecordOnly": "Kaydı kaldır"
   },
   "routing": {
     "title": "Yönlendirme",
@@ -870,13 +946,14 @@
       "error": "Hata",
       "inactive": "Pasif",
       "external": "Harici TLS",
-      "manual": "Manuel sertifika"
+      "manual": "Manuel sertifika",
+      "unknown": "Bilinmiyor"
     },
     "typeCustom": "Özel alan adı",
     "typeFree": "Ücretsiz alt alan adı",
     "primaryDomainTitle": "Birincil alan adı",
     "domainNTitle": "Alan adı {n}",
-    "portLabel": "Port {port}",
+    "portLabel": "Port: {port}",
     "noPortSelected": "Port seçilmedi",
     "meta": {
       "accessTitle": "Erişim URL'si",
@@ -1088,7 +1165,8 @@
         "manual_certificate": "Bu alan adı yüklenmiş bir sertifika kullanıyor. Geçerli bir yenisini yükleyip tekrar kontrol edin. Openship bunu otomatik yenilemez.",
         "managed_certificate": "TLS, harici vekil sunucunuz veya Openship Cloud tarafından yönetiliyor. Sağlayıcının yapılandırmasını kontrol edin.",
         "route_missing": "Yapılandırılmış bu rota henüz uygulanmadı. Uygulamak için yönlendirmeyi yeniden deneyin. Otomatik yönlendirme denemesi planlanmamış.",
-        "manual_dns": "Bu sertifika manuel TXT doğrulaması kullanıyor. Yeni bir TXT kaydını onaylamak için HTTPS kurulumunu açın veya otomatik yenileme için bağlı bir DNS sağlayıcısı seçin."
+        "manual_dns": "Bu sertifika manuel TXT doğrulaması kullanıyor. Yeni bir TXT kaydını onaylamak için HTTPS kurulumunu açın veya otomatik yenileme için bağlı bir DNS sağlayıcısı seçin.",
+        "managed_owner": "Bu ana makine adı ve sertifikası, sahibi olan hizmet tarafından yönetilir. O hizmetin alan adı ayarlarını kontrol edin."
       }
     },
     "wildcard": {
@@ -1127,6 +1205,12 @@
         "cancelled": "Doğrulama iptal edildi",
         "expired": "TXT doğrulamasının süresi doldu"
       }
+    },
+    "removeRoute": {
+      "title": "Rotayı kaldır",
+      "description": "Uygulama çalışmaya devam eder — yalnızca bu rota ve edge kaydı kaldırılır. İstediğiniz zaman tekrar ekleyebilirsiniz.",
+      "confirm": "Rotayı kaldır",
+      "removing": "Kaldırılıyor…"
     }
   },
   "serviceEnvironment": {
@@ -1136,5 +1220,121 @@
     "buildArguments": "Derleme argümanları Compose dosyasında veya kaynak yapılandırmasında tanımlanır ve yeniden derleme gerektirir.",
     "projectLink": "Ortak proje ortamını düzenle",
     "loadFailed": "Geçersiz kılmaları denetlemek için proje değişkenlerinin adları yüklenemedi."
+  },
+  "cloudStaticHosting": {
+    "title": "Statik barındırma",
+    "description": "Derlenen dosyaların nereden sunulacağını seçin.",
+    "pages": "Cloud Pages (varsayılan)",
+    "pagesDescription": "Çalışan bir uygulama konteyneri olmadan dosyaları Cloud uç ağında yayınlayın.",
+    "server": "Yönetilen sunucu",
+    "serverDescription": "Dosyaları yönetilen sunucunuzdaki bir nginx konteynerinden sunun.",
+    "nextDeploy": "Kaydedilen barındırma değişiklikleri bir sonraki dağıtımda uygulanır."
+  },
+  "deploymentChecks": {
+    "title": "GitHub dağıtım kontrolleri",
+    "description": "Dağıtım ve hizmet sonuçlarını dağıtılan commit üzerinde gösterin.",
+    "customize": "Kontrolleri özelleştir",
+    "deployment": "Dağıtım sonucu",
+    "services": "Yeniler dahil tüm hizmetler",
+    "selectedServices": "Hizmetleri seç",
+    "includeErrors": "Hata ayrıntılarını dahil et",
+    "errorsHint": "Hassas veriler gizlenmiş hata özetleri, bu depoyu okuyabilen kişilerle paylaşılır.",
+    "emptySelection": "En az bir kontrol seçin veya raporlamayı kapatın.",
+    "connectionHint": "Checks yazma iznine sahip bir GitHub App gerektirir.",
+    "connection": "GitHub bağlantısı",
+    "deliveryFailed": "Kontroller iletilemedi",
+    "saveFailed": "GitHub kontrol ayarları kaydedilemedi."
+  },
+  "runtimeUpdates": {
+    "options": "Yeniden dağıtım seçenekleri",
+    "refresh": "İmajları yenile ve yeniden dağıt",
+    "refreshing": "İmajlar yenileniyor…",
+    "check": "İmaj güncellemelerini denetle",
+    "title": "İmaj güncellemeleri",
+    "failed": "İmaj yenileme başlatılamadı.",
+    "uncertain": "İstek zaman aşımına uğradı. Yeniden denemeden önce dağıtım geçmişini kontrol edin.",
+    "available": "İmaj güncellemeleri mevcut",
+    "current": "İmaj özetleri kayıt defterinde son gözlenen özetlerle eşleşiyor.",
+    "checkUnavailable": "Karşılaştırma için kayıtlı özetler ve kayıt deposuna erişim gerekir.",
+    "checkFailed": "İmaj güncellemeleri denetlenemedi.",
+    "pinned": "İmajlar özetle sabitlenmiş. Güncellemek için yapılandırılan referansı düzenleyin."
+  },
+  "securityAdvisories": {
+    "checksEnabled": "Güvenlik duyurularını kontrol et",
+    "checksDescription": "Kapatıldığında bu çalışma alanındaki çalışma zamanı ve ana makine kontrolleri, yeni uyarılar ve yama işlemleri duraklatılır. Veriler ve proje güncelleme onayları korunur.",
+    "checksDisabled": "Bu çalışma alanında güvenlik kontrolleri kapalı.",
+    "manageChecks": "Güvenlik denetimlerini yönet",
+    "retrySettings": "Tekrar dene",
+    "bannerSettings": "Güvenlik bannerı ayarları",
+    "hideBanners": "Güvenlik bannerlarını gizle",
+    "showBanners": "Güvenlik bannerlarını göster",
+    "bannerDescription": "Bu tarayıcı ve çalışma alanında uygulama ve sunucu güvenlik bildirimlerini panonun üstünde göster. Kontroller ve bildirim kanalları ayrı yönetilir.",
+    "openRuntimeConfiguration": "Çalışma ortamı ayarlarını incele",
+    "severity": {
+      "critical": "Kritik",
+      "high": "Yüksek",
+      "moderate": "Orta",
+      "low": "Düşük"
+    },
+    "sourceRedeployRequired": "Çalışma ortamını yenilemeden önce bu uygulamayı kayıtlı kaynak kodundan yeniden derleyin. Mevcut imajın doğrulanmış bir kaynak revizyonu yok. Kaynaktan yeniden dağıtım daha yeni kod içerebilir; Dağıtımlar bölümünde inceleyin, ardından bu güvenlik duyurusunu tekrar kontrol edin.",
+    "openSourceRedeploy": "Kaynaktan yeniden dağıtımı aç",
+    "reviewApps": "Etkilenen uygulamaları incele ({count})",
+    "pendingApps": "{count} uygulama için kontroller bekleniyor. Sonuçlar otomatik olarak görünecek.",
+    "checkAgain": "Tekrar kontrol et",
+    "checking": "Kontrol ediliyor…",
+    "title": "Güvenlik bildirimleri",
+    "unavailable": "Güvenlik kontrolleri kullanılamıyor veya güncel değil. Önceki bildirimler görünür kalır.",
+    "affected": "Bu çalışma alanında erişebildiğiniz uygulama ve sunucuların bulguları.",
+    "noMatches": "Kontrol edilen verilerle eşleşen bildirim yok. Bu, tam bir güvenlik açığı taraması değildir.",
+    "partial": "Bazı çalışma ortamları kontrol edilemedi.",
+    "guidance": "Bildirimi oku",
+    "automatic": "Doğrulanmış güvenlik yamalarını otomatik güncelle",
+    "automaticDescription": "Varsayılan olarak kapalıdır. Yalnızca mevcut etiketinde imzalı düzeltme bulunan imaj servisleri otomatik güncellenir. Kaynak derlemeleri, sabitlenmiş imajlar ve sürüm değişiklikleri inceleme gerektirir. Normal dağıtım ve sağlık kontrolleri geçerlidir.",
+    "notifications": "Güvenlik bildirimleri kanallarda varsayılan olarak açıktır. Her kanalı Ayarlar → Bildirimler bölümünden yönetebilirsiniz.",
+    "publicFeed": "Herkese açık akışı gör",
+    "checked": "Kanıtlar kontrol edildi",
+    "possible": "İmaj etiketi eşleşiyor; dağıtılan sürüm doğrulanmalı.",
+    "tab": "Güvenlik",
+    "monitoring": "İzlemede görüntüle",
+    "persistent": "Etkin bulgular, bildirim kapatıldıktan sonra da burada kalır.",
+    "otherApps": "Diğer uygulamalar ({count})",
+    "details": "Ayrıntılar ve öneriler"
+  },
+  "hostSecurity": {
+    "title": "Sunucu güvenliği",
+    "reviewPatch": "Yamayı incele",
+    "applyPatch": "İncelenen yamayı uygula",
+    "patchDetails": "Sunucu yamasını incele",
+    "interruption": "Listelenen paketler yüklenir ve hizmetler yeniden başlayabilir. Tüm değişiklikleri inceleyin. Çalışan hizmetlerin ayrıca elle yeniden başlatılması gerekebilir.",
+    "rebootRequired": "Yeniden başlatma gerekli. Ardından çalışan çekirdek kontrol edilmelidir.",
+    "manual": "Elle inceleme gerekiyor",
+    "runs": "Çalıştırmalar",
+    "noRuns": "Henüz güvenlik yaması çalıştırılmadı.",
+    "scanTask": "Güvenlik duyurusu inceleme görevi",
+    "scanHint": "Kayıtlı zamanlamaya göre çalışır. Sonuçların süresi dolar; başarısız kontroller artan aralıklarla yeniden denenir.",
+    "schedulerPaused": "Zamanlanmış incelemeler duraklatıldı.",
+    "checkPending": "Kontrol bekleniyor. Önbellekteki veriler güncel olmayabilir.",
+    "verified": "Sürüm kontrolü başarılı",
+    "needsReview": "İnceleme gerekiyor",
+    "nextCheck": "Sonraki inceleme",
+    "notSupported": "Ana makine yamaları müşterinin yönettiği Ubuntu sunucularında kullanılabilir. Sağlayıcının yönettiği altyapının kendi bakım süreci vardır.",
+    "package": "Paket",
+    "current": "Yüklü",
+    "target": "Planlanan sürüm",
+    "reviewResources": "Etkilenen kaynakları incele ({count})",
+    "openRuns": "Sunucu çalıştırmalarını aç",
+    "lastRun": "Son inceleme",
+    "appOpen": "Openship açıkken çalışır.",
+    "scanStates": {
+      "pending": "Bekliyor",
+      "running": "Çalışıyor",
+      "completed": "Tamamlandı",
+      "partial": "Kısmen kontrol edildi",
+      "interrupted": "Kesintiye uğradı"
+    },
+    "reviewReboot": "Yeniden başlatmayı incele",
+    "applyReboot": "Yeniden başlatmayı zamanla",
+    "rebooting": "Yeniden başlatma zamanlandı; çekirdek doğrulaması bekleniyor",
+    "rebootInterruption": "Sunucu bir dakika içinde yeniden başlatılır ve tüm iş yükleri kesintiye uğrar. Openship, bağlantı yeniden kurulduğunda çalışan çekirdeği doğrular."
   }
 }

@@ -1,6 +1,8 @@
+import { reportCaughtError as observeCaughtError, diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import { z } from "zod";
 import { createPrivateKey } from "crypto";
 import { assertCloudBillingEnvironment } from "./cloud-billing-env";
+import { oidcEndpointAllowed } from "../lib/oidc-endpoint";
 import { DEFAULT_ENCRYPTION_SECRET as DEFAULT_BETTER_AUTH_SECRET } from "@repo/db/encryption";
 import {
   runtimeTarget,
@@ -164,6 +166,13 @@ const envSchema = z.object({
 
   /* ---------- Mode ---------- */
   CLOUD_MODE: envBool("false"),
+  /** Optional product analytics. Production SaaS only; never enabled locally. */
+  POSTHOG_ENABLED: envBool("false"),
+  POSTHOG_PROJECT_KEY: z.string().optional(),
+  POSTHOG_HOST: z.string().default("https://us.i.posthog.com"),
+  /** Internal/demo workspaces and users, excluded on both ingestion paths. */
+  POSTHOG_EXCLUDED_ORGANIZATION_IDS: z.string().optional(),
+  POSTHOG_EXCLUDED_USER_IDS: z.string().optional(),
   /**
    * MASTER switch for the whole Openship Cloud billing feature (subscriptions,
    * top-ups). OFF by default → the billing state reports
@@ -175,6 +184,8 @@ const envSchema = z.object({
    * "coming soon" surface and live usage/capacity.
    */
   BILLING_ENABLED: envBool("false"),
+  AFFILIATES_ENABLED: envBool("false"),
+  OBLIEN_AFFILIATE_NAMESPACE: z.string().max(128).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).default("openship"),
   /**
    * Sub-switch for one-time credit top-ups WITHIN billing. Top-ups are
    * available only when BILLING_ENABLED is also on. OFF by default → the state
@@ -266,6 +277,12 @@ const envSchema = z.object({
   GITHUB_DEVICE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),
+  /** Generic OIDC issuer. Registered only together with client id and secret. */
+  OIDC_ISSUER: z.string().optional(),
+  OIDC_CLIENT_ID: z.string().optional(),
+  OIDC_CLIENT_SECRET: z.string().optional(),
+  /** Login button label. Defaults to "SSO" when the provider is registered. */
+  OIDC_DISPLAY_NAME: z.string().optional(),
 
   /* ---------- GitHub Auth Strategy ---------- */
   /**
@@ -304,6 +321,10 @@ const envSchema = z.object({
   SMTP_USER: z.string().optional(),
   SMTP_PASS: z.string().optional(),
   SMTP_FROM: z.string().default("Openship <noreply@openship.io>"),
+  /** Optional Cloud customer aliases authorized by the same SMTP credentials.
+   * Unset/blank aliases use the transport's configured sender. */
+  SMTP_SUPPORT_FROM: z.string().trim().optional(),
+  SMTP_BILLING_FROM: z.string().trim().optional(),
 
   /* ---------- Network (self-hosted) ---------- */
   /**
@@ -352,6 +373,9 @@ const envSchema = z.object({
   OBLIEN_CLIENT_SECRET: z.string().optional(),
   /** Control-plane endpoint. Override only for an Oblien staging installation. */
   OBLIEN_API_URL: z.url().default("https://api.oblien.com"),
+  OBLIEN_RUNTIME_URL: z.url().default("https://workspace.oblien.com"),
+  /** Optional published software preset for NEW managed Docker workspaces. */
+  OBLIEN_DOCKER_PRESET: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/).optional(),
   /**
    * Shared secret we hand Oblien when registering our webhook via
    * `webhooks.create` (see `ensureOblienWebhook`). Oblien signs each delivery
@@ -507,6 +531,9 @@ type Env = z.infer<typeof envSchema>;
 export const env: Env = envSchema.parse(process.env);
 assertCloudBillingEnvironment(env, runtimeTarget.api);
 
+/** Instance-wide OIDC is for self-hosted local accounts, never the Cloud SaaS. */
+export const selfHostedOidcAllowed = runtimeTarget.selfHosted && !env.CLOUD_MODE;
+
 /**
  * One configuration verdict shared by auth mode resolution, capabilities,
  * webhook routing and boot validation. A self-hosted App is intentionally an
@@ -560,7 +587,8 @@ if (localGitHubAppConfiguration.configured) {
   }
   try {
     createPrivateKey(localGitHubAppPrivateKey);
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "platform/engine/config/env");
     throw new Error(
       "The configured GitHub App private key is not a valid PEM key. " +
         "Use GITHUB_PRIVATE_KEY_BASE64 for a single-line environment value.",
@@ -661,7 +689,7 @@ if (
   !env.OPENSHIP_LOCAL_DASHBOARD_URL &&
   env.NODE_ENV !== "test"
 ) {
-  console.warn(
+  errorDiagnostics.warn("platform/engine/config/env",
     `[env] DEPLOY_MODE="desktop" but OPENSHIP_LOCAL_DASHBOARD_URL is unset — ` +
       `"desktop" is for the Electron app only. A server install should declare ` +
       `DEPLOY_MODE="bare" (host processes) or "docker" (compose); claiming desktop ` +
@@ -724,7 +752,8 @@ if (env.OPENSHIP_PUBLIC_URL) {
   let parsed: URL;
   try {
     parsed = new URL(raw);
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "platform/engine/config/env");
     throw new Error(
       `OPENSHIP_PUBLIC_URL="${raw}" is not a valid absolute URL (expected e.g. https://ops.example.com).`,
     );
@@ -744,7 +773,8 @@ if (env.OPENSHIP_ADVERTISED_ORIGIN) {
   let parsed: URL;
   try {
     parsed = new URL(raw);
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "platform/engine/config/env");
     throw new Error(
       `OPENSHIP_ADVERTISED_ORIGIN="${raw}" is not a valid absolute URL (expected e.g. http://127.0.0.1:54777).`,
     );
@@ -753,6 +783,37 @@ if (env.OPENSHIP_ADVERTISED_ORIGIN) {
     throw new Error(
       `OPENSHIP_ADVERTISED_ORIGIN must use http or https (got "${parsed.protocol}" in "${raw}").`,
     );
+  }
+}
+
+// ─── OIDC_ISSUER validation ───────────────────────────────────────────────
+// Validate that OIDC_ISSUER, when provided, is a valid URL so discovery
+// requests to `${OIDC_ISSUER}/.well-known/openid-configuration` fail fast at boot.
+// Production requires HTTPS. Development/test HTTP is limited to loopback.
+// Discovered endpoints are checked again at runtime.
+if (selfHostedOidcAllowed && env.OIDC_ISSUER) {
+  const raw = env.OIDC_ISSUER.trim();
+  if (raw) {
+    let parsed: URL;
+    try {
+      parsed = new URL(raw);
+    } catch (diagnosticFailure) {
+      observeCaughtError(diagnosticFailure, "platform/engine/config/env");
+      throw new Error(
+        `OIDC_ISSUER="${raw}" is not a valid absolute URL (expected e.g. https://idp.example.com).`,
+      );
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      throw new Error(
+        `OIDC_ISSUER must use http or https (got "${parsed.protocol}" in "${raw}").`,
+      );
+    }
+    if (!oidcEndpointAllowed(parsed, env.NODE_ENV) || parsed.search) {
+      throw new Error(
+        "OIDC_ISSUER must use HTTPS without credentials, query or fragment. " +
+          "HTTP is allowed only on loopback during development or tests.",
+      );
+    }
   }
 }
 
@@ -778,7 +839,8 @@ function validateCookieDomain(raw: string): void {
   let apiHostname: string;
   try {
     apiHostname = new URL(runtimeTarget.api).hostname;
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "platform/engine/config/env");
     throw new Error(
       `runtimeTarget.api ("${runtimeTarget.api}") is not a valid URL — cannot validate BETTER_AUTH_COOKIE_DOMAIN.`,
     );

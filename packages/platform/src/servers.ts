@@ -3,6 +3,8 @@ import {
   AppError,
   OperationError,
   ResourceIdSchema,
+  ServerMonitorFormatSchema,
+  type ServerMonitorOptions,
   parseInput,
   ServerCollectionSchemas,
   ServerResourceSchemas,
@@ -33,6 +35,7 @@ import {
 } from "./resource-operations";
 
 export interface ServerDependencies {
+  securityRunEvents?(ctx: ExecutionContext, id: string, runId: string, signal?: AbortSignal): Promise<AsyncIterable<DeploymentEvent>>;
   collection: ScopedServices<typeof ServerCollectionSchemas>;
   resources: ResourceServices<typeof ServerResourceSchemas>;
   networks?: {
@@ -58,7 +61,7 @@ export interface ServerDependencies {
     ): Promise<AsyncIterable<DeploymentEvent>>;
   };
   installations?: {
-    lookup(input: ServerInstallSessionInput): Promise<ServerInstallSession>;
+    lookup(ctx: ExecutionContext, input: ServerInstallSessionInput): Promise<ServerInstallSession>;
     respond(ctx: ExecutionContext, sessionId: string, action: string): Promise<{ ok: true }>;
     start(
       ctx: ExecutionContext,
@@ -75,11 +78,13 @@ export interface ServerDependencies {
       ctx: ExecutionContext,
       serverId: string,
       signal?: AbortSignal,
+      format?: ServerMonitorOptions["format"],
     ): Promise<AsyncIterable<DeploymentEvent>>;
   };
 }
 export type PlatformServerOperations = PlatformScopedOperations<typeof ServerCollectionSchemas> &
   PlatformResourceOperations<typeof ServerResourceSchemas> & {
+    openSecurityRunEvents(ctx: ExecutionContext, id: string, runId: string, options?: { signal?: AbortSignal }): Promise<OperationResult<AsyncIterable<DeploymentEvent>>>;
     openClusterStorageEvents(
       ctx: ExecutionContext,
       id: string,
@@ -138,7 +143,7 @@ export type PlatformServerOperations = PlatformScopedOperations<typeof ServerCol
     openMonitor(
       ctx: ExecutionContext,
       id: string,
-      options?: { signal?: AbortSignal },
+      options?: ServerMonitorOptions,
     ): Promise<OperationResult<AsyncIterable<DeploymentEvent>>>;
   };
 export function createServerOperations(
@@ -152,7 +157,12 @@ export function createServerOperations(
   }
   async function session(ctx: ExecutionContext, command?: ServerInstallSessionInput) {
     const input = parseInput(ServerInstallSessionInputSchema, command ?? {});
-    const data: unknown = JSON.parse(JSON.stringify(await installations().lookup(input)));
+    // Authorize the requested host even when it has no session. This keeps
+    // exact-server credentials useful without granting collection-wide access.
+    if (input.serverId) await authorization.authorize(ctx, {
+      resourceType: "server", resourceId: input.serverId, action: "admin",
+    });
+    const data: unknown = JSON.parse(JSON.stringify(await installations().lookup(ctx, input)));
     if (!Value.Check(ServerInstallSessionSchema, data))
       throw new AppError(
         "Invalid installation session response",
@@ -161,8 +171,9 @@ export function createServerOperations(
       );
     const context = await authorization.authorize(ctx, {
       resourceType: "server",
-      resourceId: data.active ? data.serverId : "*",
+      resourceId: data.active ? data.serverId : input.serverId ?? "*",
       action: data.active ? "admin" : "read",
+      ...(!data.active && !input.serverId ? { scope: "list" as const } : {}),
     });
     return { context, data };
   }
@@ -233,6 +244,14 @@ export function createServerOperations(
   return Object.freeze({
     ...createScopedOperations(ServerCollectionSchemas, authorization, "server", deps?.collection),
     ...createResourceOperations(ServerResourceSchemas, authorization, "server", deps?.resources),
+    async openSecurityRunEvents(ctx, value, runValue, options = {}) {
+      const id = parseInput(ResourceIdSchema, value);
+      const runId = parseInput(ResourceIdSchema, runValue);
+      const context = await authorization.authorize(ctx, { resourceType: "server", resourceId: id, action: "admin" });
+      if (!deps?.securityRunEvents) throw new AppError("Server run events are unavailable", 501, "CAPABILITY_UNAVAILABLE");
+      const source = await deps.securityRunEvents(context, id, runId, options.signal);
+      return { context, data: authorizedEvents(context, id, "admin", source) };
+    },
     openManagedNetworkPreparationEvents: (ctx, id, options = {}) =>
       networkStream(ctx, "preparation", id, options),
     openClusterStorageEvents: (ctx, id, options = {}) => networkStream(ctx, "storage", id, options),
@@ -284,7 +303,8 @@ export function createServerOperations(
         resourceId: id,
         action: "read",
       });
-      const source = await installations().monitor(context, id, options.signal);
+      const format = options.format === undefined ? undefined : parseInput(ServerMonitorFormatSchema, options.format);
+      const source = await installations().monitor(context, id, options.signal, format);
       return { context, data: authorizedEvents(context, id, "read", source) };
     },
   });

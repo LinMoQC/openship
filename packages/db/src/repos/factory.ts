@@ -1,5 +1,47 @@
 import { createReleasesRepo } from "./releases.repo";
+import { createChatAppsRepo } from "./chat-apps.repo";
+export { type ChatAppConnection, type ChatAppIdentity } from "./chat-apps.repo";
+import { createAssistantAgentsRepo } from "./assistant-agents.repo";
+import { createAssistantRepo } from "./assistant.repo";
+import { createAssistantAutomationsRepo } from "./assistant-automations.repo";
+export { type AssistantRow, type AssistantConnectionRow, type AssistantOwner } from "./assistant.repo";
+import { createManagementBillingRepo } from "./management-billing.repo";
+import { createPullRequestPreviewRepo } from "./pull-request-preview.repo";
+import { createIngressRepo } from "./ingress.repo";
+export { createIngressRepo, type IngressConnection, type IngressHostname } from "./ingress.repo";
+import { createCloudBuildActivityRepo } from "./cloud-build-activity.repo";
+export { createCloudBuildActivityRepo, reserveCloudBuildActivity, type CloudBuildActivityIdentity, type CloudBuildResources } from "./cloud-build-activity.repo";
 import { createClusterStorageRepo } from "./cluster-storage.repo";
+import { createActionsRepo } from "./actions.repo";
+import { createActionOidcRepo } from "./action-oidc.repo";
+import { createActionStorageRepo } from "./action-storage.repo";
+import { createActionBillingRepo } from "./action-billing.repo";
+export {
+  createActionsRepo,
+  type ActionRunner,
+  type ActionWorkflow,
+  type ActionRun,
+  type ActionJob,
+} from "./actions.repo";
+import { createCloudAnalyticsRepo } from "./cloud-analytics.repo";
+import { createCloudSupportRepo } from "./cloud-support.repo";
+import { createCloudCustomerEmailRepo } from "./cloud-customer-email.repo";
+export { createCloudCustomerEmailRepo, type CloudCustomerEmailRepo, type CustomerEmail, type CustomerEmailInput, type CustomerPaymentEmail } from "./cloud-customer-email.repo";
+import { createCloudWorkspaceRepo } from "./cloud-workspace.repo";
+export { createCloudWorkspaceRepo, type CloudWorkspace } from "./cloud-workspace.repo";
+export {
+  createCloudSupportRepo,
+  type CloudSupportRepo,
+  type CloudSupportTicket,
+  type CloudSupportMessage,
+} from "./cloud-support.repo";
+export {
+  createCloudAnalyticsRepo,
+  type CloudAnalyticsRepo,
+  type CloudAnalyticsOutboxInput,
+  type CloudAnalyticsOutboxEvent,
+  type CloudAnalyticsCheckout,
+} from "./cloud-analytics.repo";
 export { createClusterStorageRepo, type ClusterStorageRecord } from "./cluster-storage.repo";
 export { createUserRepo, type User, type NewUser } from "./user.repo";
 export {
@@ -46,6 +88,8 @@ export {
   type NewDeployment,
   type BuildSession,
   type NewBuildSession,
+  type DeploymentResourceChanges,
+  type DeploymentRoleChanges,
 } from "./deployment.repo";
 export { createDomainRepo, type Domain, type NewDomain } from "./domain.repo";
 export { createDomainDnsChallengeRepo, type DomainDnsChallenge } from "./domain-dns-challenge.repo";
@@ -113,6 +157,7 @@ export {
 export {
   createServiceRepo,
   normalizeRoutingFields,
+  normalizeComposeRoutingFields,
   toComposeSpec,
   composeWritePatch,
   composeSpecsEqual,
@@ -134,7 +179,7 @@ export {
   type InstanceSettings,
   type NewInstanceSettings,
 } from "./instance-settings.repo";
-export { createServerRepo, type Server, type NewServer } from "./server.repo";
+export { createServerRepo, type Server, type ConnectedServer, type NewServer } from "./server.repo";
 export {
   createServerClusterRepo,
   type ServerClusterRecord,
@@ -296,15 +341,19 @@ import { createGitSourceRepo } from "./git-source.repo";
 import { createProjectGroupRepo } from "./project-group.repo";
 import { createProjectRepo } from "./project.repo";
 import { createDeploymentRepo } from "./deployment.repo";
+import { createDeploymentCheckRepo } from "./deployment-check.repo";
+export { createDeploymentCheckRepo, type DeploymentCheck } from "./deployment-check.repo";
 import { createDomainRepo } from "./domain.repo";
 import { createDomainDnsChallengeRepo } from "./domain-dns-challenge.repo";
 import { createDnsCredentialRepo } from "./dns-credential.repo";
 import { createCredentialRepo } from "./credential.repo";
+import { createRouteProtectionRepo } from "./route-protection.repo";
 import { createRouteRuleRepo } from "./route-rule.repo";
 import { createWebhookSourceRepo } from "./webhook-source.repo";
 import { createIncomingWebhookRepo } from "./incoming-webhook.repo";
 import { createSystemNoticeRepo } from "./system-notice.repo";
 import { createUpdateStatusRepo } from "./update-status.repo";
+import { createSecurityAdvisoryRepo } from "./security-advisory.repo";
 import { createServerModuleStatusRepo } from "./server-module-status.repo";
 import { createServerContainerStatusRepo } from "./server-container-status.repo";
 import { createEdgeTargetVerificationRepo } from "./edge-target-verification.repo";
@@ -383,22 +432,29 @@ export function createRepositories(db: Database, encryption: ConfigurationEncryp
     projectGroup: createProjectGroupRepo(db),
     project: createProjectRepo(db, encryption),
     deployment: createDeploymentRepo(db, encryption),
+    deploymentCheck: createDeploymentCheckRepo(db),
+    pullRequestPreview: createPullRequestPreviewRepo(db, encryption),
     domain: createDomainRepo(db),
     domainDnsChallenge: createDomainDnsChallengeRepo(db),
     dnsCredential: createDnsCredentialRepo(db),
     credential: createCredentialRepo(db),
+    ingress: createIngressRepo(db),
     routeRule: createRouteRuleRepo(db),
+    routeProtection: createRouteProtectionRepo(db, encryption),
     webhookSource: createWebhookSourceRepo(db),
     incomingWebhook: createIncomingWebhookRepo(db),
     notice: createSystemNoticeRepo(db),
     releases: createReleasesRepo(db),
     updateStatus: createUpdateStatusRepo(db),
+    securityAdvisory: createSecurityAdvisoryRepo(db),
     serverModuleStatus: createServerModuleStatusRepo(db),
     serverContainerStatus: createServerContainerStatusRepo(db),
     edgeTargetVerification: createEdgeTargetVerificationRepo(db),
     serviceIncident: createServiceIncidentRepo(db),
     cloudWebhookBinding: createCloudWebhookBindingRepo(db),
     cloudDockerWorkspace: createCloudDockerWorkspaceRepo(db),
+    cloudWorkspace: createCloudWorkspaceRepo(db),
+    cloudBuildActivity: createCloudBuildActivityRepo(db),
     projectConnection: createProjectConnectionRepo(db),
     customAppTemplate: createCustomAppTemplateRepo(db),
     webhookDelivery: createWebhookDeliveryRepo(db),
@@ -424,8 +480,12 @@ export function createRepositories(db: Database, encryption: ConfigurationEncryp
     serviceTerminalSession: createServiceTerminalSessionRepo(db),
     cloudHandoffCode: createCloudHandoffCodeRepo(db),
     personalAccessToken: createPersonalAccessTokenRepo(db),
+    assistant: createAssistantRepo(db),
+    assistantAgents: createAssistantAgentsRepo(db),
+    assistantAutomations: createAssistantAutomationsRepo(db),
+    chatApps: createChatAppsRepo(db),
     patGrant: createPersonalAccessTokenGrantRepo(db),
-    oauth: createOAuthRepo(db),
+    oauth: createOAuthRepo(db, encryption),
     backupDestination: createBackupDestinationRepo(db),
     backupPolicy: createBackupPolicyRepo(db),
     backupRun: createBackupRunRepo(db),
@@ -437,6 +497,11 @@ export function createRepositories(db: Database, encryption: ConfigurationEncryp
     auditEvent: createAuditEventRepo(db, auditSettingsRepo),
     jobRun: createJobRunRepo(db),
     job: createJobRepo(db),
+    actions: createActionsRepo(db),
+    actionOidc: createActionOidcRepo(db),
+    actionStorage: createActionStorageRepo(db),
+    actionBilling: createActionBillingRepo(db),
+    managementBilling: createManagementBillingRepo(db),
     orphanedResource: createOrphanedResourceRepo(db),
     hostPortClaim: createHostPortClaimRepo(db),
     resourceGrant: createResourceGrantRepo(db),
@@ -450,6 +515,9 @@ export function createRepositories(db: Database, encryption: ConfigurationEncryp
     billingAnniversaryGrant: createBillingAnniversaryGrantRepo(db),
     billingUsageSnapshot: createBillingUsageSnapshotRepo(db),
     billingPlanGrant: createBillingPlanGrantRepo(db),
+    cloudAnalytics: createCloudAnalyticsRepo(db),
+    cloudSupport: createCloudSupportRepo(db),
+    cloudCustomerEmail: createCloudCustomerEmailRepo(db),
   } as const;
 }
 

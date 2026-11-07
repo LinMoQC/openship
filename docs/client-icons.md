@@ -1,8 +1,8 @@
 # Client icons
 
 The dashboard, Openship Cloud UI, and desktop chrome use the same icon catalog
-from `@repo/ui/icons`. The default theme is `outline-modern`, with 193 bundled
-PNGs in `apps/dashboard/public/icons` (about 448 KB total). Source files retain
+from `@repo/ui/icons`. The default theme is `outline-modern`, with 201 bundled
+PNGs in `apps/dashboard/public/icons` (about 454 KiB total). Source files retain
 their original square dimensions.
 
 The dashboard's `ThemeIcon` shares the current-theme symbols across the sidebar,
@@ -41,7 +41,10 @@ Each catalog entry has a literal `file` name and a rendering `mode`:
 
 Use existing semantic color classes such as `text-muted-foreground`,
 `text-primary`, or `text-danger`. The normal light, dim, and dark appearance themes
-all use the same outline catalog and get their colors from those tokens.
+all use the same outline catalog and get their colors from those tokens. Billing
+plan cards use the catalog’s filled bolt, rocket, gem, layers and building marks.
+These share the same mask renderer, local assets and CDN fallback as the outline
+icons.
 
 Bundled assets also declare their visible alpha `bounds` as `[x, y, width,
 height]` in a 24-unit canvas. The renderer centers that artwork in 22 units by
@@ -54,6 +57,9 @@ files stay identical. Sidebar navigation uses 20px viewports; its collapse and
 expand controls use the selected rounded-panel-and-chevron artwork at 16px.
 Source variants use complete outlines instead of decorative breaks; gaps in
 arrows, spinners, and dashed status symbols convey their normal meaning.
+The Earn sidebar entry uses the shared `gift` icon from the same outline library.
+The Assistant uses `assistant`, the library's outlined brain-and-circuit AI symbol
+(`artificial intelligence-9-1686045820.png`), in navigation, setup and chat.
 
 MCP links, settings, and authorization use the shared `mcp` ID and the supplied
 `mcp.png` logo. Platform components share `server-settings`, projects use
@@ -72,24 +78,31 @@ the icon picker also uses it for previews of user-selected artwork URLs.
 
 ## Local assets and CDN configuration
 
-The default asset base is `/icons`. Self-hosted and desktop installations serve
-the bundled files without contacting an icon CDN.
+Openship Cloud loads icons from `https://cdn.oblien.com/static/png-icons` first.
+The root layout selects this host before rendering, including authentication
+screens. Self-hosted and desktop installations default to the bundled `/icons`
+files, including desktop instances connected to Cloud.
 
-To use a CDN, mirror `apps/dashboard/public/icons` under the desired prefix and
-set this in the dashboard environment before starting it:
+To use a custom asset host on a self-hosted installation, mirror
+`apps/dashboard/public/icons` under the desired prefix and set this in the
+dashboard environment before starting it:
 
 ```env
 OPENSHIP_ICON_BASE_URL=https://cdn.oblien.com/static/png-icons
 ```
 
-The dashboard root layout passes this server runtime setting to `IconProvider`.
-It is not a `NEXT_PUBLIC_` build-time setting. Local and CDN copies use exactly
+The dashboard root layout passes the resolved host to `IconProvider`. Cloud
+does not require this environment setting and does not use it to override its
+CDN. It is not a `NEXT_PUBLIC_` build-time setting. Local and CDN copies use exactly
 the same filenames. Keep spaces and literal percent characters in stored names;
 the URL resolver encodes each filename once.
 
-If a CDN or custom-theme asset fails to load, the icon falls back to its bundled
-default. A failed fallback does not start a retry loop. Changing the source URL
-allows the new source to load.
+If a CDN or custom-theme asset fails to load, the dashboard falls back to the
+bundled default catalog artwork under `/icons`. This keeps controls visible if
+the CDN is unavailable or a newly added asset has not been mirrored yet.
+A failed fallback does not start a retry loop. Changing the source URL allows
+the new source to load. Mirror every catalog asset to the Cloud CDN, including
+the generated PNGs and application marks, so normal requests stay on the CDN.
 
 ## Alternate artwork themes
 
@@ -113,9 +126,9 @@ const theme: IconTheme = {
 ```
 
 Unspecified entries use the default catalog. A nested provider inherits its
-parent's base URL or theme when that setting is omitted. Supply the replacement
-files at the configured asset base. No theme selection screen is required to use
-this API.
+parent's base URL, fallback base URL, or theme when that setting is omitted. Supply
+the replacement files at the configured asset base. No theme selection screen is
+required to use this API.
 
 For replacement assets, measure the nontransparent pixel bounds and scale each
 coordinate from the source canvas to 24 units. Supply those as `bounds` to keep
@@ -150,16 +163,27 @@ separate marketing site and `apps/email/client` are outside this pass.
 
 ## Asset provenance
 
-- 176 assets were selected from the supplied `~/Documents/png-icons` library;
+- 182 assets were selected from the supplied `~/Documents/png-icons` library;
   their filenames are preserved for CDN mirroring.
 - 9 symbols retain the previous Lucide artwork as bundled outline PNGs where
   the library did not offer a suitable equivalent: `archive`, `bug`,
   `circle-dashed`, `hard-drive`, `infinity`, `memory`, `more`, `pin-off`, and
   `webhook`. The original ISC/MIT notices are in
   `apps/dashboard/public/icons/LICENSE.lucide`.
-- 7 marks preserve existing application artwork as PNGs: `google`, `claude`,
+- 6 marks preserve existing application artwork as PNGs: `google`,
   `cursor`, `windsurf`, `zed`, `openai`, and `copilot`. Google's multicolor mark
   uses `color` mode.
+- `codex` uses the blue mark on a transparent background (`codex.png`),
+  extracted from `icon-codex-light.png` in the official
+  [Codex download](https://persistent.oaistatic.com/codex-app-prod/Codex.dmg),
+  app version 26.1027.30824. The white app tile and its shadow are removed with
+  the built-in image editor; the mark stays in color in every theme. The asset belongs to OpenAI; see its
+  [brand guidelines](https://openai.com/brand/).
+- `claude` uses Mindwire’s LobeHub mark, rasterized as `claude-color.png`, with
+  its original terracotta. The MIT notice is in
+  `apps/dashboard/public/icons/LICENSE.lobehub`. Both harness icons use `color`
+  mode, without masking, inversion or added tint. `openai` remains available
+  for OpenAI branding outside harness selection.
 - `redis` is the red Redis R from [Simple Icons](https://cdn.simpleicons.org/redis),
   rasterized to a transparent 128px PNG with its original brand color.
 

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { AppError } from "@repo/core";
 
 /**
  * A throw from certbot is NOT proof that no certificate was issued.
@@ -22,6 +23,8 @@ const VALID_EXPIRY = new Date(Date.now() + 89 * 86_400_000).toISOString();
 const NEAR_EXPIRY = new Date(Date.now() + 3 * 86_400_000).toISOString();
 
 const h = vi.hoisted(() => ({
+  provider: false,
+  updateDomain: vi.fn(),
   domains: new Map<string, Record<string, unknown>>(),
   updateSsl: vi.fn(),
   recordSslFailure: vi.fn(),
@@ -34,6 +37,7 @@ const h = vi.hoisted(() => ({
 vi.mock("@repo/db", () => ({
   repos: {
     domain: {
+      update: h.updateDomain,
       findByHostname: vi.fn(async (hostname: string) => h.domains.get(hostname) ?? null),
       updateSsl: h.updateSsl,
       recordSslFailure: h.recordSslFailure,
@@ -46,7 +50,13 @@ vi.mock("@repo/db", () => ({
       })),
     },
     deployment: {
-      findById: vi.fn(async (id: string) => ({ id, projectId: "proj_1", organizationId: "org_1", meta: {} })),
+      listPendingRoleHandovers: async () => [],
+      findById: vi.fn(async (id: string) => ({
+        id,
+        projectId: "proj_1",
+        organizationId: "org_1",
+        meta: {},
+      })),
     },
     server: { findLocal: vi.fn(async () => null) },
   },
@@ -59,6 +69,7 @@ vi.mock("@repo/platform/engine/lib/deployment-runtime", () => ({
   resolveDeploymentPlatform: vi.fn(async () => ({
     platform: {
       ssl: {
+        ...(h.provider ? { certificateManagement: "provider" as const } : {}),
         provisionCert: h.provisionCert,
         renewCert: h.renewCert,
         verifyCert: h.verifyCert,
@@ -113,6 +124,8 @@ const POST_ISSUE_ERROR = new Error(
 );
 
 beforeEach(() => {
+  h.provider = false;
+  h.updateDomain.mockReset();
   h.domains.clear();
   h.updateSsl.mockReset();
   h.recordSslFailure.mockReset();
@@ -125,6 +138,64 @@ beforeEach(() => {
     issuer: "certbot",
     verified: false,
     reason: "missing",
+  });
+});
+
+describe("provider TLS observations", () => {
+  it("preserves routing recovery guidance without issuing a certificate or invalidating DNS", async () => {
+    h.provider = true;
+    domain({ sslStatus: "active" });
+    const message = "This domain has no Cloud route for this project. Retry routing from Domains & Routes, then verify HTTPS.";
+    h.verifyCert.mockRejectedValue(new AppError(message, 409, "CLOUD_DOMAIN_NOT_CONNECTED"));
+    expect(await manageDomainSsl(HOST, { action: "provision" })).toMatchObject({
+      verified: false, reason: "read_error", detail: message,
+    });
+    expect(h.recordSslFailure).toHaveBeenCalledExactlyOnceWith("dom_1", message, "unknown");
+    expect(h.provisionCert).not.toHaveBeenCalled();
+    expect(h.renewCert).not.toHaveBeenCalled();
+    expect(h.updateDomain).not.toHaveBeenCalled();
+    expect(h.updateSsl).not.toHaveBeenCalled();
+  });
+  it("reports an edge mismatch without repeatedly issuing a certificate", async () => {
+    h.provider = true;
+    domain({ sslStatus: "active" });
+    h.verifyCert.mockResolvedValue({ domain: HOST, verified: false, expiresAt: VALID_EXPIRY, issuer: "provider", reason: "edge_invalid", detail: "Wrong hostname served" });
+    expect(await manageDomainSsl(HOST, { action: "provision" })).toMatchObject({ verified: false, reason: "edge_invalid" });
+    expect(h.recordSslFailure).toHaveBeenCalledWith("dom_1", "Wrong hostname served", "invalid");
+    expect(h.provisionCert).not.toHaveBeenCalled();
+    expect(h.renewCert).not.toHaveBeenCalled();
+    expect(h.updateSsl).not.toHaveBeenCalled();
+  });
+
+  it("does not initiate an order because a Cloud check is unreachable", async () => {
+    h.provider = true;
+    domain({ sslStatus: "active" });
+    h.verifyCert.mockResolvedValue({ domain: HOST, verified: false, expiresAt: "", issuer: "", reason: "read_error" });
+    await manageDomainSsl(HOST, { action: "provision" });
+    expect(h.provisionCert).not.toHaveBeenCalled();
+    expect(h.renewCert).not.toHaveBeenCalled();
+    expect(h.updateSsl).not.toHaveBeenCalled();
+    expect(h.recordSslFailure).toHaveBeenCalledWith("dom_1", expect.stringContaining("could not be read"), "unknown");
+  });
+
+  it("does not initiate an order when the provider API cannot be read", async () => {
+    h.provider = true;
+    domain({ sslStatus: "provisioning" });
+    h.verifyCert.mockRejectedValue(new Error("Provider API unavailable"));
+    expect(await manageDomainSsl(HOST, { action: "provision" })).toMatchObject({ reason: "read_error" });
+    expect(h.provisionCert).not.toHaveBeenCalled();
+    expect(h.renewCert).not.toHaveBeenCalled();
+    expect(h.recordSslFailure).toHaveBeenCalledWith("dom_1", expect.any(String), "unknown");
+  });
+
+  it("keeps an accepted renewal pending even when an old expiry exists", async () => {
+    h.provider = true;
+    domain({ sslStatus: "error" });
+    h.renewCert.mockResolvedValue({ domain: HOST, verified: false, expiresAt: VALID_EXPIRY, issuer: "provider", reason: "pending" });
+    expect(await manageDomainSsl(HOST, { action: "renew" })).toMatchObject({ verified: false, reason: "pending" });
+    expect(h.updateSsl).toHaveBeenCalledWith("dom_1", expect.objectContaining({ sslStatus: "provisioning" }));
+    expect(h.recordSslFailure).not.toHaveBeenCalled();
+    expect(h.updateSsl).not.toHaveBeenCalledWith("dom_1", expect.objectContaining({ sslStatus: "active" }));
   });
 });
 

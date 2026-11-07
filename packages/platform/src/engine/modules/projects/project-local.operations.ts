@@ -1,3 +1,4 @@
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { stat } from "node:fs/promises";
 import { AppError, NotFoundError } from "@repo/core";
 import type { ProjectDependencies } from "../../../projects";
@@ -5,6 +6,7 @@ import type { EnsureProjectInput } from "@repo/contracts";
 import type { ExecutionContext } from "../../../context";
 import { validateSourceDirectory } from "../../../source-files";
 import { assertNativeSourcePath } from "../../native/source-policy";
+import { assertLocalSourceContentAccess } from "../../lib/local-source-authority";
 import { env } from "../../config";
 import { authorization } from "../../lib/authorization";
 import * as prepareService from "../deployments/prepare.service";
@@ -16,7 +18,7 @@ function requireLocalProjects() {
 
 async function localDirectory(path: string): Promise<string> {
   requireLocalProjects();
-  const info = await stat(path).catch(() => null);
+  const info = await stat(path).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/projects/project-local.operations"); return null; });
   if (!info) throw new NotFoundError("Directory");
   if (!info.isDirectory()) throw new AppError("Path is not a directory", 400, "INVALID_SOURCE_PATH");
   if (process.env.OPENSHIP_NATIVE !== "true") return path;
@@ -27,12 +29,16 @@ async function localDirectory(path: string): Promise<string> {
 /** Preserve scanner metadata and use the same creation policy/atomic token grant as projects.create. */
 export function createProjectLocalDependencies(create: (ctx: ExecutionContext, input: EnsureProjectInput) => Promise<unknown>): NonNullable<ProjectDependencies["local"]> {
   return {
-    async scan(_ctx, input) {
+    async scan(ctx, input) {
+      if (input.includeEnv) await assertLocalSourceContentAccess(ctx);
       const directory = await localDirectory(input.path);
       const info = await prepareService.resolveProjectInfo({ source: "local", path: directory });
       return { success: true, path: input.path, ...prepareService.projectInfoToScanResponse(info, input) };
     },
     async import(ctx, input) {
+      // Import persists scanner-derived Compose values even without an
+      // includeEnv option, so every local import is a content read.
+      await assertLocalSourceContentAccess(ctx);
       const body = { ...input, localPath: await localDirectory(input.localPath) };
       // Retain all inferred Compose, monorepo, routing and build fields from the HTTP import.
       const info = await prepareService.resolveProjectInfo({ source: "local", path: body.localPath, composePath: body.composePath });
@@ -51,7 +57,10 @@ export function createProjectLocalDependencies(create: (ctx: ExecutionContext, i
       composePath: body.composePath ?? info.composePath,
       startCommand: body.startCommand ?? info.startCommand,
       releaseCommands: body.releaseCommands !== undefined ? body.releaseCommands : info.releaseCommands,
-      buildImage: body.buildImage ?? info.buildImage,
+      roles: body.roles !== undefined ? body.roles : (info.roles as typeof body.roles),
+      buildImage: body.buildImage ?? (body.runtimeVersion !== undefined ? undefined : info.buildImage),
+      runtimeVersion: body.runtimeVersion !== undefined ? body.runtimeVersion : info.runtimeVersion,
+      runtimeImage: body.runtimeImage !== undefined ? body.runtimeImage : info.runtimeImage,
       productionMode: body.productionMode ?? info.productionMode,
       workloadType: body.workloadType ?? info.workloadType,
       port: body.port ?? info.port,
@@ -62,7 +71,7 @@ export function createProjectLocalDependencies(create: (ctx: ExecutionContext, i
         body.hasServer ??
         (info.workloadType
           ? info.workloadType === "web"
-          : info.projectType === "services" || Boolean(info.startCommand)),
+          : info.projectType === "services" || info.projectType === "docker" || Boolean(info.startCommand)),
       projectType: body.projectType ?? info.projectType,
       publicEndpoints: body.publicEndpoints ?? info.publicEndpoints,
       routingConfig: body.routingConfig ?? info.routing,

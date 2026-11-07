@@ -1,45 +1,74 @@
 "use client";
 
-import { Icon as UiIcon } from "@repo/ui/icons";
-
-import { RESOURCE_TIER_SPECS, formatCpuCores, formatMemoryMb } from "@repo/core";
+import { Icon } from "@repo/ui/icons";
 import { useI18n, interpolate } from "@/components/i18n-provider";
-import { formatBillingNumber, formatMilliCredits } from "@/lib/billing-usage";
+import { formatBillingNumber } from "@/lib/billing-usage";
 import type { ApiPlan } from "./PricingCards";
+import { planCapacity } from "./plan-presentation";
+import { CapacitySummary } from "@/components/shared/CapacitySummary";
 
-/** Lead with enforced project and resource allowances; keep metering details available. */
-export function PlanResources({ plan, interval = "monthly" }: { plan: ApiPlan; interval?: "monthly" | "annual" }) {
+/** Shared by plan comparisons and the compact subscription summary. */
+export function PlanCapacity({ plan, workspaceScoped = false, compact = false }: { plan: ApiPlan; workspaceScoped?: boolean; compact?: boolean }) {
+  const { t } = useI18n();
+  const capacity = planCapacity(plan);
+  if (!capacity) return null;
+  return (
+    <div className="space-y-2">
+      {workspaceScoped && !compact && <p className="text-xs text-muted-foreground">{t.billing.workspaces.provisioned}</p>}
+      <CapacitySummary inline={compact} resources={{ cpuCores: capacity.cpu, memoryMb: capacity.memoryGb * 1024, diskMb: capacity.diskGb * 1024 }} />
+    </div>
+  );
+}
+
+/** Compare concrete resources. Metering is explained once after the plans. */
+export function PlanResources({ plan, compact = false, workspaceScoped = false }: { plan: ApiPlan; compact?: boolean; workspaceScoped?: boolean }) {
   const { t, locale } = useI18n();
   const copy = t.billing.resourcesGuide;
-  if (plan.id === "free") return <p className="text-xs leading-relaxed text-muted-foreground">{copy.setupHint}</p>;
-  const count = (n: number | null) => n === null ? copy.unlimited : formatBillingNumber(n, locale);
-  const spec = plan.limits.maxResourceTier ? RESOURCE_TIER_SPECS[plan.limits.maxResourceTier] : null;
-  const credits = interval === "annual" ? plan.annualCredits : plan.monthlyCredits;
+  if (plan.id === "free")
+    return <p className="text-xs leading-relaxed text-muted-foreground">{copy.setupHint}</p>;
+  const buildMinutes = plan.limits.buildMinutesPerMonth;
   const facts = [
-    { Icon: "folder-open" as const, label: copy.projects, value: count(plan.limits.maxProjects) },
-    { Icon: "layers" as const, label: copy.apps, value: count(plan.limits.runningServices) },
-    { Icon: "clock" as const, label: copy.buildTime, value: plan.limits.buildMinutesPerMonth === null ? copy.unlimited : interpolate(copy.buildMinutes, { amount: count(plan.limits.buildMinutesPerMonth) }) },
-    { Icon: "cpu" as const, label: copy.machine, value: spec ? `${formatCpuCores(spec.cpuCores)} · ${formatMemoryMb(spec.memoryMb)}` : copy.unlimited },
-    ...(plan.edge ? [{ Icon: "globe" as const, label: t.billing.resourceOverview.bandwidth, value: plan.edge.bandwidthGb === null ? copy.unlimited : interpolate(t.billing.resourceOverview.bandwidthPerMonth, { amount: count(plan.edge.bandwidthGb) }) }] : []),
+    ...(plan.limits.maxProjects != null ? [{ label: copy.projects, value: formatBillingNumber(plan.limits.maxProjects, locale) }] : []),
+    ...(plan.limits.runningServices != null ? [{ label: t.billing.capacity.runningServices, value: formatBillingNumber(plan.limits.runningServices, locale) }] : []),
+    ...(plan.limits.concurrentBuilds != null ? [{ label: copy.concurrentBuilds, value: formatBillingNumber(plan.limits.concurrentBuilds, locale) }] : []),
+    ...(buildMinutes !== null ? [{
+      label: copy.buildTime,
+      value: buildMinutes === 0
+        ? copy.notIncluded
+        : interpolate(copy.buildMinutes, { amount: formatBillingNumber(buildMinutes, locale) }),
+    }] : []),
+    ...(plan.edge?.bandwidthGb != null ? [{
+      label: t.billing.resourceOverview.bandwidth,
+      value: interpolate(t.billing.resourceOverview.bandwidthPerMonth, {
+        amount: formatBillingNumber(plan.edge.bandwidthGb, locale),
+      }),
+    }] : []),
   ];
+  // Use the offer's localized support feature, not a guessed benefit for its tier name.
+  const supportIndex = plan.featureKeys?.indexOf(`${plan.support}Support`) ?? -1;
+  const support = supportIndex >= 0 ? plan.features[supportIndex] : undefined;
+
+  if (compact) return <PlanCapacity plan={plan} />;
+
   return (
-    <div className="border-t border-border/40 py-4">
-      <dl className="space-y-4">
-        {facts.map(({ Icon, label, value }) => <div key={label} className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1">
-          <dt className="flex items-center gap-2 text-xs text-muted-foreground"><UiIcon name={Icon} className="size-3.5 shrink-0" aria-hidden="true" />{label}</dt>
-          <dd className="ms-auto text-end text-sm font-medium tabular-nums text-foreground"><bdi>{value}</bdi></dd>
-        </div>)}
-      </dl>
-      <details className="group mt-5 rounded-lg bg-muted/35 p-3">
-        <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-xs font-medium text-foreground [&::-webkit-details-marker]:hidden">
-          {copy.usageIncluded}<UiIcon name="chevron-down" className="size-3.5 shrink-0 transition-transform group-open:rotate-180" aria-hidden="true" />
-        </summary>
-        <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{copy.usageSummary}</p>
-        <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{copy.balanceRule}</p>
-        <p className="mt-3 border-t border-border/40 pt-2 text-xs tabular-nums text-muted-foreground">
-          {credits == null ? plan.id === "enterprise" ? t.billing.pricing.custom : "—" : interpolate(copy.creditsPerCycle, { amount: formatMilliCredits(credits, locale) })}
+    <div className="space-y-4 py-4">
+      <PlanCapacity plan={plan} workspaceScoped={workspaceScoped} />
+      {facts.length > 0 && <dl className="space-y-2.5">
+        {facts.map(({ label, value }) => (
+          <div key={label} className="grid grid-cols-[minmax(0,1fr)_auto] items-baseline gap-x-3">
+            <dt className="text-sm text-muted-foreground">{label}</dt>
+            <dd className="max-w-40 text-end text-sm font-medium tabular-nums text-foreground">
+              <bdi>{value}</bdi>
+            </dd>
+          </div>
+        ))}
+      </dl>}
+      {support && (
+        <p className="flex items-center gap-2 text-sm text-muted-foreground">
+          <Icon name="check" className="size-3.5 shrink-0" aria-hidden="true" />
+          {support}
         </p>
-      </details>
+      )}
     </div>
   );
 }

@@ -22,17 +22,31 @@ if (!process.argv.includes("--check")) {
   // Resolve declarations in the distribution's dependency context. Private
   // @repo packages are bundled types, never external public dependencies.
   await build({
-    entry: Object.fromEntries(["index", "native", "client"].map((entry) => [entry, join(root, `packages/sdk/src/${entry}.ts`)])),
+    entry: Object.fromEntries(
+      ["index", "native", "client"].map((entry) => [
+        entry,
+        join(root, `packages/sdk/src/${entry}.ts`),
+      ]),
+    ),
     tsconfig: join(root, "packages/sdk/tsconfig.json"),
-    outDir: join(dist, "sdk"), format: ["esm", "cjs"], target: "node22",
+    outDir: join(dist, "sdk"),
+    format: ["esm", "cjs"],
+    target: "node22",
     dts: {
       resolve: [/^@repo\//],
       compilerOptions: {
         baseUrl: root,
         paths: {
-          ...Object.fromEntries(["sdk", "platform", "contracts", "core"].map(name => [`@repo/${name}`, [`packages/${name}/src/index.ts`]])),
+          ...Object.fromEntries(
+            ["sdk", "platform", "contracts", "core", "commands"].map((name) => [
+              `@repo/${name}`,
+              [`packages/${name}/src/index.ts`],
+            ]),
+          ),
           "@repo/platform/native": ["packages/platform/src/native-host.ts"],
-          "@repo/platform/source-files": ["packages/platform/src/source-files.ts"],
+          "@repo/platform/source-files": [
+            "packages/platform/src/source-files.ts",
+          ],
           "@repo/db/lock": ["packages/db/src/pglite-lock.ts"],
         },
       },
@@ -49,6 +63,7 @@ if (manifest.version !== cliManifest.version) throw new Error("SDK and CLI relea
 for (const file of [
   "node-entry.js", "node-bootstrap.js", "index.js", "server/index.js", "native/engine-worker.mjs",
   "server/pglite/pglite.wasm", "server/pglite/pglite.data", "server/migrations/meta/_journal.json",
+  "server/assets/actions-runner/manifest.json", "server/assets/actions-runner/THIRD_PARTY_NOTICES.txt",
   ...["index", "native", "client"].flatMap((name) => ["js", "cjs", "d.ts", "d.cts"].map((ext) => `sdk/${name}.${ext}`)),
 ]) if (!existsSync(join(dist, file))) throw new Error(`Missing public package artifact: dist/${file}. Run bun run build.`);
 

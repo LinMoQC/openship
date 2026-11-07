@@ -5,12 +5,14 @@ import {
   isLoopbackHost as isCoreLoopbackHost,
   resolveServiceHostnameLabel,
   resolveRedirectStatus,
+  type RedirectStatus,
   normalizeCustomHostname,
   isWildcardHostname,
 } from "@repo/core";
 import { getRoutingBaseDomain } from "./routing-domains";
 import { resolveServicePort, serviceKind } from "./deployable-service";
 import { env } from "../config/env";
+import { normalizeRedirect } from "./domain-redirect";
 
 // OpenResty management port (packages/adapters openresty-lua.ts OPENRESTY_MGMT_PORT).
 // Hardcoded here so this leaf module doesn't pull the adapters barrel or the
@@ -127,7 +129,8 @@ export function normalizeTargetPath(targetPath: string | null | undefined): stri
 function normalizeRedirectFields(
   redirectTo: string | null | undefined,
   redirectStatus: number | string | null | undefined,
-): { redirectTo?: string; redirectStatus?: number } {
+): { redirectTo?: string; redirectStatus?: RedirectStatus } {
+  if (redirectTo === "") return { redirectTo: "" };
   const target = redirectTo ? normalizeCustomDomain(redirectTo) : undefined;
   if (!target) return {};
   const raw = typeof redirectStatus === "string" ? Number(redirectStatus) : redirectStatus;
@@ -300,7 +303,7 @@ function normalizeStoredPublicEndpoint(
 
   if (domainType === "free" && !domain) return null;
   if (domainType === "custom" && !customDomain) return null;
-  if (hasPortTarget === hasPathTarget) return null;
+  if (hasPortTarget === hasPathTarget && (hasPortTarget || !endpoint.redirectTo)) return null;
 
   return {
     ...(port !== null ? { port } : {}),
@@ -540,16 +543,7 @@ export function storedPublicEndpointsNeedCloud(
  * toggle never reads as introducing a route.
  */
 export function resolveServicePublicEndpoints(
-  service: Pick<
-    Service,
-    | "exposed"
-    | "exposedPort"
-    | "ports"
-    | "domain"
-    | "customDomain"
-    | "domainType"
-    | "publicEndpoints"
-  > & { name?: string | null; kind?: string | null },
+  service: ServiceRoutingPatch & Pick<Partial<Service>, "ports" | "name" | "kind">,
   opts?: { projectSlug?: string },
 ): StoredPublicEndpoint[] {
   if (!service.exposed) return [];
@@ -566,7 +560,8 @@ export function resolveServicePublicEndpoints(
         port: endpoint.port,
         domain: endpoint.domain,
         customDomain: endpoint.customDomain,
-        domainType: endpoint.domainType,
+        domainType: endpoint.domainType === "custom" ? "custom" : "free",
+        ...normalizeRedirectFields(endpoint.redirectTo, endpoint.redirectStatus),
       })),
       normalizeOpts,
     );
@@ -603,6 +598,8 @@ export interface ServiceRoutingPatch {
     domain?: string | null;
     customDomain?: string | null;
     domainType?: string | null;
+    redirectTo?: string | null;
+    redirectStatus?: number | null;
   }> | null;
 }
 
@@ -616,15 +613,20 @@ function normalizeServiceRoute(input: {
   domain?: string | null;
   customDomain?: string | null;
   domainType?: string | null;
+  redirectTo?: string | null;
+  redirectStatus?: number | null;
 }): ServicePublicEndpoint | null {
   const port = normalizePort(input.port);
-  if (port === null) return null;
-  if (input.domainType === "custom") {
-    const customDomain = normalizeCustomDomain(input.customDomain);
-    return customDomain ? { port, domainType: "custom", customDomain } : null;
-  }
-  const domain = normalizeSlug(input.domain);
-  return domain ? { port, domainType: "free", domain } : null;
+  if (port === null && !input.redirectTo) return null;
+  const custom = input.domainType === "custom";
+  const hostname = custom ? normalizeCustomDomain(input.customDomain) : normalizeSlug(input.domain);
+  if (!hostname) return null;
+  return {
+    ...(port !== null ? { port } : {}),
+    domainType: custom ? "custom" : "free",
+    ...(custom ? { customDomain: hostname } : { domain: hostname }),
+    ...normalizeRedirectFields(input.redirectTo, input.redirectStatus),
+  };
 }
 
 /** Two routes with this same key resolve to the SAME hostname. */
@@ -647,7 +649,7 @@ function primaryScalars(primary: ServicePublicEndpoint): {
   domainType: "free" | "custom";
 } {
   return {
-    exposedPort: String(primary.port),
+    exposedPort: primary.port === undefined ? "" : String(primary.port),
     domain: primary.domainType === "free" ? (primary.domain ?? null) : null,
     customDomain: primary.domainType === "custom" ? (primary.customDomain ?? null) : null,
     domainType: primary.domainType,
@@ -760,7 +762,10 @@ export function mergeServiceRoutingPatch(opts: {
 
   if (patch.publicEndpoints !== undefined) {
     const routes = (patch.publicEndpoints ?? [])
-      .map((endpoint) => normalizeServiceRoute(endpoint))
+      .map((endpoint) => {
+        normalizeRedirect(endpoint);
+        return normalizeServiceRoute(endpoint);
+      })
       .filter((route): route is ServicePublicEndpoint => route !== null);
     // An explicit array wins outright, so the scalars are PROJECTED from its
     // primary — not resolved a second time from the patch/stored chain, which
@@ -824,6 +829,9 @@ export function mergeServiceRoutingPatch(opts: {
     byPort >= 0
       ? byPort
       : current.findIndex((route) => routeIdentity(route) === routeIdentity(upserted));
+  const previous = current[at];
+  if (previous && routeIdentity(previous) === routeIdentity(upserted))
+    Object.assign(upserted, normalizeRedirectFields(previous.redirectTo, previous.redirectStatus));
   const next =
     at >= 0
       ? current.map((route, index) => (index === at ? upserted : route))
@@ -844,7 +852,7 @@ export function mergeServiceRoutingPatch(opts: {
     return {
       ...scalars,
       exposedPort: derived === single.port ? exposedPort : String(single.port),
-      publicEndpoints: [],
+      publicEndpoints: single.redirectTo !== undefined ? [single] : [],
     };
   }
 
@@ -856,8 +864,9 @@ export function mergeServiceRoutingPatch(opts: {
 }
 
 /**
- * Every public endpoint's assigned domain URL for a service, keyed by container
- * port. Free → https://<slug>.<routing base>, custom → https://<customDomain>.
+ * The first concrete public URL for each container port, in configured route
+ * order. Adding an alias must not replace the URL used by deployment templates.
+ * Free → https://<slug>.<routing base>, custom → https://<customDomain>.
  *
  * The one consumer is the compose deploy's `{{publicUrl:svc[:port]}}` substitution
  * (container env + generated config files — Convex's CONVEX_CLOUD_ORIGIN, a
@@ -875,13 +884,16 @@ export function resolveServiceEndpointUrls(
   service: Service,
 ): Array<{ port: number; url: string }> {
   const urls: Array<{ port: number; url: string }> = [];
+  const seenPorts = new Set<number>();
   for (const endpoint of resolveServicePublicEndpoints(service, {
     projectSlug: project.slug ?? project.name,
   })) {
-    if (endpoint.port === undefined) continue;
+    if (endpoint.redirectTo || endpoint.port === undefined || seenPorts.has(endpoint.port)) continue;
     if (endpoint.domainType === "custom") {
-      if (endpoint.customDomain && !isWildcardHostname(endpoint.customDomain))
+      if (endpoint.customDomain && !isWildcardHostname(endpoint.customDomain)) {
         urls.push({ port: endpoint.port, url: `https://${endpoint.customDomain}` });
+        seenPorts.add(endpoint.port);
+      }
       continue;
     }
     const slug = resolveServiceHostnameLabel(
@@ -890,7 +902,10 @@ export function resolveServiceEndpointUrls(
       endpoint.domain ?? undefined,
       serviceKind(service),
     );
-    if (slug) urls.push({ port: endpoint.port, url: `https://${slug}.${getRoutingBaseDomain()}` });
+    if (slug) {
+      urls.push({ port: endpoint.port, url: `https://${slug}.${getRoutingBaseDomain()}` });
+      seenPorts.add(endpoint.port);
+    }
   }
   return urls;
 }

@@ -132,10 +132,14 @@ function makeExec(
         ].join("\n");
       }
       if (cmd.includes("docker inspect")) {
-        return flavor === "container" ? "true\topenship/mail:test" : "";
+        if (flavor !== "container") throw new Error("Error: No such object: openship-mail");
+        return "true\topenship/mail:test";
       }
       if (cmd.includes("systemctl show")) {
-        return flavor === "host" ? HOST_UNITS_ACTIVE : "";
+        return flavor === "host"
+          ? HOST_UNITS_ACTIVE
+          : HOST_UNITS_ACTIVE.replaceAll("LoadState=loaded", "LoadState=not-found")
+              .replaceAll("ActiveState=active", "ActiveState=inactive");
       }
       execCalls.push(cmd);
       return "";

@@ -1,6 +1,6 @@
 {
   "name": "@repo/cli",
-  "version": "0.8.0",
+  "version": "0.9.10",
   "description": "Openship CLI - deploy, manage, and open your Openship platform from the terminal",
   "license": "Apache-2.0",
   "repository": {
@@ -45,6 +45,7 @@
     "@clack/prompts": "^0.11.0",
     "@repo/adapters": "workspace:*",
     "@repo/core": "workspace:*",
+    "@repo/contracts": "workspace:*",
     "@repo/onboarding": "workspace:*",
     "@repo/sdk": "workspace:*",
     "chalk": "^5.6.2",
@@ -52,14 +53,17 @@
     "dockerode": "^4.0.9",
     "open": "^10.2.0",
     "ora": "^9.3.0",
-    "ssh2": "^1.17.0"
+    "ssh2": "^1.17.0",
+    "ws": "^8.21.3",
+    "@repo/commands": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.13.0",
+    "@types/ws": "^8.18.1",
     "tsx": "^4.21.0",
     "tsup": "^8.5.1",
     "typescript": "^5.9.3",
-    "vitest": "^4.0.18"
+    "vitest": "^4.1.12"
   },
   "private": true
 }

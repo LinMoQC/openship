@@ -100,55 +100,45 @@ structured exit codes, contained entirely to `nginx.ts`.
 
 ### SSO login for self-hosted (OIDC first, SAML only if asked for)
 
-Not started. Goal: an operator points the instance at their IdP (Okta / Entra /
-Keycloak / Authentik / Google Workspace) and staff sign in with that instead of
-email + password.
+Shipped (v1 generic OIDC). Operators can point a self-hosted instance at an OIDC
+IdP (Okta, Entra, Keycloak, Authentik, Google Workspace) via `OIDC_ISSUER`,
+`OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, and `OIDC_DISPLAY_NAME` (default `"SSO"`).
 
-What's already there:
+What's in place:
 
-- better-auth with the org plugin in `packages/platform/src/engine/lib/auth.ts`. The installed
-  plugin set includes **`generic-oauth`** — arbitrary OIDC/OAuth2 issuers, no new
-  dependency. That's the cheap path.
-- Not `better-auth/plugins/oidc-provider` — that makes Openship *an* IdP, the
-  opposite direction. Per-org IdPs and SAML live in the separate
-  `@better-auth/sso` package, which is **not** installed; only pull it in if
-  per-org IdPs or SAML are genuinely required.
-- Providers are already registered only when their creds exist, so an SSO
-  provider should follow the same env-gated shape.
+- better-auth with the org plugin and `genericOAuth` (`better-auth/plugins`) in
+  `packages/platform/src/engine/lib/auth.ts`, configured by `oidcProviderConfig()`
+  in `packages/platform/src/engine/lib/auth-providers.ts`.
+- Per-org IdPs and SAML live in the separate `@better-auth/sso` package, which is
+  **not** installed; only pull it in if per-org IdPs or SAML are genuinely required.
 
-The prerequisite nobody expects:
+Completed items and remaining follow-ups:
 
 - [x] **Advertise configured login providers.** Shared system info and
-      `GET /health/env` expose `authProviders` (IDs and kinds only). The engine's
-      `auth-providers.ts` supplies the same credential predicate to Better Auth;
-      login and registration render only supported, advertised providers.
-      This completes discovery for existing GitHub/Google login. OIDC/SAML
-      integration and its account policies remain separate work.
-
-Decisions to settle before coding:
-
-- [ ] **Account linking.** `accountLinking.trustedProviders` is
-      `["github", "google"]` with `allowDifferentEmails: true` in `auth.ts`. An
-      SSO provider left out of that list forks a second user row on first login
-      for an email that already exists. Decide whether IdP-asserted email is
-      trusted (it usually is — but say so deliberately).
-- [ ] **Where an SSO user LANDS.** The invite-only gate itself is already
-      shipped, so this is narrower than it looks: `databaseHooks.user.create.before`
-      (`auth.ts:262-306`) enforces invite-only sign-up on self-hosted for the
-      OAuth/social path, and a fresh user gets a personal-org owner membership
-      with role `user`. What is undecided is the SSO-specific half — an
-      IdP-authenticated user currently lands in a *personal workspace*, not the
-      team org, and there is no email-domain allowlist and no default team role.
-- [ ] **Zero-auth interaction.** `authMode === "none"` instances
-      (`apps/api/src/lib/auth-mode.ts`) have no login at all. SSO must be inert
-      there, not a second door into a box that deliberately has none.
-- [ ] **Deprovisioning.** Removing someone from the IdP does not end their
-      Openship session or membership. `session.expiresIn` is 30 days — either
-      shorten it when SSO is on, or document the gap honestly. There's no SCIM
-      and shouldn't be one for v1.
-- [ ] Gate on explicit env vars validated in `apps/api/src/config/env.ts`, and
-      show the resolved state in Settings → security so an operator can tell SSO
-      is actually live.
+      `GET /health/env` expose `authProviders` (IDs, kinds, and optional display
+      name for `oidc`). The engine's `auth-providers.ts` supplies the same
+      credential predicate to Better Auth; login and registration render only
+      supported, advertised providers.
+- [x] **Account linking.** `"oidc"` stays out of `accountLinking.trustedProviders`.
+      Sign-in and linking require boolean `email_verified: true`; an unverified
+      email cannot claim an invitation. Accounts bind the exact issuer/subject
+      pair. Better Auth continues to handle account linking and sessions.
+- [x] **Where an SSO user LANDS (v1 invite-only gate).** `databaseHooks.user.create.before`
+      in `auth.ts` enforces invite-only sign-up on self-hosted for the `oidc`
+      provider just like GitHub/Google (no email-domain auto-join). Follow-up if
+      requested: default team org auto-join or domain allowlists.
+- [x] **Instance boundary.** Generic OIDC is self-hosted only; Cloud ignores its
+      settings. Instances without local accounts reject OIDC sign-in, linking
+      and callbacks through the shared account-security mode guard.
+- [x] **Deprovisioning documented as v1 gap.** Removing someone from the IdP does
+      not end their existing Openship session (`session.expiresIn` is 30 days) and
+      there is no SCIM in v1; documented in `/docs/security/auth`.
+- [x] **Env validation.** `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`,
+      and `OIDC_DISPLAY_NAME` are validated in
+      `packages/platform/src/engine/config/env.ts` (partial config logs a warning
+      and registers nothing).
+- [ ] Show the resolved OIDC state in Settings → Security so an operator can
+      confirm SSO is live from the settings UI.
 
 ---
 
@@ -468,19 +458,6 @@ Volumes for single apps shipped (`packages/core/src/volumes.ts`,
 (`apps/api/src/modules/projects/project-storage.service.ts`). Re-verified
 2026-08-20 — **every item below is still open**:
 
-- [ ] **Backups don't cover a single app's volumes.** The backup subsystem targets
-      `service` rows: the project-default fan-out is
-      `repos.service.listByProject(...)` and throws `"Project has no services to
-      back up"` on zero services
-      (`apps/api/src/modules/backups/backup.orchestrator.ts:163-165`), with the
-      execute path re-asserting it. A true single-app project has ZERO service rows
-      (the #231 app row is only materialized once a `compose` sidecar exists), so a
-      project with `project.volumes` set has no policy that can back it up — and a
-      policy CAN be saved with `serviceId: null`, so the failure lands at first run,
-      not at save. It is purely a TARGETING gap: the docker executor already reads
-      mounts off the live container. Fix needs a project-level/app source kind, or
-      a fan-out that synthesizes the app unit (`project.volumes` resolves via
-      `appRowVolumes`).
 - [ ] **Cloud has no volume primitive.** `CloudRuntime.deploy` still warns and
       drops a declared mount (`packages/adapters/src/runtime/cloud.ts:1637-1648`,
       "Oblien has no volume primitive"). Neither alternative shipped: the API

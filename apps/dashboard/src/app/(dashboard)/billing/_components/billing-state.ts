@@ -1,9 +1,11 @@
+import { reportCaughtError as observeCaughtError, diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import "server-only";
 import { cache } from "react";
 import { CLOUD_CAPABILITIES } from "@repo/core";
 import { serverApi, ServerApiError } from "@/lib/server/api";
 import { getDeploymentInfo } from "@/lib/server/session";
 import type { BillingState } from "@/lib/api/billing";
+import type { ServerDetail } from "@repo/contracts";
 import type { BillingUnavailableReason } from "./BillingUnavailable";
 
 interface BillingStateResponse {
@@ -22,7 +24,7 @@ interface CloudStatus {
 function logBillingFailure(status: number | null, code: string): void {
   // Diagnose SSR failures in dashboard logs without exposing provider bodies,
   // session cookies, or customer billing data.
-  console.warn("[billing] GET /billing/state failed", { status, code });
+  errorDiagnostics.warn("dashboard/app/(dashboard)/billing/_components/billing-state", "[billing] GET /billing/state failed", { status, code });
 }
 
 async function fetchCloudConnected(): Promise<boolean> {
@@ -31,17 +33,18 @@ async function fetchCloudConnected(): Promise<boolean> {
       cache: "no-store",
     });
     return res?.connected ?? false;
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "dashboard/app/(dashboard)/billing/_components/billing-state");
     return false;
   }
 }
 
-async function fetchBillingState(): Promise<BillingFetchResult> {
+async function fetchBillingState(workspaceId?: string): Promise<BillingFetchResult> {
   const info = await getDeploymentInfo();
   const isLocalMode = info.selfHosted;
 
   try {
-    const res = await serverApi.get<BillingStateResponse>("billing/state", {
+    const res = await serverApi.get<BillingStateResponse>(workspaceId ? `billing/state?workspaceId=${encodeURIComponent(workspaceId)}` : "billing/state", {
       cache: "no-store",
       // Namespace onboarding may perform several provider reads. Let the API
       // finish its bounded upstream requests before the dashboard gives up.
@@ -56,11 +59,18 @@ async function fetchBillingState(): Promise<BillingFetchResult> {
       reason: isLocalMode ? "cloud-unreachable" : "billing-unreachable",
     };
   } catch (err) {
+    // diagnostics-ignore: logBillingFailure records only normalized status/code;
+    // this boundary must not copy a provider's billing message into SSR logs.
     if (err instanceof ServerApiError) {
       const body = err.body as { code?: unknown } | null | undefined;
       const code = typeof body?.code === "string" && /^[a-z0-9_-]{1,80}$/i.test(body.code)
         ? body.code : "BILLING_API_ERROR";
       logBillingFailure(err.status, code);
+      if (code === "CLOUD_WORKSPACE_REQUIRED") return { kind: "unavailable", reason: "workspace-required" };
+      if (workspaceId && (
+        (err.status === 404 && code === "CLOUD_WORKSPACE_NOT_FOUND") ||
+        (err.status === 409 && code === "CLOUD_WORKSPACE_DELETING")
+      )) return { kind: "unavailable", reason: "workspace-removed" };
 
       if (err.status === 401) {
         return {
@@ -105,6 +115,22 @@ async function fetchBillingState(): Promise<BillingFetchResult> {
   }
 }
 
-// Layout and tab share one snapshot per server render. React.cache is scoped
-// to the request; billing data is never cached across customers or page loads.
+/** Pick a billing view only after an unscoped read reports multiple servers.
+ * This uses the same authorized inventory as the picker, never a mutation default. */
+export async function getDefaultBillingWorkspace(): Promise<string | undefined> {
+  try {
+    const data = await serverApi.get<{ servers: ServerDetail[] }>("system/servers/destinations", { cache: "no-store" });
+    const servers = data.servers.filter(server => server.managed);
+    // Prefer an allocated server (including stopped servers and previous
+    // subscriptions) over an unfinished purchase. Provider state can lead the saved tier.
+    const selected = servers.find(({ managed }) => managed && (managed.planTierId !== "free" || managed.resources)) ?? servers[0];
+    return selected?.managed?.id;
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "dashboard/app/(dashboard)/billing/_components/billing-state");
+    // Keep the explicit picker and its retry available if inventory cannot load.
+    return undefined;
+  }
+}
+
+// React.cache is request-scoped; billing data is never cached across customers.
 export const getBillingPageState = cache(fetchBillingState);

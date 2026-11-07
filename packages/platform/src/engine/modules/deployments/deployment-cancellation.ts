@@ -9,6 +9,7 @@
  * cancel endpoint can wake every phase, not just docker build.
  */
 
+import { reportCaughtError as observeCaughtError, diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import { repos } from "@repo/db";
 
 const CANCELLATION_POLL_MS = 1_000;
@@ -66,7 +67,8 @@ export function registerDeploymentExecution(deploymentId: string): AbortSignal {
           execution.keepProvisioned = cancellation?.keepProvisioned === true;
           controller.abort();
         }
-      } catch {
+      } catch (diagnosticFailure) {
+        observeCaughtError(diagnosticFailure, "platform/engine/modules/deployments/deployment-cancellation");
         // A transient status read must not fail the deploy. The next poll retries;
         // normal lifecycle guards still prevent overwriting a cancelled row.
       } finally {
@@ -91,6 +93,32 @@ export function requestDeploymentCancellation(
   execution.keepProvisioned = opts.keepProvisioned === true;
   if (!execution.controller.signal.aborted) execution.controller.abort();
   return true;
+}
+
+/** The worker owns the resolved build runtime. The request handler's default
+ * platform may target a different host or even use a different runtime (desktop
+ * Bare versus server Docker). Bind the actual adapter here so both local
+ * requests and durable cancellation observed by another process stop its work.
+ * The returned disposer must finish before the worker disposes its transports
+ * or acknowledges completion: cancellation itself may still be cleaning up. */
+export function bindDeploymentBuildCancellation(
+  signal: AbortSignal | undefined,
+  cancelBuild: () => Promise<void>,
+): () => Promise<void> {
+  let pending: Promise<void> | undefined;
+  const cancel = () => {
+    pending ??= Promise.resolve().then(cancelBuild).catch(error => {
+      // A failed interruption is not evidence that the worker stopped. Its
+      // normal execution/finally must still finish before releasing the lease.
+      errorDiagnostics.error("platform/engine/modules/deployments/deployment-cancellation", "[DEPLOY] Build interruption failed; waiting for the worker to stop:", error);
+    });
+  };
+  signal?.addEventListener("abort", cancel, { once: true });
+  if (signal?.aborted) cancel();
+  return async () => {
+    signal?.removeEventListener("abort", cancel);
+    await pending;
+  };
 }
 
 /** Release only the controller registered by this worker; never delete a newer
@@ -125,7 +153,7 @@ export async function completeDeploymentExecution(
       releaseDeploymentExecution(deploymentId, signal);
       return;
     } catch (err) {
-      console.error(
+      errorDiagnostics.error("platform/engine/modules/deployments/deployment-cancellation",
         `[DEPLOY] Failed to acknowledge worker completion for ${deploymentId}; retrying in ${retryMs / 1_000}s:`,
         err,
       );
@@ -177,7 +205,8 @@ export async function waitForDeploymentQuiescence(
   for (;;) {
     try {
       if (!(await repos.deployment.hasLiveBuildExecution(deploymentId, projectId))) return true;
-    } catch {
+    } catch (diagnosticFailure) {
+      observeCaughtError(diagnosticFailure, "platform/engine/modules/deployments/deployment-cancellation");
       // An unreadable lease is never proof of quiescence. Keep polling inside
       // the same bounded window, then return the safe pending outcome.
     }

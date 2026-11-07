@@ -19,6 +19,7 @@
  * under one user, "mcp" alone can't tell you which one to revoke.
  */
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { runWithOperationSource, setOperationSource, isAuditSource, isAuditClientId, type AuditSource } from "@repo/platform/engine/lib/operation-source";
 export { AUDIT_SOURCES, isAuditSource, isAuditClientId, ambientCallSource, type AuditSource } from "@repo/platform/engine/lib/operation-source";
 import { randomBytes, timingSafeEqual } from "node:crypto";
@@ -100,7 +101,7 @@ export function resolveCallClientId(c: Context): string | null {
  *
  * Derivation, once the trusted claim is out of the way:
  *   cookie / zero-auth session → dashboard  (a browser, or a local single-user box)
- *   OAuth bearer               → mcp        (auth.ts resolves one through `getMcpSession`,
+ *   OAuth bearer               → mcp        (auth.ts resolves an issued-token receipt,
  *                                            so an OAuth principal IS an MCP session)
  *   PAT + an openship-cli UA   → cli
  *   any other bearer           → api
@@ -122,7 +123,8 @@ function derive(c: Context): AuditSource {
   let ctx: ReturnType<typeof getRequestContext> | null = null;
   try {
     ctx = getRequestContext(c);
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "api/lib/call-source");
     return fromHeaders(c); // pre-auth, or a route that never builds a ctx
   }
 

@@ -1,3 +1,4 @@
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { exitCommand, rethrowCommandExit } from "../lib/command-exit";
 /**
  * `openship deploy` — deploy the current project.
@@ -20,6 +21,7 @@ import type { CreateDeploymentInput, CreateDeploymentResult } from "@repo/sdk/cl
 import { readProjectLink } from "../lib/project-link";
 import { streamDeploymentLogs } from "../lib/deploy-stream";
 import { isJsonMode, printJson, err, info } from "../lib/output";
+import { parseDeploymentEnvironment, timeoutMilliseconds } from "../lib/command-input";
 
 /** Read a value from git, or undefined when not in a repo / git missing. */
 function git(args: string[]): string | undefined {
@@ -29,7 +31,8 @@ function git(args: string[]): string | undefined {
         .toString()
         .trim() || undefined
     );
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "cli/commands/deploy");
     return undefined;
   }
 }
@@ -39,7 +42,7 @@ export const deployCommand = new Command("deploy")
   .option("--project <id>", "Project ID (defaults to the linked project in .openship/project.json)")
   .option("--branch <name>", "Git branch to deploy (defaults to the current branch)")
   .option("--commit <sha>", "Specific commit SHA (defaults to the latest commit on the branch)")
-  .option("--env <environment>", "Variable set: production | preview (project ID selects the runtime)", "production")
+  .option("--env <environment>", "Variable set: production | preview (defaults to the link, then production; project ID selects the runtime)")
   .option("--force-all", "Rebuild every enabled service (skip smart per-service routing)")
   .option("--service-ids <ids>", "Comma-separated service IDs to deploy (smart routing)")
   .option("--release-run <id>", "Registered GitOps controller run ID")
@@ -53,15 +56,13 @@ export const deployCommand = new Command("deploy")
   )
   .option("--server <id>", "Registered server ID (see `openship server list`)")
   .option("--watch", "Stream the deployment logs until it finishes")
+  .option("--timeout <ms>", "Maximum watch duration; timing out leaves the deployment running", timeoutMilliseconds, 600_000)
   .action(async (opts) => {
-    const link = readProjectLink();
-    if (!opts.project) assertLinkedProjectConnection(link);
-
-    const env: string = opts.env;
-    if (env !== "production" && env !== "preview") {
-      err(`Invalid --env "${env}". Must be "production" or "preview".`);
-      exitCommand(1);
-    }
+    // An explicit project selects its own target, without inheriting a different
+    // project's branch, environment or connection from the working directory.
+    const link = opts.project ? null : readProjectLink();
+    assertLinkedProjectConnection(link);
+    const env = parseDeploymentEnvironment(opts.env ?? link?.defaults?.environment ?? "production");
 
     // Never turn a redeploy from the wrong directory into an implicit upload.
     // --name remains an opt-in for existing folder-deploy scripts outside Git.
@@ -104,7 +105,7 @@ export const deployCommand = new Command("deploy")
           source: { type: "directory", path: process.cwd() },
           name: opts.name,
           projectId: opts.project || link?.projectId,
-          environment: env as "production" | "preview",
+          environment: env,
           serverId: opts.server,
           serviceIds,
           strictServiceScope: opts.strictServiceScope || undefined,
@@ -190,6 +191,6 @@ export const deployCommand = new Command("deploy")
       return;
     }
 
-    const result = await streamDeploymentLogs(deploymentId);
+    const result = await streamDeploymentLogs(deploymentId, opts.timeout);
     if (result.success === false || result.status === "cancelled") exitCommand(1);
   });

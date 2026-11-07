@@ -1,4 +1,5 @@
 import type { LogEntry } from "@repo/adapters";
+import { DEPLOYMENT_SECRET_FIELDS } from "@repo/db/configuration-secrets";
 
 /**
  * Make captured build output STORABLE — and safe to store — before it becomes a
@@ -64,9 +65,10 @@ export const MAX_TOTAL_CHARS = 4_000_000;
  * line of such characters shows up, and this function runs on the persist path, so
  * the unbounded form turned a big log into a hang (the oversized-payload case in
  * build-log-sanitize.test.ts went from milliseconds to >280s). Real schemes are
- * under 16 characters and real userinfo is far under 512.
+ * under 16 characters. Userinfo allows 2048 because a GitHub App installation token
+ * can pass 512, and a URL that doesn't match is stored with its token (#979).
  */
-const URL_USERINFO = /([a-z][a-z0-9+.-]{0,15}:\/\/)[^\s/@]{1,512}@/gi;
+const URL_USERINFO = /([a-z][a-z0-9+.-]{0,15}:\/\/)[^\s/@]{1,2048}@/gi;
 
 /**
  * Bare GitHub tokens, for the paths that log a token without a URL around it
@@ -300,6 +302,30 @@ export function sanitizeStorableStringsExceptKeys<T>(
   preserveKeys: ReadonlySet<string>,
 ): T {
   return deepStorable(value, 0, preserveKeys, false) as T;
+}
+
+/**
+ * Keep operational configuration exact. The storage codec JSON-serializes and
+ * encrypts these fields before they reach JSONB, so even control characters are
+ * safe inside the ciphertext. Log redaction, byte repair and length caps would
+ * change the configuration a later rollback executes. Diagnostic metadata still
+ * uses the ordinary scrubber. The pure codec subpath also avoids loading a DB.
+ */
+export function sanitizeDeploymentMeta<T>(value: T): T {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    return sanitizeStorableStrings(value);
+  const text = { ...value } as Record<string, unknown>;
+  const configuration: Record<string, unknown> = {};
+  for (const key of DEPLOYMENT_SECRET_FIELDS) {
+    if (!Object.hasOwn(text, key)) continue;
+    configuration[key] = text[key];
+    delete text[key];
+  }
+  return {
+    ...sanitizeStorableStrings(text),
+    ...configuration,
+    ...(Object.keys(configuration).length ? { configurationSecretsPreserved: true } : {}),
+  } as T;
 }
 
 function deepStorable(

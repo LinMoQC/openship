@@ -3,6 +3,8 @@ import { db, eq, schema, sql, repos } from "@repo/db";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { symmetricDecrypt, symmetricEncrypt } from "better-auth/crypto";
+import { env } from "@repo/platform/engine/config/env";
 
 vi.mock("@repo/platform/engine/config/env", async () => ({
   env: { BETTER_AUTH_SECRET: process.env.BETTER_AUTH_SECRET ?? (await import("@repo/db/encryption")).DEFAULT_ENCRYPTION_SECRET, CLOUD_MODE: false },
@@ -30,7 +32,7 @@ import {
   importPreparedInstance,
   previewInstanceImport,
 } from "../../src/modules/system/data-transfer/import.service";
-import { openTransferSecrets } from "../../src/modules/system/data-transfer/passphrase-crypto";
+import { openTransferSecrets, sealSecretBundle } from "../../src/modules/system/data-transfer/passphrase-crypto";
 import {
   createFileUpload,
   finalizeFileUpload,
@@ -45,6 +47,7 @@ import type {
 } from "../../src/modules/system/data-transfer/types";
 
 const context = { userId: "user_target", organizationId: "org_target" };
+const sourceContext = { userId: "user_source", organizationId: "org_source" };
 const selection: ExportSelection = {
   scope: "projects",
   projectIds: ["web"],
@@ -328,11 +331,17 @@ async function source() {
     });
 }
 async function exportFile(overrides: Partial<ExportSelection> = {}, passwordProtected = true): Promise<DataTransferFile> {
-  return JSON.parse(
-    JSON.stringify(
-      await exportInstance({ passphrase: passwordProtected ? password : undefined, selection: { ...selection, ...overrides } }),
-    ),
-  );
+  const file: DataTransferFile = JSON.parse(JSON.stringify(
+    await exportInstance({ selection: { ...selection, ...overrides } }),
+  ));
+  if (passwordProtected) {
+    // Manufacture a legacy archive to keep testing old password-protected
+    // imports. New downloads always use plaintext, even for older clients.
+    const bundle = openTransferSecrets(file.secrets);
+    file.envelopeVersion = 2;
+    file.secrets = bundle ? sealSecretBundle(bundle, password) : null;
+  }
+  return file;
 }
 async function destination(withServer = true) {
   await reset();
@@ -373,7 +382,7 @@ describe("project control-plane export and import", () => {
     },
   );
 
-  it("exports all environments, linked apps, backup parents and repo keys without unrelated projects or plaintext secrets", async () => {
+  it("keeps legacy sealed archives readable with all selected dependencies and no unrelated projects", async () => {
     await source();
     const file = await exportFile();
     expect(file.kind).toBe("openship-project-export");
@@ -430,7 +439,7 @@ describe("project control-plane export and import", () => {
   it("exports readable environment values, keys, and service configuration without a password", async () => {
     await source();
     const file = await exportFile({}, false);
-    expect(file.envelopeVersion).toBe(3);
+    expect(file.envelopeVersion).toBe(4);
     expect(file.secrets).toMatchObject({ encoding: "plaintext", version: 1 });
     expect(file.secrets).not.toHaveProperty("kdf");
     for (const value of [
@@ -443,6 +452,259 @@ describe("project control-plane export and import", () => {
       name: "App host", host: "203.0.113.10",
     }));
     expect(file.dump.tables.project!.map((row) => row.id).sort()).toEqual(["database", "staging", "web"]);
+  });
+
+  it.each(["instance", "projects"] as const)("keeps new %s downloads plaintext even when an older client supplies a password", async (scope) => {
+    await source();
+    const file = await exportInstance({ passphrase: password,
+      selection: scope === "projects" ? selection : { scope, history: ["analytics"] },
+    });
+    expect(file.envelopeVersion).toBe(4);
+    expect(file.secrets).toMatchObject({ encoding: "plaintext" });
+    expect(openTransferSecrets(file.secrets)!.entries).toContainEqual(expect.objectContaining({
+      table: "env_var", id: "env_web", value: "environment-secret",
+    }));
+  });
+
+  it("preserves passkeys and re-encrypts 2FA through a complete instance transfer", async () => {
+    const originalKey = env.BETTER_AUTH_SECRET;
+    const sourceKey = "source-account-security-secret-000000000000";
+    const destinationKey = "destination-account-security-secret-000000";
+    const seed = "transfer-authenticator-seed";
+    const recovery = '["one-time-recovery-code"]';
+    try {
+      env.BETTER_AUTH_SECRET = sourceKey;
+      await identity(sourceContext.organizationId, sourceContext.userId);
+      await db.update(schema.user).set({ twoFactorEnabled: true }).where(eq(schema.user.id, sourceContext.userId));
+      await db.insert(schema.twoFactor).values({
+        id: "transfer-factor", userId: sourceContext.userId,
+        secret: await symmetricEncrypt({ key: sourceKey, data: seed }),
+        backupCodes: await symmetricEncrypt({ key: sourceKey, data: recovery }),
+      });
+      await db.insert(schema.passkey).values({
+        id: "transfer-passkey", userId: sourceContext.userId, name: "Laptop",
+        credentialID: "test-credential", publicKey: "test-public-key", counter: 42,
+        deviceType: "multiDevice", backedUp: true,
+      });
+      const file: DataTransferFile = JSON.parse(JSON.stringify(await exportInstance({ selection: { scope: "instance", includeSecrets: true } })));
+      // Account secrets travel only in the explicit credential bundle. The
+      // metadata portion cannot inject source ciphertext into the destination.
+      expect(JSON.stringify(file.dump)).not.toContain(seed);
+      expect(JSON.stringify(file.dump)).not.toContain(recovery);
+      await reset();
+      env.BETTER_AUTH_SECRET = destinationKey;
+      await importInstance({ file, mode: "wipe" });
+      const [user] = await db.select().from(schema.user).where(eq(schema.user.id, sourceContext.userId));
+      const [factor] = await db.select().from(schema.twoFactor);
+      expect(user!.twoFactorEnabled).toBe(true);
+      expect(await symmetricDecrypt({ key: destinationKey, data: factor!.secret })).toBe(seed);
+      expect(await symmetricDecrypt({ key: destinationKey, data: factor!.backupCodes })).toBe(recovery);
+      await expect(symmetricDecrypt({ key: sourceKey, data: factor!.secret })).rejects.toThrow();
+      expect((await db.select().from(schema.passkey))[0]).toMatchObject({ credentialID: "test-credential", counter: 42, userId: user!.id });
+
+      // A later merge must not replace credentials already owned by the target.
+      const replacement = await symmetricEncrypt({ key: destinationKey, data: "replacement-authenticator-seed" });
+      await db.update(schema.twoFactor).set({ secret: replacement }).where(eq(schema.twoFactor.id, factor!.id));
+      await importInstance({ file, mode: "merge" });
+      expect((await db.select().from(schema.twoFactor))[0]!.secret).toBe(replacement);
+      await expect(importInstance({ file, mode: "wipe", selection: { scope: "instance", includeSecrets: false } })).rejects.toThrow("Include their credentials");
+      expect((await db.select().from(schema.twoFactor))[0]!.secret).toBe(replacement);
+    } finally {
+      env.BETTER_AUTH_SECRET = originalKey;
+    }
+  });
+
+  it("exports a complete plaintext instance and replaces older destination records", async () => {
+    await source();
+    await db.insert(schema.serverAnalytics).values({
+      id: "instance_traffic", serverId: "source_server", domain: "web.example.test",
+      minute: 1234, requests: 42,
+    });
+    const file: DataTransferFile = JSON.parse(JSON.stringify(await exportInstance({})));
+    expect(file.kind).toBe("openship-instance-export");
+    expect(file.envelopeVersion).toBe(4);
+    expect(file.secrets).toMatchObject({ encoding: "plaintext", version: 1 });
+    expect(file.secrets).not.toHaveProperty("kdf");
+    for (const value of [
+      "environment-secret", "service-secret", "inline-secret", "snapshot-secret",
+      "frozen-compose-secret", "source-ssh-private-key", "backup-ssh-password",
+      "project-clone-token", "repo-private-key", "git-app-private-key", "registry-secret",
+    ]) expect(JSON.stringify(file)).toContain(value);
+
+    await db.update(schema.envVar).set({ value: encrypt("older-env") }).where(eq(schema.envVar.id, "env_web"));
+    await db.update(schema.project).set({ buildCommand: "older-build" }).where(eq(schema.project.id, "web"));
+    await db.update(schema.servers).set({ sshPrivateKey: encryptSecretField("older-key") }).where(eq(schema.servers.id, "source_server"));
+    await db.update(schema.serverAnalytics).set({ requests: 2 }).where(eq(schema.serverAnalytics.id, "instance_traffic"));
+    await db.insert(schema.envVar).values({ id: "destination_only", projectId: "web", key: "REMOVED", value: encrypt("stale") });
+
+    const result = await importInstance({ file, mode: "wipe" });
+    expect(result.secretsSkipped).toBe(false);
+    expect(decrypt((await db.select().from(schema.envVar).where(eq(schema.envVar.id, "env_web")))[0]!.value)).toBe("environment-secret");
+    expect(await db.select().from(schema.envVar).where(eq(schema.envVar.id, "destination_only"))).toHaveLength(0);
+    expect((await db.select().from(schema.project).where(eq(schema.project.id, "web")))[0]!.buildCommand).toBe("npm run build");
+    expect(decryptSecretField((await db.select().from(schema.servers).where(eq(schema.servers.id, "source_server")))[0]!.sshPrivateKey)).toBe("source-ssh-private-key");
+    expect((await db.select().from(schema.serverAnalytics))[0]!.requests).toBe(42);
+    expect((await repos.service.findById("service_web"))!.environment).toEqual({ INLINE_PASSWORD: "inline-secret" });
+    expect((await repos.deployment.findById("deploy_web"))!.meta).toMatchObject({
+      serverId: "source_server", composeServices: [{ environment: { PASSWORD: "frozen-compose-secret" } }],
+    });
+  });
+
+  it("rolls back instance replacement when finalization fails", async () => {
+    await source();
+    const file = await exportInstance({});
+    await db.update(schema.envVar).set({ value: encrypt("keep-on-failure") }).where(eq(schema.envVar.id, "env_web"));
+    await expect(importInstance({
+      file, mode: "wipe", onBeforeCommit: async () => { throw new Error("finalization failed"); },
+    })).rejects.toThrow("finalization failed");
+    expect(decrypt((await db.select().from(schema.envVar).where(eq(schema.envVar.id, "env_web")))[0]!.value)).toBe("keep-on-failure");
+    expect(await db.select().from(schema.project)).toHaveLength(4);
+  });
+
+  it("does not import preview automation or builder-local cache proof with a project", async () => {
+    await source();
+    await db.update(schema.project).set({
+      previewSettings: { enabled: true, comments: true },
+      previewScannedAt: new Date(),
+      buildCacheReceipts: {
+        __app__: { targets: ["/root/.npm"], deploymentId: "deploy_web", completedAt: new Date().toISOString() },
+      },
+    }).where(eq(schema.project.id, "web"));
+    const file = await exportFile({ includeEnvironments: false }, false);
+    await importInstance({ file, mode: "merge", context: sourceContext, selection: {
+      scope: "projects", conflictPolicy: "overwrite",
+    } });
+    expect(await repos.project.findById("web")).toMatchObject({
+      previewSettings: null, previewScannedAt: null, buildCacheReceipts: null,
+    });
+  });
+
+  it("overwrites cleared credentials and removes stale project environment rows", async () => {
+    await source();
+    await db.update(schema.project).set({ cloneTokenEncrypted: null }).where(eq(schema.project.id, "web"));
+    await db.update(schema.service).set({ environment: {}, buildArgs: {} }).where(eq(schema.service.id, "service_web"));
+    const file = await exportFile({ includeEnvironments: false, includeLinkedProjects: false }, false);
+    await db.update(schema.project).set({ cloneTokenEncrypted: encrypt("removed-token") }).where(eq(schema.project.id, "web"));
+    await db.update(schema.service).set({ environment: { STALE: "old" }, buildArgs: { STALE: "old" } }).where(eq(schema.service.id, "service_web"));
+    await db.insert(schema.envVar).values({ id: "obsolete_env", projectId: "web", key: "OBSOLETE", value: encrypt("old") });
+
+    await importInstance({
+      file, mode: "merge", context: { organizationId: "org_source", userId: "user_source" },
+      selection: { scope: "projects", conflictPolicy: "overwrite", includeSecrets: true },
+    });
+    expect((await repos.project.findById("web"))!.cloneTokenEncrypted).toBeNull();
+    expect((await repos.service.findById("service_web"))!.environment).toEqual({});
+    expect((await repos.service.findById("service_web"))!.buildArgs).toEqual({});
+    expect(await db.select().from(schema.envVar).where(eq(schema.envVar.id, "obsolete_env"))).toHaveLength(0);
+    expect(decrypt((await db.select().from(schema.envVar).where(eq(schema.envVar.id, "env_other")))[0]!.value)).toBe("unrelated-secret");
+  });
+
+  it("replaces destination-only services, connections, deployments and selected history atomically", async () => {
+    await source();
+    const file = await exportFile({ history: ["analytics"], includeEnvironments: false }, false);
+    await db.insert(schema.service).values({ id: "old_service", projectId: "web", name: "old" });
+    await db.insert(schema.envVar).values({ id: "old_service_env", projectId: "web", serviceId: "old_service", key: "OLD", value: encrypt("old") });
+    await db.insert(schema.deployment).values({ id: "old_deploy", projectId: "web", organizationId: "org_source", branch: "main", status: "ready" });
+    await db.insert(schema.serviceDeployment).values({ id: "old_service_deploy", deploymentId: "old_deploy", serviceId: "old_service" });
+    await db.update(schema.project).set({ activeDeploymentId: "old_deploy", cloneTokenEncrypted: encrypt("destination-token") }).where(eq(schema.project.id, "web"));
+    await db.insert(schema.projectConnection).values({
+      id: "old_link", organizationId: "org_source", sourceProjectId: "database", targetProjectId: "web", outputId: "dbUrl", envKey: "OLD_DB",
+    });
+    await db.insert(schema.serverAnalytics).values({ id: "old_traffic", serverId: "source_server", domain: "web.example.test", minute: 1234 });
+    await db.insert(schema.resourceUsage).values([
+      { id: "old_usage", projectId: "web", serviceKey: "old_service", minute: 1235 },
+      { id: "other_usage", projectId: "unrelated", serviceKey: "__app__", minute: 1235 },
+    ]);
+    const options = { file, mode: "merge" as const, context: sourceContext,
+      selection: { scope: "projects" as const, conflictPolicy: "overwrite" as const },
+    };
+    const preview = await previewInstanceImport(options);
+    expect(preview.blockers).toEqual([]);
+    expect(preview.rowsRemoved).toBe(7);
+    await expect(importInstance({ ...options, onBeforeCommit: async () => { throw new Error("rollback replacement"); } })).rejects.toThrow("rollback replacement");
+    expect(await db.select().from(schema.service).where(eq(schema.service.id, "old_service"))).toHaveLength(1);
+    expect(decrypt((await db.select().from(schema.project).where(eq(schema.project.id, "web")))[0]!.cloneTokenEncrypted!)).toBe("destination-token");
+    await importInstance(options);
+    for (const table of [schema.service, schema.envVar, schema.deployment, schema.serviceDeployment, schema.projectConnection, schema.serverAnalytics]) {
+      expect((await db.select().from(table)).some((row) => row.id.startsWith("old_"))).toBe(false);
+    }
+    expect((await db.select().from(schema.resourceUsage)).map((row) => row.id)).toEqual(["other_usage"]);
+    expect((await repos.project.findById("web"))!.activeDeploymentId).toBe("deploy_web");
+    expect((await db.select().from(schema.project)).map((row) => row.id).sort()).toEqual(["database", "staging", "unrelated", "web"]);
+  });
+
+  it("preserves destination categories excluded from an overwrite", async () => {
+    await source();
+    const file = await exportFile({ includeEnvironments: false }, false);
+    await db.insert(schema.envVar).values({ id: "kept_env", projectId: "web", key: "KEEP", value: encrypt("kept-secret") });
+    await db.insert(schema.domain).values({ id: "kept_domain", projectId: "web", hostname: "kept.example.test" });
+    await db.insert(schema.resourceUsage).values({ id: "kept_usage", projectId: "web", serviceKey: "__app__", minute: 1235 });
+    await importInstance({ file, mode: "merge", context: sourceContext, selection: {
+      scope: "projects", conflictPolicy: "overwrite", includeSecrets: false, includeDomains: false, history: [],
+    } });
+    expect(decrypt((await db.select().from(schema.envVar).where(eq(schema.envVar.id, "kept_env")))[0]!.value)).toBe("kept-secret");
+    expect(await db.select().from(schema.domain).where(eq(schema.domain.id, "kept_domain"))).toHaveLength(1);
+    expect(await db.select().from(schema.resourceUsage).where(eq(schema.resourceUsage.id, "kept_usage"))).toHaveLength(1);
+  });
+
+  it("replaces a selected category even when the source contains no records in it", async () => {
+    await source();
+    await db.delete(schema.domain).where(eq(schema.domain.id, "domain_web"));
+    const file = await exportFile({ history: ["analytics"], includeEnvironments: false }, false);
+    expect(file.dump.tables.server_analytics).toEqual([]);
+    await db.insert(schema.domain).values({ id: "old_domain", projectId: "web", hostname: "old.example.test" });
+    await db.insert(schema.serverAnalytics).values({ id: "old_history", serverId: "source_server", domain: "old.example.test", minute: 1234 });
+    await importInstance({ file, mode: "merge", context: sourceContext,
+      selection: { scope: "projects", conflictPolicy: "overwrite" },
+    });
+    expect(await db.select().from(schema.domain)).toHaveLength(0);
+    expect(await db.select().from(schema.serverAnalytics)).toHaveLength(0);
+  });
+
+  it("refuses to remove a service used by an unselected project without changing destination records", async () => {
+    await source();
+    const file = await exportFile({ includeEnvironments: false }, false);
+    await db.insert(schema.service).values({ id: "shared_service", projectId: "web", name: "shared" });
+    await db.insert(schema.projectConnection).values({ id: "other_link", organizationId: "org_source",
+      sourceProjectId: "web", sourceServiceId: "shared_service", targetProjectId: "unrelated", envKey: "DATABASE_URL", outputId: "dbUrl",
+    });
+    await db.update(schema.project).set({ buildCommand: "keep-destination-build" }).where(eq(schema.project.id, "web"));
+    const options = { file, mode: "merge" as const, context: sourceContext,
+      selection: { scope: "projects" as const, conflictPolicy: "overwrite" as const },
+    };
+    expect((await previewInstanceImport(options)).blockers.join(" ")).toContain("project_connection still references a service");
+    await expect(importInstance(options)).rejects.toThrow("project_connection still references a service");
+    expect(await db.select().from(schema.service).where(eq(schema.service.id, "shared_service"))).toHaveLength(1);
+    expect((await repos.project.findById("web"))!.buildCommand).toBe("keep-destination-build");
+  });
+
+  it("preserves cleared notification credentials and source public settings through instance replacement", async () => {
+    await source();
+    await db.insert(schema.notificationChannel).values({ id: "channel", userId: "user_source", kind: "webhook", label: "Webhook", config: { url: "https://new.example.test" } });
+    const file = await exportInstance({});
+    await db.update(schema.notificationChannel).set({ config: { url: "https://old.example.test", hmacSecret: encrypt("removed-key") } }).where(eq(schema.notificationChannel.id, "channel"));
+    await importInstance({ file, mode: "wipe" });
+    expect((await db.select().from(schema.notificationChannel))[0]!.config).toEqual({ url: "https://new.example.test" });
+  });
+
+  it("exports overview traffic and daily analytics using the edge's normalized hostname", async () => {
+    await source();
+    await db.update(schema.domain).set({ hostname: "www.web.example.test" }).where(eq(schema.domain.id, "domain_web"));
+    await db.insert(schema.serverAnalytics).values({
+      id: "overview_traffic", serverId: "source_server", domain: "web.example.test",
+      minute: 1234, requests: 42,
+    });
+    await db.insert(schema.serverAnalyticsGeo).values({
+      id: "overview_daily", serverId: "source_server", domain: "web.example.test",
+      day: "20260927", countries: { EG: 42 }, visitors: 12,
+    });
+    const file = await exportFile({ history: ["analytics"] }, false);
+    expect(file.dump.tables.server_analytics).toEqual([expect.objectContaining({ requests: 42 })]);
+    expect(file.dump.tables.server_analytics_geo).toEqual([expect.objectContaining({ visitors: 12 })]);
+    await destination();
+    await importInstance({ file, mode: "merge", context });
+    expect((await db.select().from(schema.serverAnalytics))[0]).toMatchObject({ serverId: "target_server", requests: 42 });
+    expect((await db.select().from(schema.serverAnalyticsGeo))[0]).toMatchObject({ serverId: "target_server", visitors: 12 });
   });
 
   it.each([true, false])("round-trips all values, reuses the same server and remaps targets (password protected: %s)", async (passwordProtected) => {
@@ -887,49 +1149,76 @@ describe("project control-plane export and import", () => {
     },
   );
 
-  it.each([true, false])("checks the Cloud account and allows an independent subset (password protected: %s)", async (passwordProtected) => {
+  it.each([true, false])("imports managed project configuration only onto an explicitly selected server (password protected: %s)", async (passwordProtected) => {
     await source();
-    await db
-      .update(schema.project)
-      .set({ serverId: null, cloudWorkspaceId: "cloud-workspace" })
+    const sourceWorkspace = await repos.cloudWorkspace.create({ organizationId: "org_source", name: "Source Cloud" });
+    const sourceServer = (await repos.server.findByWorkspace(sourceWorkspace.id, "org_source"))!;
+    await db.update(schema.project).set({ serverId: sourceServer.id })
       .where(eq(schema.project.id, "web"));
-    vi.mocked(getCloudConnectionStatusForOrg).mockResolvedValue({
-      connected: true,
-      user: { name: "Source", email: "source@example.test" },
-    });
+    vi.mocked(getCloudConnectionStatusForOrg).mockResolvedValue({ connected: true,
+      user: { name: "Source", email: "source@example.test" } });
     const file = await exportFile({}, passwordProtected);
     const passphrase = passwordProtected ? password : undefined;
-    expect(file.manifest?.cloudAccounts).toContainEqual({
-      organizationId: "org_source", email: "source@example.test",
-    });
+    expect(file.manifest?.cloudAccounts).toContainEqual({ organizationId: "org_source", email: "source@example.test" });
+    expect(file.dump.tables.cloud_workspace).toBeUndefined();
+    expect(file.dump.tables.cloud_docker_workspace).toBeUndefined();
     await destination();
-    vi.mocked(getCloudConnectionStatusForOrg).mockResolvedValue({
-      connected: true,
-      user: { name: "Other", email: "other@example.test" },
-    });
-    expect((await previewInstanceImport({ file, context })).blockers.join(" ")).toContain(
-      "Cloud account mismatch",
-    );
-    await expect(
-      importInstance({ file, passphrase, mode: "merge", context }),
-    ).rejects.toThrow("Cloud account mismatch");
+    const targetWorkspace = await repos.cloudWorkspace.create({ organizationId: "org_target", name: "Destination Cloud" });
+    const targetServer = (await repos.server.findByWorkspace(targetWorkspace.id, "org_target"))!;
+    const preview = await previewInstanceImport({ file, context });
+    expect(preview.blockers.join(" ")).toContain("Choose an existing destination server");
+    await expect(importInstance({ file, passphrase, mode: "merge", context })).rejects.toThrow("Choose an existing destination server");
     expect(await db.select().from(schema.project)).toHaveLength(0);
-    await importInstance({
-      file,
-      passphrase,
-      mode: "merge",
-      context,
-      selection: { scope: "projects", projectIds: ["staging"] },
-    });
-    expect((await db.select().from(schema.project)).map((row) => row.id)).toEqual(["staging"]);
-    vi.mocked(getCloudConnectionStatusForOrg).mockResolvedValue({
-      connected: true,
-      user: { name: "Source", email: "source@example.test" },
-    });
-    const result = await importInstance({ file, passphrase, mode: "merge", context });
+    // An unrelated environment is importable without adopting the Cloud host.
+    await importInstance({ file, passphrase, mode: "merge", context,
+      selection: { scope: "projects", projectIds: ["staging"] } });
+    expect((await db.select().from(schema.project)).map(row => row.id)).toEqual(["staging"]);
+    const result = await importInstance({ file, passphrase, mode: "merge", context,
+      selection: { scope: "projects", serverMappings: { [sourceServer.id]: targetServer.id } } });
     expect(result.projectsCreated).toBe(2);
-    expect((await db.select().from(schema.project).where(eq(schema.project.id, "web")))[0]!.cloudWorkspaceId)
-      .toBe("cloud-workspace");
+    expect((await db.select().from(schema.project).where(eq(schema.project.id, "web")))[0]).toMatchObject({
+      serverId: targetServer.id, workspaceId: targetWorkspace.id, activeDeploymentId: null, autoDeploy: false,
+      disabledAt: expect.any(Date),
+    });
+    expect((await db.select().from(schema.deployment).where(eq(schema.deployment.id, "deploy_web")))[0]).toMatchObject({
+      containerId: null, imageRef: null, meta: null, status: "cancelled",
+    });
+    expect(await repos.cloudWorkspace.listByOrganization("org_target")).toHaveLength(1);
+  });
+
+  it("imports separate projects sharing one managed server without merging their identities", async () => {
+    await source();
+    const sourceWorkspace = await repos.cloudWorkspace.create({ organizationId: "org_source", name: "Shared source" });
+    const sourceServer = (await repos.server.findByWorkspace(sourceWorkspace.id, "org_source"))!;
+    for (const id of ["web", "database"])
+      await db.update(schema.project).set({ serverId: sourceServer.id }).where(eq(schema.project.id, id));
+    const file = await exportFile();
+    await destination();
+    const targetWorkspace = await repos.cloudWorkspace.create({ organizationId: "org_target", name: "Shared destination" });
+    const targetServer = (await repos.server.findByWorkspace(targetWorkspace.id, "org_target"))!;
+    await importInstance({ file, passphrase: password, mode: "merge", context, selection: {
+      scope: "projects", projectIds: ["web", "database"], serverMappings: { [sourceServer.id]: targetServer.id },
+    } });
+    const projects = await repos.project.listByWorkspace(targetWorkspace.id, "org_target");
+    expect(projects.map(project => project.id).sort()).toEqual(["database", "web"]);
+    expect(new Set(projects.map(project => project.groupId)).size).toBe(2);
+    expect(projects.every(project => project.serverId === targetServer.id && project.activeDeploymentId === null)).toBe(true);
+  });
+
+  it("rejects a managed-server mapping outside the destination organization before importing anything", async () => {
+    await source();
+    const file = await exportFile();
+    await destination();
+    await identity("foreign-org", "foreign-user");
+    const foreignWorkspace = await repos.cloudWorkspace.create({ organizationId: "foreign-org", name: "Private host" });
+    const foreignServer = (await repos.server.findByWorkspace(foreignWorkspace.id, "foreign-org"))!;
+    await expect(importInstance({ file, passphrase: password, mode: "merge", context, selection: {
+      scope: "projects", serverMappings: { source_server: foreignServer.id },
+    } })).rejects.toThrow(/server/i);
+    expect(await db.select().from(schema.project)).toHaveLength(0);
+    expect(await db.select().from(schema.service)).toHaveLength(0);
+    expect(await db.select().from(schema.deployment)).toHaveLength(0);
+    expect(await repos.server.findByWorkspace(foreignWorkspace.id, "foreign-org")).toMatchObject({ id: foreignServer.id });
   });
 
   it.each([true, false])("keeps import atomic and cannot apply secrets to unselected rows (password protected: %s)", async (passwordProtected) => {
@@ -977,6 +1266,31 @@ describe("project control-plane export and import", () => {
     expect(await db.select().from(schema.project)).toHaveLength(0);
   });
 
+  it.each(["table", "field", "credential"])("rejects an unsupported %s before replacing any destination data", async (kind) => {
+    await source();
+    const file = await exportInstance({});
+    if (kind === "table") file.dump.tables.future_table = [{ id: "future" }];
+    if (kind === "field") file.dump.tables.project![0]!.futureSetting = "must-not-disappear";
+    if (kind === "credential") {
+      file.secrets = { encoding: "plaintext", version: 1, entries: [{
+        table: "project", id: "web", column: "futureCredential", scheme: "scalar", value: "must-not-disappear",
+      }] };
+    }
+    await db.update(schema.project).set({ buildCommand: "unchanged" }).where(eq(schema.project.id, "web"));
+    await expect(previewInstanceImport({ file, context: sourceContext })).rejects.toThrow(/unsupported.*Update the destination/);
+    await expect(importInstance({ file, mode: "wipe" })).rejects.toThrow(/unsupported.*Update the destination/);
+    expect((await repos.project.findById("web"))!.buildCommand).toBe("unchanged");
+  });
+
+  it("still imports a legacy version 3 plaintext project archive", async () => {
+    await source();
+    const file = await exportFile({}, false);
+    file.envelopeVersion = 3;
+    await destination();
+    await importInstance({ file, mode: "merge", context });
+    expect(decrypt((await db.select().from(schema.envVar).where(eq(schema.envVar.id, "env_web")))[0]!.value)).toBe("environment-secret");
+  });
+
   it("previews a chunked file without consuming it, then imports the selected subset using those chunks", async () => {
     await source();
     const file = await exportFile();
@@ -1015,7 +1329,7 @@ describe("project control-plane export and import", () => {
     expect((await getSession(upload.uploadId))!.status).toBe("complete");
   });
 
-  it("embeds SSH key files and inherited clone tokens without requiring source-machine paths at the destination", async () => {
+  it.each([false, true])("embeds SSH key files and inherited clone tokens without requiring source-machine paths (legacy sealed: %s)", async (passwordProtected) => {
     await source();
     const dir = await mkdtemp(join(tmpdir(), "openship-project-key-test-"));
     try {
@@ -1037,13 +1351,13 @@ describe("project control-plane export and import", () => {
           cloneTokenAsDefault: true,
           cloneTokenEncrypted: encrypt("inherited-clone-token"),
         });
-      const file = await exportFile();
+      const file = await exportFile({}, passwordProtected);
       expect(
         file.dump.tables.servers!.find((row) => row.id === "source_server")!.sshKeyPath,
       ).toBeNull();
-      expect(JSON.stringify(file)).not.toContain("ssh-file-private-key");
+      expect(JSON.stringify(file).includes("ssh-file-private-key")).toBe(!passwordProtected);
       await destination(false);
-      await importInstance({ file, passphrase: password, mode: "merge", context });
+      await importInstance({ file, passphrase: passwordProtected ? password : undefined, mode: "merge", context });
       const [server] = await db
         .select()
         .from(schema.servers)

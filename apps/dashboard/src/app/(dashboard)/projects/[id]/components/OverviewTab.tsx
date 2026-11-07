@@ -13,9 +13,10 @@ import { ConnectedServicesCard } from "./ConnectedServicesCard";
 import { UsedByCard } from "./UsedByCard";
 import { ReleaseSummary } from "./ReleaseSummary";
 import { TrafficChart } from "./general/TrafficChart";
-import { useProjectInfo, useAnalyticsData, invalidateProjectCaches } from "@/hooks/useProjectEndpoints";
+import { useProjectInfo, useAnalyticsData, retryProjectRequests } from "@/hooks/useProjectEndpoints";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 import type { Dictionary } from "@/i18n";
+import { hasSeparateApplication } from "@/lib/project-application";
 
 export const OverviewTab = () => {
   const {
@@ -40,12 +41,14 @@ export const OverviewTab = () => {
   // project-wide request and cache with Monitoring's default All scope.
   const projectInfoQuery = useProjectInfo(id);
   const analytics = useAnalyticsData(projectData.id === id && hasDomain ? id : null);
-  const showAnalyticsError = !!analytics.error && !analytics.isLoading;
+  const showAnalyticsError = !!analytics.error;
   const analyticsData = analytics.data;
   const services = servicesData.services;
   const serviceCount = servicesData.isLoading
     ? (projectData.serviceCount ?? services.length)
     : services.length;
+  const hasApplication = !servicesData.isLoading && !servicesData.error && hasSeparateApplication(projectData, services);
+  const applicationCount = serviceCount + (hasApplication ? 1 : 0);
 
   // deployTarget comes from API (active deployment's meta), not from global dashboard mode
   const deployTarget = projectData.deployTarget as string | null;
@@ -200,7 +203,7 @@ export const OverviewTab = () => {
             />
           )}
           {/* Which self-hosted server this runs on — links to the server page. */}
-          {deployTarget === "server" && (showProjectInfoSkeleton || projectData.serverName) && (
+          {(deployTarget === "server" || (projectData.workspaceId && projectData.serverId)) && (showProjectInfoSkeleton || projectData.serverName) && (
             <div className="flex flex-col gap-0.5 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
               <span className="text-[13px] text-muted-foreground">
                 {t.projects.overview.server}
@@ -276,9 +279,14 @@ export const OverviewTab = () => {
 
       {/* ── Monitoring (only with a domain — no domain ⇒ no traffic) ── */}
       {hasDomain && showAnalyticsError && (
-        <AnalyticsError error={analytics.error!} onRetry={() => invalidateProjectCaches(id)} />
+        <AnalyticsError
+          error={analytics.error!}
+          onRetry={() => retryProjectRequests(id)}
+          retrying={analytics.isRefreshing}
+          hasData={!!analyticsData}
+        />
       )}
-      {hasDomain && !showAnalyticsError && (
+      {hasDomain && (!showAnalyticsError || analyticsData) && (
         <>
       {/* Compact stats row */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
@@ -321,7 +329,7 @@ export const OverviewTab = () => {
         </>
       )}
 
-      {/* Connected Services bar */}
+      {/* The primary application and configured services share one entry point. */}
       <button
         onClick={() => {
           const projectId = projectData.id || id;
@@ -329,23 +337,24 @@ export const OverviewTab = () => {
           setActiveTab("services");
           window.history.replaceState({}, "", `/projects/${projectId}/services`);
         }}
-        className="w-full bg-card rounded-2xl border border-border/50 px-4 py-3 flex items-center justify-between hover:bg-accent/50 transition-colors group"
+        className="w-full bg-card rounded-2xl px-4 py-3 flex flex-wrap items-center justify-between gap-3 hover:bg-accent/50 transition-colors group"
       >
-        <div className="flex items-center gap-2.5">
+        <div className="flex min-w-0 flex-wrap items-center gap-2.5">
           <div className="w-7 h-7 rounded-lg bg-success-bg flex items-center justify-center">
             <UiIcon name="layers" className="size-3.5 text-success" />
           </div>
-          <span className="text-[13px] font-medium text-foreground">
-            {t.projects.overview.services}
+          <span className="text-sm font-medium text-foreground">
+            {t.projects.sidebar.tabs.services}
           </span>
-          {serviceCount > 0 && (
-            <span className="text-[11px] font-semibold text-muted-foreground bg-muted/60 px-1.5 py-0.5 rounded-md">
-              {serviceCount}
+          {applicationCount > 0 && (
+            <span className="text-xs font-medium text-muted-foreground bg-muted/60 px-1.5 py-0.5 rounded-md">
+              {applicationCount}
             </span>
           )}
-          {services.length > 0 && (
+          {applicationCount > 0 && (
             <div className="flex items-center gap-1 ms-1">
-              {services.slice(0, 4).map((svc) => (
+              {hasApplication && <div title={projectData.name} className="size-6 rounded-md bg-muted/50 flex items-center justify-center"><UiIcon name="window" className="size-3 text-muted-foreground" /></div>}
+              {services.slice(0, hasApplication ? 3 : 4).map((svc) => (
                 <div
                   key={svc.id}
                   title={svc.name}
@@ -354,21 +363,21 @@ export const OverviewTab = () => {
                   <ServiceIcon service={svc} className="size-3" />
                 </div>
               ))}
-              {services.length > 4 && (
-                <span className="text-[10px] text-muted-foreground/60 ms-0.5">
-                  +{services.length - 4}
+              {applicationCount > 4 && (
+                <span className="text-xs text-muted-foreground ms-0.5">
+                  +{applicationCount - 4}
                 </span>
               )}
             </div>
           )}
-          {serviceCount === 0 && (
+          {!servicesData.isLoading && applicationCount === 0 && (
             <span className="text-xs text-muted-foreground">
-              {t.projects.overview.noServicesConnected}
+              {servicesData.error ? t.projects.services.failedLoad : t.projects.overview.noServicesConnected}
             </span>
           )}
         </div>
         <div className="flex items-center gap-1.5 text-muted-foreground">
-          <span className="text-[12px]">{t.projects.overview.manage}</span>
+          <span className="text-xs">{t.projects.overview.manage}</span>
           <UiIcon name="chevron-right" className="size-3.5 group-hover:translate-x-0.5 transition-transform rtl:rotate-180" />
         </div>
       </button>

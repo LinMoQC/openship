@@ -16,6 +16,7 @@
  * created the orphan in the first place.
  */
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { repos } from "@repo/db";
 import {
   findUntrackedEdgeSites,
@@ -39,6 +40,31 @@ export interface EdgeOrphanScan {
   orphans: UntrackedEdgeSite[];
   /** Hostname count we compared against, for the "we did look" signal in the UI. */
   knownCount: number;
+}
+
+/**
+ * Resolve the edge owned by this Openship instance.
+ *
+ * A compose install deliberately keeps the API image small: it mounts the edge's
+ * sites tree and Docker socket, but does not ship the Docker CLI. The generic edge
+ * probe shells out to `docker`, so using it from inside that API container reports
+ * "no reverse proxy" even while `openship-edge` is serving production traffic.
+ *
+ * This service only ever inspects the local instance (its executor is created with
+ * no SSH target). `OPENSHIP_EDGE_MODE=docker` is therefore an authoritative compose
+ * topology signal, and the bind-mounted sites tree is the authoritative inventory.
+ * Remote-server callers must keep using `edgeProxy`, which probes their executor.
+ */
+async function localEdgeProxy() {
+  const { edgeProxy, edgeProxyFor, createExecutor } = await import("@repo/adapters");
+  const executor = createExecutor();
+  if (process.env.OPENSHIP_EDGE_MODE === "docker") {
+    return edgeProxyFor(executor, "openresty", {
+      ours: true,
+      container: process.env.OPENSHIP_EDGE_CONTAINER?.trim() || null,
+    });
+  }
+  return edgeProxy(executor);
 }
 
 /**
@@ -104,11 +130,11 @@ export async function scanEdgeOrphans(): Promise<EdgeOrphanScan> {
     knownCount: 0,
   });
 
-  let api: Awaited<ReturnType<typeof import("@repo/adapters").edgeProxy>>;
+  let api: Awaited<ReturnType<typeof localEdgeProxy>>;
   try {
-    const { edgeProxy, createExecutor } = await import("@repo/adapters");
-    api = await edgeProxy(createExecutor());
+    api = await localEdgeProxy();
   } catch (err) {
+    observeCaughtError(err, "platform/engine/lib/edge-orphans.service");
     return empty(`Could not read the edge: ${safeErrorMessage(err)}`);
   }
   if (!api) return empty("No reverse proxy detected on this machine.");
@@ -119,13 +145,13 @@ export async function scanEdgeOrphans(): Promise<EdgeOrphanScan> {
   }
 
   const comparison = await Promise.all([
-    api.listSites().catch(() => null), collectKnownHostnames(),
-  ]).catch(() => null);
+    api.listSites().catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/lib/edge-orphans.service"); return null; }), collectKnownHostnames(),
+  ]).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/lib/edge-orphans.service"); return null; });
   // A failed inventory is not an empty inventory: that would label tracked
   // sites as orphans and make a subsequent remove take down a live domain.
   if (!comparison) return empty("Tracked hostnames could not be read.");
   const [scan, knownHostnames] = comparison;
-  if (!scan) return empty("The edge's site list could not be read.");
+  if (!scan || scan.readable === false) return empty("The edge's site list could not be read.");
 
   return {
     scanned: true,
@@ -148,11 +174,10 @@ export async function untrackedSiteFor(hostname: string): Promise<UntrackedEdgeS
   const host = normalizeServedHostname(hostname);
   if (!host) return null;
   try {
-    const { edgeProxy, createExecutor } = await import("@repo/adapters");
-    const api = await edgeProxy(createExecutor());
+    const api = await localEdgeProxy();
     if (!api?.ours) return null;
 
-    const site = await api.siteFor(host).catch(() => null);
+    const site = await api.siteFor(host).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/lib/edge-orphans.service"); return null; });
     if (!site) return null;
 
     // Reuse the same rule the sweep uses, so the claim warning and the orphan
@@ -162,7 +187,8 @@ export async function untrackedSiteFor(hostname: string): Promise<UntrackedEdgeS
       knownHostnames: await collectKnownHostnames(),
     });
     return found ?? null;
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "platform/engine/lib/edge-orphans.service");
     return null; // advisory only — never fail a claim on this
   }
 }
@@ -200,6 +226,7 @@ export async function removeEdgeOrphan(
     await platform().routing.removeRoute(match.hostname);
     return { removed: true };
   } catch (err) {
+    observeCaughtError(err, "platform/engine/lib/edge-orphans.service");
     return { removed: false, reason: safeErrorMessage(err) };
   }
 }

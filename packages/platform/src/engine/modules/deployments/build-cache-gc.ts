@@ -8,8 +8,10 @@
  * the host that owns the selected project.
  */
 
+import { diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import {
   DockerRuntime,
+  DEFAULT_BUILD_CACHE_KEEP_BYTES,
   getPlatform,
   type BuildCachePruneOptions,
   type BuildCachePruneResult,
@@ -19,20 +21,22 @@ import { AppError, safeErrorMessage } from "@repo/core";
 import { createServerDockerRuntime } from "@repo/platform/engine/lib/deployment-runtime";
 import { withKeyedMutex } from "@repo/platform/engine/lib/provision-lock";
 import { resolveProjectDeployTarget } from "@repo/platform/engine/modules/projects/project-deploy-target";
+import { env } from "../../config/env";
 
-/** Keep a useful LRU cache while putting a hard ceiling on daily accumulation. */
-export const AUTOMATIC_BUILD_CACHE_KEEP_BYTES = 5 * 1024 ** 3;
+/** Retention target; active build records and application storage can exceed it. */
+export const AUTOMATIC_BUILD_CACHE_KEEP_BYTES = DEFAULT_BUILD_CACHE_KEEP_BYTES;
 
 export interface BuildCacheTarget {
   /** Stable physical-host identity used for de-duplication and locking. */
   key: string;
   serverId: string | null;
   organizationId: string | null;
+  workspaceId?: string;
 }
 
 type CacheProject = Pick<
   Project,
-  "id" | "organizationId" | "cloudWorkspaceId" | "serverId" | "activeDeploymentId"
+  "id" | "organizationId" | "workspaceId" | "serverId" | "activeDeploymentId"
 > & { clusterId?: string | null };
 
 interface BuildCacheRuntime {
@@ -42,6 +46,7 @@ interface BuildCacheRuntime {
 
 export interface BuildCacheGcDependencies {
   listServers(): Promise<Server[]>;
+  listManagedTargets?(): Promise<BuildCacheTarget[]>;
   hasLocalDockerRuntime(): boolean;
   findServer(
     serverId: string,
@@ -56,8 +61,17 @@ export interface BuildCacheGcDependencies {
 }
 
 const defaultDependencies: BuildCacheGcDependencies = {
-  listServers: () => repos.server.list(),
-  hasLocalDockerRuntime: () => getPlatform().runtime.name === "docker",
+  listServers: async () => (await repos.server.list()).filter(server => !server.workspaceId && server.purpose !== "migration_source" && (!env.CLOUD_MODE || !server.isLocal)),
+  listManagedTargets: async () => {
+    if (!env.CLOUD_MODE) return [];
+    const targets = new Map<string, BuildCacheTarget>();
+    for (const workspace of await repos.cloudWorkspace.listBuildCacheHosts()) {
+      targets.set(workspace.id, { key: `cloud:${workspace.id}`, serverId: null,
+        organizationId: workspace.organizationId, workspaceId: workspace.id });
+    }
+    return [...targets.values()];
+  },
+  hasLocalDockerRuntime: () => !env.CLOUD_MODE && getPlatform().target !== "cloud" && getPlatform().runtime.name === "docker",
   findServer: (serverId, organizationId) =>
     repos.server.getInOrganization(serverId, organizationId),
   resolveProjectTarget: (project) => resolveProjectDeployTarget(project),
@@ -68,6 +82,10 @@ const defaultDependencies: BuildCacheGcDependencies = {
     return runtime.plan.hosts.find(host => host.role === "server")!.serverId;
   },
   createRuntime: async (target) => {
+    if (target.workspaceId && target.organizationId) {
+      const { openCloudWorkspaceDockerRuntime } = await import("../../lib/cloud-workspace-host");
+      return openCloudWorkspaceDockerRuntime(target.organizationId, target.workspaceId);
+    }
     if (target.serverId) {
       if (!target.organizationId) {
         throw new Error(`Docker server ${target.serverId} has no owning organization`);
@@ -150,7 +168,7 @@ export async function clearProjectBuildCache(
   deps: BuildCacheGcDependencies = defaultDependencies,
 ): Promise<BuildCachePruneResult & { target: "local" | "server"; serverId: string | null }> {
   const resolved = await deps.resolveProjectTarget(project);
-  if (resolved.deployTarget === "cloud" || project.cloudWorkspaceId) {
+  if (resolved.deployTarget === "cloud" || project.workspaceId) {
     throw new AppError(
       "Cloud build cache is managed by the cloud runtime and cannot be cleared from this host.",
       409,
@@ -215,10 +233,11 @@ export async function runBuildCacheGcSweep(
 
   let targets: BuildCacheTarget[];
   try {
-    targets = collectBuildCacheTargets(await deps.listServers(), deps.hasLocalDockerRuntime());
+    targets = [...collectBuildCacheTargets(await deps.listServers(), deps.hasLocalDockerRuntime()),
+      ...(await deps.listManagedTargets?.() ?? [])];
   } catch (err) {
     summary.errors += 1;
-    console.error(`[build-cache-gc] target discovery failed: ${safeErrorMessage(err)}`);
+    errorDiagnostics.error("platform/engine/modules/deployments/build-cache-gc", `[build-cache-gc] target discovery failed: ${safeErrorMessage(err)}`, err);
     return summary;
   }
 
@@ -240,7 +259,7 @@ export async function runBuildCacheGcSweep(
       }
     } catch (err) {
       summary.errors += 1;
-      console.error(`[build-cache-gc] ${target.key} sweep failed: ${safeErrorMessage(err)}`);
+      errorDiagnostics.error("platform/engine/modules/deployments/build-cache-gc", `[build-cache-gc] ${target.key} sweep failed: ${safeErrorMessage(err)}`, err);
     }
   }
   return summary;

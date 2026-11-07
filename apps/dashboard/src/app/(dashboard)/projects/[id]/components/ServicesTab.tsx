@@ -1,5 +1,8 @@
 "use client";
 
+import { serviceRepositorySource } from "./services/repository-source";
+
+import { observedAllSettled, reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { Icon as UiIcon } from "@repo/ui/icons";
 
 import React, { useEffect, useState, useCallback, useMemo, useRef } from "react";
@@ -9,6 +12,7 @@ import { usePlatform } from "@/context/PlatformContext";
 import { serviceKind, serviceCanStartWithoutBuild, servicesApi, sortServicesByPublicFirst, type Service, type ServiceContainer, type ServiceInput } from "@/lib/api/services";
 import { getServiceStatus } from "@/components/services/ServiceStatusBadge";
 import { Button } from "@/components/ui/button";
+import { ConnectionNotice } from "@/components/shared/ConnectionNotice";
 import { getApiErrorMessage, isAbortError } from "@/lib/api/client";
 import { useToast } from "@/context/ToastContext";
 import { serviceDisplayUrl } from "@/utils/route-display";
@@ -16,10 +20,14 @@ import { useRouter } from "next/navigation";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 
 import { ServiceDetailPanel } from "./services/ServiceDetailPanel";
+import { useCloudDeployPricing } from "@/hooks/useCloudDeployPricing";
 import { AddServiceModal } from "./services/AddServiceModal";
 import { LinkedAppsCard } from "./services/LinkedAppsCard";
 import { ServiceListItem } from "./services/ServiceListItem";
-import { ResourceSettings } from "./ResourceSettings";
+import { hasSeparateApplication } from "@/lib/project-application";
+import { RuntimeRoleConfigurationControl } from "@/components/services/RuntimeRoleConfiguration";
+import { RuntimeRolesCard } from "@/components/services/RuntimeRoles";
+import { ProjectApplicationCard } from "./services/ProjectApplicationCard";
 
 /** Render a drift diff value (arrays → csv, objects → keys, scalars → string). */
 const fmtDriftVal = (v: unknown): string => {
@@ -40,6 +48,7 @@ export const ServicesTab = () => {
   const { showToast } = useToast();
   const { t } = useI18n();
   const router = useRouter();
+  const showCloudPricing = useCloudDeployPricing(projectData.workspaceId);
 
   const [runtime, setRuntime] = useState<{
     projectId: string;
@@ -89,10 +98,10 @@ export const ServicesTab = () => {
       // surfaces as a bare runtime error overlay instead of this component's
       // error state. The container read is also the one that can time out
       // (it reflects live runtime state), so it must not take the tab down.
-      const [, containersResult] = await Promise.allSettled([
+      const [, containersResult] = await observedAllSettled([
         refreshServices(),
         servicesApi.containers(id),
-      ]);
+      ], "dashboard/app/(dashboard)/projects/[id]/components/ServicesTab");
       if (request !== runtimeRequest.current) return;
       if (containersResult.status === "rejected") throw containersResult.reason;
       const ctRes = containersResult.value;
@@ -104,15 +113,20 @@ export const ServicesTab = () => {
         error: null,
       });
     } catch (e) {
+      observeCaughtError(e, "dashboard/app/(dashboard)/projects/[id]/components/ServicesTab");
       if (request !== runtimeRequest.current) return;
       // An aborted request's message is "signal is aborted without reason" —
       // useless to a user, so fall back to the generic copy for it.
-      setRuntime({
+      setRuntime((previous) => ({
         projectId: id,
-        containers: null,
+        // Keep identity/port details, but never present a stale health reading
+        // as current after a failed request.
+        containers: previous.projectId === id
+          ? previous.containers?.map((container) => ({ ...container, status: "unknown" })) ?? null
+          : null,
         loading: false,
         error: !isAbortError(e) && e instanceof Error ? e.message : t.projects.services.failedLoad,
-      });
+      }));
     }
   }, [hasProjectId, id, refreshServices, t.projects.services.failedLoad]);
 
@@ -144,7 +158,10 @@ export const ServicesTab = () => {
   const handleCreateService = async (data: ServiceInput) => {
     if (!hasProjectId) return;
 
-    const result = await servicesApi.create(id, data);
+    const result = await servicesApi.create(id, data).catch(error => {
+      showCloudPricing(error);
+      throw error;
+    });
     if (!result.success) {
       throw new Error(t.projects.services.failedCreateService);
     }
@@ -169,9 +186,8 @@ export const ServicesTab = () => {
       return;
     }
 
-    // Start just this service. Cloud Compose reuses its project workspace;
-    // native Cloud services get independent workspaces. Keep the saved service
-    // on failure: a lost response may mean the provider already started it.
+    // Start this service on the project's selected server. Keep its saved
+    // configuration on failure so the user can inspect and retry the operation.
     showToast(interpolate(t.projects.services.toastAddedDeploying, { name: data.name }), "success", t.projects.services.toastServiceTitle);
     const showStartFailure = async (message: string) => {
       await fetchData();
@@ -190,6 +206,12 @@ export const ServicesTab = () => {
         router.push(`/projects/${id}/services/${newServiceId}`);
       })
       .catch(async (err) => {
+        if (showCloudPricing(err, async () => {
+          const result = await servicesApi.start(id, newServiceId);
+          if (result?.success === false) throw new Error(t.projects.services.toastDeployFailed);
+          await fetchData();
+          router.push(`/projects/${id}/services/${newServiceId}`);
+        })) { await fetchData(); return; }
         await showStartFailure(getApiErrorMessage(err, t.projects.services.toastDeployFailed));
       });
   };
@@ -213,6 +235,7 @@ export const ServicesTab = () => {
         );
         await fetchData();
       } catch (e) {
+        observeCaughtError(e, "dashboard/app/(dashboard)/projects/[id]/components/ServicesTab");
         showToast(e instanceof Error ? e.message : t.projects.services.failedResolveDrift, "error", name);
       } finally {
         setDriftBusy(null);
@@ -222,6 +245,7 @@ export const ServicesTab = () => {
   );
 
   const driftedServices = services.filter((s) => s.drift && s.drift.changes.length > 0);
+  const hasApplication = !servicesData.error && hasSeparateApplication(projectData, services);
 
   /* ── Loading state ─────────────────────────────────────────────── */
   if (loading) {
@@ -274,12 +298,13 @@ export const ServicesTab = () => {
   if (services.length === 0) {
     return (
       <div className="space-y-5">
-        <div className="bg-card rounded-2xl border border-border/50 px-6 pb-10 text-center">
+        {hasApplication && <ProjectApplicationCard />}
+        <div className={`bg-card rounded-2xl text-center ${hasApplication ? "p-5" : "px-6 pb-10"}`}>
           {/* SVG illustration - central app card linked to three service
               nodes (database, cache, queue). Uses the same `th-*` token
               palette as the deployments empty state so the visual language
               stays consistent across the app. */}
-          <div className="relative mx-auto w-72 h-44">
+          {!hasApplication && <div className="relative mx-auto w-72 h-44">
             <svg className="absolute inset-0 w-full h-full" viewBox="0 0 288 180" fill="none">
               {/* Decorative dots scattered behind */}
               <circle cx="22" cy="46" r="4" fill="var(--th-on-10)" />
@@ -362,10 +387,10 @@ export const ServicesTab = () => {
                 <rect x="12" y="12.5" width="14" height="2.5" rx="1.25" fill="var(--th-on-08)" />
               </g>
             </svg>
-          </div>
+          </div>}
 
           <h3 className="text-lg font-medium text-foreground/80 mb-2">
-            {t.projects.services.emptyTitle}
+            {hasApplication ? t.projects.services.companionsTitle : t.projects.services.emptyTitle}
           </h3>
           <p className="text-sm text-muted-foreground max-w-sm mx-auto mb-8 leading-relaxed">
             {t.projects.services.emptyDescription}
@@ -395,6 +420,7 @@ export const ServicesTab = () => {
         <AddServiceModal
           projectId={id}
           open={createOpen}
+          repository={serviceRepositorySource(projectData)}
           projectName={projectSlugBase}
           isCloudProject={projectData?.deployTarget === "cloud"}
           onClose={() => setCreateOpen(false)}
@@ -404,29 +430,32 @@ export const ServicesTab = () => {
     );
   }
 
-  const errorNotice = failure && (
-    <div className="flex items-center gap-2 rounded-xl border border-danger/30 bg-danger/[0.06] px-3 py-2 text-xs text-danger">
-      <UiIcon name="alert-circle" className="size-3.5 shrink-0" />
-      <span className="min-w-0 flex-1">{failure}</span>
-      <button onClick={fetchData} className="font-medium underline underline-offset-2">
-        {t.projects.services.retry}
-      </button>
-    </div>
+  const statusUnavailable = services.some((service) => getServiceStatus(service, containerFor(service.id), containersLoading) === "unknown");
+  const errorNotice = (failure || statusUnavailable) && (
+    <ConnectionNotice
+      title={t.projectDetail.services.connection.statusTitle}
+      message={t.projectDetail.services.connection.statusHint}
+      detail={failure || undefined}
+      onRetry={fetchData}
+      retrying={containersLoading}
+    />
   );
 
   /* ── Service list + detail panel ───────────────────────────────── */
   if (selectedService) {
     return (
       <div className="space-y-4">
-        {errorNotice}
+        {servicesData.error && errorNotice}
         <ServiceDetailPanel
-          // Key by service id so switching services (via the header switcher)
+          // Key by project/service so switching services (via the header switcher)
           // remounts on the tab carried in the URL, with per-service state fresh.
-          key={selectedService.id}
+          key={`${id}:${selectedService.id}`}
           service={selectedService}
           container={containerFor(selectedService.id)}
           containerChecking={containersLoading}
+          containerError={error}
           projectId={id}
+          workspaceId={projectData.workspaceId}
           projectSlugBase={projectSlugBase}
           initialTab={slug?.[2]}
           onRefresh={fetchData}
@@ -444,6 +473,7 @@ export const ServicesTab = () => {
 
   return (
     <div className="space-y-5">
+      {hasApplication && <ProjectApplicationCard />}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 className="text-sm font-medium text-foreground">
           {interpolate(
@@ -451,7 +481,11 @@ export const ServicesTab = () => {
             { count: String(services.length) },
           )}
         </h2>
-        <div className="flex items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-1.5">
+          {!hasApplication && projectData.activeDeploymentId && projectData.runtimeMode === "docker" &&
+            projectData.deployTarget !== "cloud" && !projectData.clusterId && (
+            <RuntimeRoleConfigurationControl projectId={id} deploymentId={projectData.activeDeploymentId} />
+          )}
           <Button asChild variant="ghost" size="sm">
             <Link href={`/projects/${id}/topology`}>
               <UiIcon name="network" />
@@ -476,6 +510,8 @@ export const ServicesTab = () => {
           </Button>
         </div>
       </div>
+
+      {!hasApplication && <RuntimeRolesCard projectId={id} deploymentId={projectData.activeDeploymentId} />}
 
       {/* Upstream compose drift — edited services whose repo values changed */}
       {driftedServices.length > 0 && (
@@ -562,16 +598,10 @@ export const ServicesTab = () => {
           start/stop), but part of what it runs against. */}
       <LinkedAppsCard projectId={id} />
 
-      {/* Project-wide cpu/memory caps. This lives here (not only in the Runtime
-          tab) because the Runtime tab is HIDDEN for a service-first project —
-          which is exactly the shape that had no way to change the limits its
-          containers ran with. A service can still override per-service via its
-          compose `mem_limit`. */}
-      <ResourceSettings />
-
       <AddServiceModal
         projectId={id}
         open={createOpen}
+        repository={serviceRepositorySource(projectData)}
         projectName={projectSlugBase}
         isCloudProject={projectData?.deployTarget === "cloud"}
         onClose={() => setCreateOpen(false)}

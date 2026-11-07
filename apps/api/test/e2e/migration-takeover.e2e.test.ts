@@ -10,12 +10,12 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { connect, createServer, type AddressInfo } from "node:net";
 import { repos } from "@repo/db";
 import type { ExecutionContext } from "@repo/platform";
 import { initPlatform, type CommandExecutor } from "@repo/adapters";
 import { describeDockerE2E, requireDocker } from "../helpers/docker-e2e";
 import { seedOrg } from "../helpers/seed";
+import { availablePort, sshReady } from "../helpers/migration-host";
 import { sshManager } from "@repo/platform/engine/lib/ssh-manager";
 import { discoverServerStack } from "@repo/platform/engine/modules/migration/docker-inspect.service";
 import {
@@ -35,20 +35,9 @@ const names = [
   "www.migration.test",
   "api.migration.test",
   "outside.migration.test",
+  "paths.migration.test",
 ];
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
-/** Pick on the test runner: a VM's ephemeral port may already be occupied here. */
-function availablePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = createServer();
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const port = (server.address() as AddressInfo).port;
-      server.close((error) => (error ? reject(error) : resolve(port)));
-    });
-  });
-}
 
 async function waitFor<T>(
   read: () => Promise<T | null | undefined>,
@@ -61,21 +50,6 @@ async function waitFor<T>(
     await delay(300);
   }
   throw new Error("Timed out waiting for the migration target");
-}
-
-/** A VM may publish Docker's port before its host forward carries SSH traffic. */
-function sshReady(port: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    const socket = connect({ host: "127.0.0.1", port });
-    const finish = (ready: boolean) => {
-      socket.destroy();
-      resolve(ready);
-    };
-    socket.setTimeout(1_000, () => finish(false));
-    socket.once("error", () => finish(false));
-    socket.once("end", () => finish(false));
-    socket.once("data", (data) => finish(data.toString().startsWith("SSH-")));
-  });
 }
 
 describeDockerE2E("Compose migration through a remote SSH server", () => {
@@ -137,7 +111,7 @@ describeDockerE2E("Compose migration through a remote SSH server", () => {
       "/opt/migration-fixture/tls.yml",
       "tls:\n  certificates:\n    - certFile: /certs/cert.pem\n      keyFile: /certs/key.pem\n",
     );
-    const app = (name: string, rule: string, hostname: string) => ({
+    const app = (name: string, rule: string, hostname: string, extraRouters: Record<string, string> = {}) => ({
       image: "traefik/whoami:v1.11.0",
       hostname,
       command: ["--port=3000"],
@@ -151,6 +125,7 @@ describeDockerE2E("Compose migration through a remote SSH server", () => {
         [`traefik.http.routers.${name}.rule`]: rule,
         [`traefik.http.routers.${name}.tls`]: "true",
         [`traefik.http.routers.${name}.service`]: name,
+        ...extraRouters,
       },
       networks: ["source"],
     });
@@ -182,6 +157,11 @@ describeDockerE2E("Compose migration through a remote SSH server", () => {
           "api",
           "Host(`api.migration.test`) || (Host(`shop.migration.test`) && PathPrefix(`/api`))",
           "original-backend",
+          {
+            "traefik.http.routers.api-paths.rule": "Host(`paths.migration.test`) && (PathPrefix(`/v3/`) || Path(`/mcp`))",
+            "traefik.http.routers.api-paths.tls": "true",
+            "traefik.http.routers.api-paths.service": "api",
+          },
         ),
         outside: app("outside", "Host(`outside.migration.test`)", "unselected-outside"),
       },
@@ -218,6 +198,8 @@ describeDockerE2E("Compose migration through a remote SSH server", () => {
       expect.arrayContaining([
         expect.objectContaining({ containerPort: 3000, path: "/api", domains: [names[0]] }),
         expect.objectContaining({ containerPort: 3000, path: "/", domains: [names[2]] }),
+        expect.objectContaining({ containerPort: 3000, path: "/v3/", domains: [names[4]] }),
+        expect.objectContaining({ containerPort: 3000, path: "/mcp", exact: true, domains: [names[4]] }),
       ]),
     );
     input = {
@@ -277,6 +259,25 @@ describeDockerE2E("Compose migration through a remote SSH server", () => {
       return run && ["succeeded", "rolled_back", "failed"].includes(run.status) ? run : null;
     }, 300_000);
   }
+
+  it("reviews an omitted catch-all before creating a project or changing source containers", async () => {
+    const { migrationId } = await migrationOrchestrator.begin(ctx, {
+      ...input,
+      routesByServiceName: Object.fromEntries(Object.entries(input.routesByServiceName!).map(([id, routes]) =>
+        [id, (Array.isArray(routes) ? routes : [routes]).filter(route => route.customDomain !== names[0] || route.targetPath !== "/")],
+      )),
+    });
+    const prompt = await pending(migrationId);
+    expect(prompt.details?.hostnames).toEqual([names[0]]);
+    expect((await repos.dockerMigrationRun.findById(migrationId))?.projectId).toBeNull();
+    expect(await migrationOrchestrator.respondToPrompt(migrationId, ctx.organizationId, prompt.promptId, "cancel")).toBe(true);
+    const result = await finished(migrationId);
+    expect(result.status).toBe("rolled_back");
+    expect(result.projectId).toBeNull();
+    expect(await ask(names[0])).toContain("original-frontend");
+    for (const id of input.serviceContainerIds!)
+      expect(await executor.exec(`docker inspect --format '{{.State.Running}}' ${id}`)).toContain("true");
+  });
 
   it("cancels takeover without deleting the original routes or any source container", async () => {
     const { migrationId } = await migrationOrchestrator.begin(ctx, input);
@@ -338,12 +339,12 @@ describeDockerE2E("Compose migration through a remote SSH server", () => {
       (await revealServiceEnvVars(ctx, result.projectId!, backend.id, "production")).API_TOKEN,
     ).toBe(SECRET);
     const domains = await repos.domain.listByProject(result.projectId!);
-    expect(domains.map((domain) => domain.hostname).sort()).toEqual(names.slice(0, 3).sort());
+    expect(domains.map((domain) => domain.hostname).sort()).toEqual([...names.slice(0, 3), names[4]].sort());
     for (const domain of domains)
       expect(domain).toMatchObject({
         verified: true,
         sslStatus: "active",
-        serviceId: domain.hostname === names[2] ? backend.id : frontend.id,
+        serviceId: domain.hostname === names[4] ? null : domain.hostname === names[2] ? backend.id : frontend.id,
       });
     for (const id of input.serviceContainerIds!)
       expect(await executor.exec(`docker inspect --format '{{.State.Running}}' ${id}`)).toContain(
@@ -354,8 +355,13 @@ describeDockerE2E("Compose migration through a remote SSH server", () => {
     expect(await ask(names[0], "/api/orders")).toContain("original-backend");
     expect(await ask(names[2])).toContain("original-backend");
     expect(await ask(names[3])).toContain("unselected-outside");
+    expect(await ask(names[4], "/v3/items")).toContain("original-backend");
+    expect(await ask(names[4], "/mcp")).toContain("original-backend");
+    for (const path of ["/", "/private", "/mcp/child"])
+      expect(await executor.exec(`curl --silent --insecure --output /dev/null --write-out '%{http_code}' --resolve ${names[4]}:443:127.0.0.1 https://${names[4]}${path}`)).toBe("404");
     expect(await applyProjectEdgeRoutes(ctx, result.projectId!, { onLog: () => {} })).toEqual([]);
     expect(await ask(names[0], "/api/orders")).toContain("original-backend");
+    expect(await ask(names[4], "/v3/items")).toContain("original-backend");
     await removeDomain(ctx, domains.find((domain) => domain.hostname === names[0])!.id);
     expect(await applyProjectEdgeRoutes(ctx, result.projectId!, { onLog: () => {} })).toEqual([]);
     expect(await ask(names[0])).not.toContain("original-frontend");

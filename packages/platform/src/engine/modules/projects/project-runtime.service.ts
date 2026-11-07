@@ -1,14 +1,19 @@
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
+import { isArtifactRef } from "../../lib/container-ref";
 /**
  * Project runtime service - logs, enable/disable (start/stop).
  */
 
 import { findActiveDeployment } from "@repo/platform/engine/lib/active-deployment";
+import type { ProjectRuntimeLogsInput } from "@repo/contracts";
+import { roleLogContainerId } from "./project-roles";
 import { repos } from "@repo/db";
 import { AppError, NotFoundError, ValidationError, safeErrorMessage } from "@repo/core";
-import { checkEdge, edgeProxy, PAGE_CONTAINER_PREFIX } from "@repo/adapters";
+import { checkEdge, edgeProxy } from "@repo/adapters";
 import type { LogEntry, ImportedSite, RuntimeAdapter } from "@repo/adapters";
 import {
   deploymentContainerIds,
+  resolveDeploymentStaticRoot,
   resolveDeploymentRuntimeForRead,
   withDeploymentPlatform,
   withDeploymentRuntime,
@@ -28,39 +33,15 @@ import { livePrimaryContainerId } from "../services/service-container";
 import { assertCloudRuntimeLimits, assertCloudServiceAllowance } from "../../lib/plan-guard";
 import { env } from "../../config/env";
 import { createProvisionLock } from "../../lib/provision-lock";
+import { resolveProjectLiveDeployTarget } from "./project-deploy-target";
 
 // ─── Runtime logs ────────────────────────────────────────────────────────────
 
-export async function getRuntimeLogs(projectId: string, organizationId: string, tail?: number) {
-  const p = await repos.project.findById(projectId);
-  assertResourceInOrg(p, "Project", organizationId, projectId);
-
-  if (!p.activeDeploymentId) {
-    throw new NotFoundError("No active deployment for project", projectId);
-  }
-
-  const dep = await findActiveDeployment(p);
-  if (!dep) {
-    throw new NotFoundError("No running container for project", projectId);
-  }
-
-  // Resolved live inside the runtime, not read off `dep.containerId`: on a
-  // multi-service project that column names one service, and in dependency order
-  // that was the database (#498) — so "the project's logs" were postgres's.
-  return withDeploymentRuntime(dep, async (runtime) => {
-    const containerId = await livePrimaryContainerId(runtime, dep);
-    if (!containerId) {
-      throw new NotFoundError("No running container for project", projectId);
-    }
-    return runtime.getRuntimeLogs(containerId, tail);
-  });
-}
-
-export async function streamRuntimeLogs(
+export async function getRuntimeLogs(
   projectId: string,
   organizationId: string,
-  onLog: (entry: LogEntry) => void,
-  opts?: { tail?: number },
+  tail?: number,
+  input?: ProjectRuntimeLogsInput,
 ) {
   const p = await repos.project.findById(projectId);
   assertResourceInOrg(p, "Project", organizationId, projectId);
@@ -74,17 +55,57 @@ export async function streamRuntimeLogs(
     throw new NotFoundError("No running container for project", projectId);
   }
 
+  const roleContainerId = roleLogContainerId(dep, input);
+  // Resolved live inside the runtime, not read off `dep.containerId`: on a
+  // multi-service project that column names one service, and in dependency order
+  // that was the database (#498) — so "the project's logs" were postgres's.
+  return withDeploymentRuntime(dep, async (runtime) => {
+    const containerId = roleContainerId ?? (await livePrimaryContainerId(runtime, dep));
+    if (!containerId) {
+      throw new NotFoundError("No running container for project", projectId);
+    }
+    return runtime.getRuntimeLogs(containerId, tail);
+  });
+}
+
+export async function streamRuntimeLogs(
+  projectId: string,
+  organizationId: string,
+  onLog: (entry: LogEntry) => void,
+  opts?: ProjectRuntimeLogsInput,
+) {
+  const p = await repos.project.findById(projectId);
+  assertResourceInOrg(p, "Project", organizationId, projectId);
+
+  if (!p.activeDeploymentId) {
+    throw new NotFoundError("No active deployment for project", projectId);
+  }
+
+  const dep = await findActiveDeployment(p);
+  if (!dep) {
+    throw new NotFoundError("No running container for project", projectId);
+  }
+
+  const roleContainerId = roleLogContainerId(dep, opts);
   // NOT withDeploymentRuntime: the transport has to outlive this call, so the
   // runtime is disposed in the stream's cleanup instead — same shape as
   // streamServiceRuntimeLogs. Disposing here would kill the live stream.
   const { runtime, serverId } = await resolveDeploymentRuntimeForRead(dep);
-  const containerId = await livePrimaryContainerId(runtime, dep).catch(() => null);
+  const containerId =
+    roleContainerId ??
+    (await livePrimaryContainerId(runtime, dep).catch((diagnosticFailure) => {
+      observeCaughtError(
+        diagnosticFailure,
+        "platform/engine/modules/projects/project-runtime.service",
+      );
+      return null;
+    }));
   if (!containerId) {
     disposeRuntime(runtime);
     throw new NotFoundError("No running container for project", projectId);
   }
   try {
-    const stop = await runtime.streamRuntimeLogs(containerId, onLog, opts);
+    const stop = await runtime.streamRuntimeLogs(containerId, onLog, { tail: opts?.tail });
     let closed = false;
     const cleanup = () => {
       if (closed) return;
@@ -107,32 +128,9 @@ export async function streamRuntimeLogs(
 type ProjectRow = NonNullable<Awaited<ReturnType<typeof repos.project.findById>>>;
 type DeploymentRow = NonNullable<Awaited<ReturnType<typeof repos.deployment.findById>>>;
 
-/**
- * A project the EDGE serves rather than a container runtime — a self-hosted
- * static site.
- *
- * `!hasServer` + non-cloud is the signal the deploy pipeline itself branches on
- * (`resolveDeployRouting` → deployMode "static-file-serve"), and it is why
- * pause/resume could never work through the runtime here: such a deployment's
- * `containerId` is a release DIRECTORY on the host (see
- * `resolveDeploymentStaticRoot`), so `runtime.stop()` dials
- * `/containers//opt/openship/static/releases/<id>/stop` and the daemon answers 301
- * to the doubled slash — measured, not assumed, and it is neither `isAbsent` nor
- * `isAlreadyInState`, so both actions died on "(HTTP code 301) unexpected".
- *
- * Cloud statics are excluded because they already pause correctly one level up:
- * their containerId is a `page:` handle and CloudRuntime maps stop/start onto
- * pages.disable/enable — the same edge-level pause the branches below perform
- * against our own edge.
- */
-function isEdgeServedStatic(
-  project: Pick<ProjectRow, "hasServer" | "workloadType" | "cloudWorkspaceId">,
-): boolean {
-  // Only a STATIC workload is served by the edge as files. A worker shares
-  // `hasServer=false` but is a real container with its own runtime lifecycle, so
-  // route through the workload axis — not the legacy boolean — or a worker's
-  // pause/resume would be (mis)handled as edge-route removal (#538-B).
-  return deploymentWorkload(project) === "static" && !project.cloudWorkspaceId;
+/** Static files have no process to stop, whether served by the host or provider edge. */
+function isEdgeServedStatic(project: ProjectRow, deployment: DeploymentRow): boolean {
+  return resolveDeploymentStaticRoot(deployment, project) !== null;
 }
 
 /**
@@ -157,7 +155,8 @@ async function stopEdgeServing(project: Pick<ProjectRow, "id">, dep: DeploymentR
   if (hostnames.length === 0) return;
   await withDeploymentPlatform(dep, async ({ routing }) => {
     for (const hostname of hostnames) {
-      await routing.removeRoute(hostname);
+      if (routing.suspendRoute) await routing.suspendRoute(hostname);
+      else await routing.removeRoute(hostname);
     }
   });
 }
@@ -191,7 +190,7 @@ async function enableLiveProject(p: ProjectRow, organizationId: string) {
     throw new ValidationError("No container found for active deployment");
   }
 
-  if (isEdgeServedStatic(p)) {
+  if (isEdgeServedStatic(p, dep)) {
     // Deliberately `retryProjectRouting` rather than a second routing path: it is
     // already the action that re-applies a project's LIVE routes (a static
     // domain's doc root included), reconciles the managed *.opsh.io edge, and then
@@ -216,7 +215,7 @@ async function enableLiveProject(p: ProjectRow, organizationId: string) {
     throw new ValidationError("No container found for active deployment");
   }
 
-  const computeIds = containerIds.filter(id => !id.startsWith(PAGE_CONTAINER_PREFIX));
+  const computeIds = containerIds.filter(id => !isArtifactRef(id));
   const serviceRows = env.CLOUD_MODE ? await repos.service.listByDeployment(dep.id) : [];
   if (env.CLOUD_MODE) {
     const services = await repos.service.listByProject(projectId);
@@ -230,13 +229,13 @@ async function enableLiveProject(p: ProjectRow, organizationId: string) {
     await assertCloudServiceAllowance(organizationId, {
       projectId,
       services: resumedServices.length ? resumedServices : undefined, runsApplication,
-      nativeApplication: runsApplication && (resumedServices.length === 0 || snapshot.cloudApplicationSlot === true || snapshot.serviceDeploymentMode === "single"),
+      mainApplication: runsApplication && (resumedServices.length === 0 || snapshot.cloudApplicationSlot === true || snapshot.serviceDeploymentMode === "single"),
     });
   }
   await withDeploymentRuntime(dep, async (runtime) => {
     await assertCloudRuntimeLimits(organizationId, runtime, computeIds.map(containerId => ({
       containerId, allocatedResources: serviceRows.find(row => row.containerId === containerId)?.allocatedResources,
-    })));
+    })), p.workspaceId ?? null, p.serverId);
     for (const containerId of containerIds) {
       await startOne(runtime, containerId);
     }
@@ -290,7 +289,7 @@ async function disableLiveProject(p: ProjectRow) {
   // EVERY container, not just `dep.containerId`: on a compose project that column
   // names one service (or nothing), so pausing used to leave the rest running
   // while the project reported itself disabled.
-  const edgeServed = isEdgeServedStatic(p);
+  const edgeServed = isEdgeServedStatic(p, dep);
   const containerIds = edgeServed ? [] : await deploymentContainerIds(dep);
   if (!edgeServed && containerIds.length === 0) {
     return { success: true, message: "No container to stop" };
@@ -316,7 +315,9 @@ async function disableLiveProject(p: ProjectRow) {
     // (and the health watch went quiet on it) while every container kept
     // serving, and `enableProject` refuses to clear the flag until a start
     // succeeds — so an unreachable box made the state permanent.
-    await repos.project.update(projectId, { disabledAt: previous }).catch(() => {});
+    await repos.project.update(projectId, { disabledAt: previous }).catch((diagnosticFailure) => {
+      observeCaughtError(diagnosticFailure, "platform/engine/modules/projects/project-runtime.service");
+    });
     throw err;
   }
   return { success: true, message: "Project disabled" };
@@ -430,15 +431,22 @@ async function retryLiveProjectRouting(
   };
 
   // Cloud manages its own ingress — there is no server edge to repair here.
-  if (p.cloudWorkspaceId) {
-    if (!(dep?.meta as { cloudDockerWorkspace?: unknown } | null)?.cloudDockerWorkspace)
-      return finish();
+  if ((await resolveProjectLiveDeployTarget(p, dep)).deployTarget === "cloud") {
     const warnings: string[] = [];
+    const onWarning = (message: string) => {
+      if (!warnings.includes(message)) warnings.push(message);
+      log(message);
+    };
     log("Applying cloud routes…");
+    await reapplyProjectLiveRoutes(p, [], {
+      onLog: options.onLog,
+      onWarning,
+      managedEdgeSyncedByCaller: true,
+    }).catch((error) => { observeCaughtError(error, "platform/engine/modules/projects/project-runtime.service"); return onWarning(safeErrorMessage(error)); });
     await applyProjectRouting(projectId, {
       onLog: options.onLog,
-      onWarning: (message) => warnings.push(message),
-    });
+      onWarning,
+    }).catch((error) => { observeCaughtError(error, "platform/engine/modules/projects/project-runtime.service"); return onWarning(safeErrorMessage(error)); });
     if (warnings.length) {
       const warning = warnings.join("\n");
       await markRoutingWarning(dep, warning);
@@ -461,11 +469,15 @@ async function retryLiveProjectRouting(
     const fresh = p.activeDeploymentId
       ? await findActiveDeployment(p)
       : null;
-    await markRoutingWarning(fresh, edgeRecoveryWarning).catch(() => {});
+    await markRoutingWarning(fresh, edgeRecoveryWarning).catch((diagnosticFailure) => {
+      observeCaughtError(diagnosticFailure, "platform/engine/modules/projects/project-runtime.service");
+    });
     return { ok: false, warning: edgeRecoveryWarning };
   }
 
-  await restoreCustomPortsFromEdge(p, serverId).catch(() => {});
+  await restoreCustomPortsFromEdge(p, serverId).catch((diagnosticFailure) => {
+    observeCaughtError(diagnosticFailure, "platform/engine/modules/projects/project-runtime.service");
+  });
 
   // Live re-apply is best-effort, but its failure must NOT clear the warning.
   let applyOk = true;
@@ -488,13 +500,14 @@ async function retryLiveProjectRouting(
     managedEdgeSyncedByCaller: true,
     onWarning,
   }).catch((error) => {
+    observeCaughtError(error, "platform/engine/modules/projects/project-runtime.service");
     applyOk = false;
     routeWarnings.push(safeErrorMessage(error));
   });
   await applyProjectRouting(projectId, {
     onWarning,
     ...(options.onLog ? { onLog: options.onLog } : {}),
-  }).catch((error) => onWarning(safeErrorMessage(error)));
+  }).catch((error) => { observeCaughtError(error, "platform/engine/modules/projects/project-runtime.service"); return onWarning(safeErrorMessage(error)); });
 
   // Reconcile managed hosts, retaining the warning until route and domain checks
   // also succeed. This re-reads the deployment's repaired server binding.
@@ -512,7 +525,9 @@ async function retryLiveProjectRouting(
     const fresh = p.activeDeploymentId
       ? await findActiveDeployment(p)
       : null;
-    await markRoutingWarning(fresh, warning).catch(() => {});
+    await markRoutingWarning(fresh, warning).catch((diagnosticFailure) => {
+      observeCaughtError(diagnosticFailure, "platform/engine/modules/projects/project-runtime.service");
+    });
     return { ok: false, warning };
   }
 
@@ -527,7 +542,9 @@ async function retryLiveProjectRouting(
     const fresh = p.activeDeploymentId
       ? await findActiveDeployment(p)
       : null;
-    await markRoutingWarning(fresh, edgeWarning).catch(() => {});
+    await markRoutingWarning(fresh, edgeWarning).catch((diagnosticFailure) => {
+      observeCaughtError(diagnosticFailure, "platform/engine/modules/projects/project-runtime.service");
+    });
     return { ok: false, warning: edgeWarning };
   }
   return finish();
@@ -544,7 +561,7 @@ async function recoverProjectEdge(
   onLog?: (message: string) => void,
 ): Promise<string | null> {
   if (!dep) return null;
-  const domains = await repos.domain.listByProject(project.id).catch(() => []);
+  const domains = await repos.domain.listByProject(project.id).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/projects/project-runtime.service"); return []; });
   // A legacy service may have route settings but no domain row yet. The route
   // repair below creates that row, so an empty list cannot skip edge recovery.
   if (domains.length === 0) {
@@ -572,6 +589,7 @@ async function recoverProjectEdge(
         : `Couldn't restore the edge before retrying routing: ${status.message}`;
     });
   } catch (err) {
+    observeCaughtError(err, "platform/engine/modules/projects/project-runtime.service");
     return `Couldn't restore the edge before retrying routing: ${safeErrorMessage(err)}`;
   }
 }
@@ -597,12 +615,13 @@ async function edgeServingWarning(
   serverId: string | undefined,
 ): Promise<string | null> {
   if (!serverId) return null;
-  const domains = await repos.domain.listByProject(project.id).catch(() => []);
+  const domains = await repos.domain.listByProject(project.id).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/projects/project-runtime.service"); return []; });
   if (domains.length === 0) return null;
   try {
     const status = await sshManager.withExecutor(serverId, (executor) => checkEdge(executor));
     return status.healthy ? null : `Routes are written but not being served: ${status.message}`;
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "platform/engine/modules/projects/project-runtime.service");
     return null;
   }
 }
@@ -665,7 +684,7 @@ async function restoreCustomPortsFromEdge(
     const proxy = await edgeProxy(executor);
     if (!proxy) return;
     for (const row of candidates) {
-      const site = await proxy.siteFor(row.hostname).catch(() => null);
+      const site = await proxy.siteFor(row.hostname).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/projects/project-runtime.service"); return null; });
       const port = site ? liveUpstreamPort(site) : null;
       if (port != null) await repos.domain.update(row.id, { targetPort: port });
     }
@@ -696,6 +715,12 @@ export async function syncProjectManagedEdge(
   const dep = project.activeDeploymentId
     ? await findActiveDeployment(project)
     : null;
+  // Cloud Pages/workspaces already own these hostnames internally. The external
+  // server proxy API must never point them back at the control plane. This pass
+  // also cannot clear a warning from a failed Cloud route-table update.
+  if ((await resolveProjectLiveDeployTarget(project, dep)).deployTarget === "cloud") {
+    return { ok: true, failures: [] };
+  }
   const serverId = (dep?.meta as { serverId?: string } | null)?.serverId ?? undefined;
 
   const targets = (await repos.domain.listByProject(project.id))
@@ -736,7 +761,7 @@ async function clearRoutingWarning(
 
 /** Set the routing-unsynced markers so the project reads "Action Required" and
  *  the dashboard exposes "Retry routing" (see `routingUnsynced` in enrichProject). */
-async function markRoutingWarning(
+export async function markRoutingWarning(
   dep: Awaited<ReturnType<typeof repos.deployment.findById>> | null,
   warning: string,
 ): Promise<void> {

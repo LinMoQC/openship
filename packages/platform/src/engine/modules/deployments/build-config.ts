@@ -1,12 +1,17 @@
 import type { BuildConfig, ResourceConfig } from "@repo/adapters";
 import type { Deployment, Project } from "@repo/db";
+import { env } from "../../config/env";
 import type { BuildStrategy } from "@repo/core";
+import { AppError } from "@repo/core";
+import { getFolderSession } from "../projects/folder/session-store";
 
 export interface BuildConfigSnapshotLike {
   repoUrl: string;
   branch: string;
   framework: string;
   buildImage: string;
+  runtimeVersion?: string;
+  runtimeImageOverride?: boolean;
   runtimeImage: string;
   packageManager: string;
   installCommand: string;
@@ -19,8 +24,7 @@ export interface BuildConfigSnapshotLike {
   hasServer: boolean;
   hasBuild: boolean;
   localPath?: string;
-  uploadWorkspaceId?: string;
-  sourceStaged?: boolean;
+  uploadSessionId?: string;
   buildStrategy?: BuildStrategy;
   /** ONE-TIME image handover (migration cutover): serviceName → an already-present
    *  image ref (a transferred / running container's image). A service listed here
@@ -74,14 +78,23 @@ export function createBuildConfig(opts: BuildConfigFactoryOptions): BuildConfig 
     repoUrl: snapshot.repoUrl,
     branch: dep.branch,
     commitSha: dep.commitSha ?? undefined,
-    localPath: snapshot.localPath,
-    ...(snapshot.uploadWorkspaceId ? {
-      cloudWorkspaceId: snapshot.uploadWorkspaceId,
-      sourceStaged: snapshot.sourceStaged ?? true,
+    localPath: env.CLOUD_MODE ? undefined : snapshot.localPath,
+    ...(env.CLOUD_MODE && snapshot.localPath ? {
+      sourceTransfer: async (executor, directory, onLog) => {
+        const source = snapshot.uploadSessionId ? getFolderSession(snapshot.uploadSessionId) : undefined;
+        if (!source?.uploaded || source.uploading || source.orgId !== project.organizationId ||
+            source.projectId !== project.id || source.serverId !== project.serverId ||
+            source.managedWorkspaceId !== project.workspaceId || source.stagingDir !== snapshot.localPath) {
+          throw new AppError("This deployment's uploaded source is unavailable. Upload the folder again.", 409, "SOURCE_UPLOAD_UNAVAILABLE");
+        }
+        await executor.transferIn(source.stagingDir!, directory, onLog);
+      },
     } : {}),
     buildStrategy: snapshot.buildStrategy,
     stack: snapshot.framework,
     buildImage: snapshot.buildImage,
+    runtimeVersion: snapshot.runtimeVersion,
+    runtimeImageOverride: snapshot.runtimeImageOverride,
     runtimeImage: snapshot.runtimeImage,
     packageManager: snapshot.packageManager,
     installCommand: snapshot.hasBuild ? snapshot.installCommand : "",
@@ -98,6 +111,10 @@ export function createBuildConfig(opts: BuildConfigFactoryOptions): BuildConfig 
     gitToken,
     gitCredentialHelperPath,
     ...overrides,
+    // Run intent is shared by generated, Dockerfile and monorepo builds. A
+    // rollback replays its sources/artifacts without inheriting old pull hints.
+    refreshBaseImages: dep.trigger !== "rollback" &&
+      (snapshot.forcePullImages === true || dep.trigger === "update"),
   };
 }
 

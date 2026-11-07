@@ -24,6 +24,7 @@
  * load before drizzle migrations have run.
  */
 
+import { reportCaughtError as observeCaughtError, diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import type { Context } from "hono";
 import { auth, isSaasDeployment } from "@repo/platform/engine/lib/auth";
 import { repos } from "@repo/db";
@@ -86,6 +87,7 @@ export async function invitationPreview(c: Context) {
         expiresAt: claim.expiresAt.toISOString(),
       },
       organization: claim.organization,
+      inviter: { name: claim.inviterName },
       accountCreation,
     },
   });
@@ -108,11 +110,12 @@ export async function getSession(c: Context) {
     if (realSession) {
       // activeOrganizationId is NOT NULL at the schema level — set by
       // the session.create.before hook in lib/auth.ts and by the
-      // local-cookie mintSession path's explicit insert. No reactive
+      // local-cookie mintSession path's Better Auth hook. No reactive
       // backfill needed; the migration handled any legacy rows.
       return c.json(realSession);
     }
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "api/modules/auth/auth.controller");
     // session lookup failed — fall through to zero-auth bootstrap below
   }
 
@@ -136,7 +139,7 @@ export async function getSession(c: Context) {
     userAgent: "desktop",
   });
 
-  await setSessionCookie(c, session.token, session.expiresAt);
+  await setSessionCookie(c, session.token);
 
   const now = new Date().toISOString();
   return c.json({
@@ -195,7 +198,7 @@ export async function desktopLogin(c: Context) {
     ipAddress: "127.0.0.1",
     userAgent: "desktop",
   });
-  await setSessionCookie(c, session.token, session.expiresAt);
+  await setSessionCookie(c, session.token);
 
   return c.redirect(dashboardUrl);
 }
@@ -246,7 +249,7 @@ export async function cloudCallback(c: Context) {
         ipAddress: "127.0.0.1",
         userAgent: "desktop",
       });
-      await setSessionCookie(c, session.token, session.expiresAt);
+      await setSessionCookie(c, session.token);
 
       return c.redirect(localDashboardUrl);
     }
@@ -288,10 +291,11 @@ export async function cloudCallback(c: Context) {
       const { failDesktopAuth, getActiveNonce } = await import("../../lib/cloud-auth-proxy");
       const nonce = getActiveNonce();
       if (nonce) failDesktopAuth(nonce);
-    } catch {
+    } catch (diagnosticFailure) {
+      observeCaughtError(diagnosticFailure, "api/modules/auth/auth.controller");
       // best-effort
     }
-    console.error("[cloud-callback] error:", err);
+    errorDiagnostics.error("api/modules/auth/auth.controller", "[cloud-callback] error:", err);
     return c.html(desktopResultPage("Authentication failed", "Something went wrong. Please return to Openship and try again."));
   }
 }
@@ -326,7 +330,8 @@ export async function desktopAuthStart(c: Context) {
   try {
     const session = await auth.api.getSession({ headers: c.req.raw.headers });
     connectUserId = session?.user?.id;
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "api/modules/auth/auth.controller");
     // No session — onboarding flow; mirror cloud user instead.
   }
 
@@ -370,6 +375,6 @@ export async function desktopClaim(c: Context) {
     return c.text("Claim expired", 400);
   }
 
-  await setSessionCookie(c, result.token, result.expiresAt);
+  await setSessionCookie(c, result.token);
   return c.redirect(localDashboardUrl);
 }

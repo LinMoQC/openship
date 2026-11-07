@@ -23,20 +23,29 @@
  * prefix: "openship.terminal.resume+" (same).
  */
 
+import { reportCaughtError as observeCaughtError, diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import { findActiveDeployment } from "@repo/platform/engine/lib/active-deployment";
+import { trackBackgroundWork } from "@repo/platform/engine/lib/background-work";
 import type { Context } from "hono";
+import {
+  TERMINAL_SUBPROTOCOL_PREFIX as SUBPROTOCOL_PREFIX,
+  TERMINAL_RESUME_SUBPROTOCOL_PREFIX as RESUME_SUBPROTOCOL_PREFIX,
+  TERMINAL_COLS_MAX as COLS_MAX, TERMINAL_ROWS_MAX as ROWS_MAX,
+} from "@repo/contracts";
 import { randomUUID } from "node:crypto";
-import { auth } from "@repo/platform/engine/lib/auth";
 import { trustedOrigins } from "@repo/platform/engine/config/env";
 import { upgradeWebSocket } from "../../lib/ws";
+import { prepareCloudTerminal, cloudTerminalHandlers } from "../../lib/cloud/terminal-bridge";
 import { repos } from "@repo/db";
 import type { ShellSession } from "@repo/adapters";
 import type { TerminalExitReason } from "@repo/db";
 import { disposeRuntime, resolveDeploymentRuntime } from "@repo/platform/engine/lib/deployment-runtime";
+import { holdCloudWorkspaceActivity } from "@repo/platform/engine/lib/cloud-workspace-lock";
 import { safeErrorMessage } from "@repo/core";
 import { getRequestContext } from "../../lib/request-context";
-import { resolveActiveOrganizationId } from "../../middleware/active-organization";
-import { checkPermission } from "@repo/platform/engine/lib/authorization";
+import { resolveTerminalContext, watchTerminalAuthorization } from "../../lib/terminal-authorization";
+import { authorization } from "@repo/platform/engine/lib/authorization";
+import type { ExecutionContext } from "@repo/platform";
 import { containerIdForService, liveContainerIdWithRuntime } from "@repo/platform/engine/modules/services/service-container";
 import {
   attachServiceWs,
@@ -60,11 +69,9 @@ import {
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
-const SUBPROTOCOL_PREFIX = "openship.terminal.v1+";
-const RESUME_SUBPROTOCOL_PREFIX = "openship.terminal.resume+";
 const HEARTBEAT_INTERVAL_MS = 25_000;
-const COLS_MIN = 1, COLS_MAX = 1000;
-const ROWS_MIN = 1, ROWS_MAX = 500;
+const COLS_MIN = 1;
+const ROWS_MIN = 1;
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -110,26 +117,23 @@ type ErrorCode =
  * which close code to emit.
  *
  * Scoping is by `project.organizationId` rather than `project.userId`
- * so org-member terminals work for shared projects. NULL-org rows pass
- * via the `assertResourceInOrg`-style allowance.
+ * so authorized org members can use terminals for shared projects.
  */
 async function resolveServiceForOrg(
   serviceId: string,
-  organizationId: string,
-  userId: string,
+  ctx: ExecutionContext,
+  forShell = false,
 ): Promise<
-  | { ok: true; containerId: string; runtime: import("@repo/adapters").RuntimeAdapter }
+  | { ok: true; projectId: string; containerId: string; runtime: import("@repo/adapters").RuntimeAdapter;
+      openShell?: () => Promise<ShellSession>; release?: () => Promise<void> }
   | { ok: false; code: ErrorCode; message: string }
 > {
   const service = await repos.service.findById(serviceId);
   if (!service) return { ok: false, code: "server_not_found", message: "Service not found" };
 
-  // Primary gate: opening a service shell is admin-tier (full reach into
-  // the container). We use the pure resolver because the WS upgrade path
-  // doesn't carry a Hono context; the HTTP ticket path also calls this
-  // helper, so funneling both through checkPermission keeps the gate in
-  // one spot. 404-shape on deny — never confirm existence to non-admins.
-  const allowed = await checkPermission(userId, organizationId, {
+  // Apply the same credential and tenant policy as HTTP operations. Never
+  // substitute the token owner's broader membership for its explicit grants.
+  const allowed = await authorization.checkPermissionOnResource(ctx, {
     resourceType: "project",
     resourceId: service.projectId,
     action: "admin",
@@ -141,11 +145,10 @@ async function resolveServiceForOrg(
   const project = await repos.project.findById(service.projectId);
   if (
     !project ||
-    (project.organizationId != null && project.organizationId !== organizationId)
+    (project.organizationId != null && project.organizationId !== ctx.organizationId)
   ) {
     // Same 404-shape as backup endpoints: don't leak existence vs.
-    // authorization. NULL-org projects pass through for any caller —
-    // same allowance assertResourceInOrg makes.
+    // authorization; the shared policy above also validates ownership.
     return { ok: false, code: "server_not_found", message: "Service not found" };
   }
 
@@ -169,17 +172,26 @@ async function resolveServiceForOrg(
   // The current caller's userId is forwarded for any cloud-side audit;
   // the deployment's org context determines cloud tenancy.
   let runtime: import("@repo/adapters").RuntimeAdapter;
+  let activity: Awaited<ReturnType<typeof holdCloudWorkspaceActivity>> | undefined;
   try {
-    const resolved = await resolveDeploymentRuntime({
+    if (forShell && project.workspaceId)
+      activity = await holdCloudWorkspaceActivity(project.workspaceId, "service-terminal:" + serviceId);
+    const resolve = () => resolveDeploymentRuntime({
       // A service is a CONTAINER, never the app's bare host process — pin the
       // docker runtime so the terminal targets the real service runtime (as
       // every other service action does via resolveServicePlatform), even when
       // the project's app itself deploys "bare".
       meta: { ...(dep.meta as Record<string, unknown> | null), runtimeMode: "docker" },
       organizationId: dep.organizationId,
+      projectId: dep.projectId,
     });
+    const resolved = await (activity ? activity.run(resolve) : resolve());
     runtime = resolved.runtime;
   } catch (err) {
+    observeCaughtError(err, "api/modules/service-terminal/service-terminal.controller");
+    await activity?.release().catch((diagnosticFailure) => {
+      observeCaughtError(diagnosticFailure, "api/modules/service-terminal/service-terminal.controller");
+    });
     return {
       ok: false,
       code: "server_error",
@@ -219,9 +231,23 @@ async function resolveServiceForOrg(
     // session (which disposes it when the session ends), and `issueTicket` — which
     // only wants the validation — releases it straight away.
     handedOff = true;
-    return { ok: true, containerId, runtime };
+    if (!activity) return { ok: true, projectId: project.id, containerId, runtime };
+    let releasing: Promise<void> | undefined;
+    return {
+      ok: true, projectId: project.id, containerId, runtime,
+      openShell: () => activity!.run(() => runtime.openServiceShell!(containerId, {
+        cols: 80, rows: 24, term: "xterm-256color",
+      })),
+      release: () => releasing ??= (async () => {
+        disposeRuntime(runtime);
+        await activity!.release();
+      })(),
+    };
   } finally {
-    if (!handedOff) disposeRuntime(runtime);
+    if (!handedOff) {
+      disposeRuntime(runtime);
+      await activity?.release();
+    }
   }
 
 }
@@ -231,11 +257,13 @@ async function resolveServiceForOrg(
 export async function issueTicket(c: Context) {
   const ctx = getRequestContext(c);
 
-  const body = await c.req.json().catch(() => ({} as Record<string, unknown>));
+  const body = await c.req.json().catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "api/modules/service-terminal/service-terminal.controller"); return ({} as Record<string, unknown>); });
   const serviceId = typeof (body as { serviceId?: unknown }).serviceId === "string"
     ? ((body as { serviceId: string }).serviceId)
     : "";
   if (!serviceId) return c.json({ error: "serviceId required" }, 400);
+  const cloud = await prepareCloudTerminal(ctx, "service", serviceId);
+  if (cloud) return c.json({ success: true, ...issueServiceTerminalTicket(ctx, serviceId, cloud) });
 
   // Surface 404 here so the dashboard can show a clear error without
   // burning an upgrade attempt. We deliberately do NOT precheck the
@@ -243,7 +271,7 @@ export async function issueTicket(c: Context) {
   // WS open path, which can communicate a structured error frame.
   // Org-scoped + permission-gated — out-of-org / non-admin services 404
   // indistinguishably from missing.
-  const result = await resolveServiceForOrg(serviceId, ctx.organizationId, ctx.userId);
+  const result = await resolveServiceForOrg(serviceId, ctx);
   // This endpoint deliberately uses none of the runtime it just resolved (the WS
   // open path re-resolves and owns it), so release the transport immediately —
   // otherwise merely OPENING the terminal drawer leaked a bridge per ticket.
@@ -273,6 +301,7 @@ export const serviceTerminalWsHandler = upgradeWebSocket(async (c) => {
   const tokenProto = protocols.find((p) => p.startsWith(SUBPROTOCOL_PREFIX));
   const token = tokenProto ? tokenProto.slice(SUBPROTOCOL_PREFIX.length) : "";
   const ticket = token ? consumeServiceTerminalTicket(token) : null;
+  if (tokenProto && !ticket) return openInitFailure("ssh_auth", "Invalid or expired terminal ticket", 4401);
 
   const resumeProto = protocols.find((p) =>
     p.startsWith(RESUME_SUBPROTOCOL_PREFIX),
@@ -281,49 +310,30 @@ export const serviceTerminalWsHandler = upgradeWebSocket(async (c) => {
     ? resumeProto.slice(RESUME_SUBPROTOCOL_PREFIX.length)
     : "";
 
-  let userId: string | null = null;
-  let ticketServiceId: string | null = null;
-  // not ctx-scoped: WebSocket upgrade path. Bypasses Hono auth
-  // middleware, so identity is re-derived from scratch.
-  //   - Ticket path: ticket carries (userId, orgId, serviceId) baked
-  //     in at mint time → WS scopes against THAT org by construction.
-  //   - Cookie path: no ticket → re-derive via session +
-  //     resolveActiveOrganizationId (same resolver authMiddleware uses).
-  let activeOrgId: string | null = null;
-  if (ticket) {
-    userId = ticket.userId;
-    ticketServiceId = ticket.serviceId;
-    activeOrgId = ticket.organizationId;
-  } else {
-    try {
-      const session = await auth.api.getSession({ headers: c.req.raw.headers });
-      if (session?.user?.id) {
-        userId = session.user.id;
-        const sessOrgId =
-          (session.session as { activeOrganizationId?: string | null } | null)
-            ?.activeOrganizationId ?? null;
-        activeOrgId = await resolveActiveOrganizationId(userId, sessOrgId).catch(() => null);
-      }
-    } catch {
-      /* fall through */
-    }
+  let actor;
+  try {
+    actor = await resolveTerminalContext(c.req.raw.headers, ticket?.context);
+  } catch (error) {
+    observeCaughtError(error, "api/lib/terminal-authorization");
+    return openInitFailure("ssh_auth", "Unauthorized", 4401);
   }
-  if (!userId) return openInitFailure("ssh_auth", "Unauthorized", 4401);
-  if (!activeOrgId) return openInitFailure("ssh_auth", "No active organization", 4401);
+  const { userId } = actor;
 
   // 3. Service existence + path binding
   const pathServiceId = c.req.param("serviceId");
   if (!pathServiceId)
     return openInitFailure("server_not_found", "serviceId required", 4400);
-  if (ticketServiceId && ticketServiceId !== pathServiceId) {
+  if (ticket && ticket.serviceId !== pathServiceId) {
     return openInitFailure("ssh_auth", "Ticket / path mismatch", 4401);
   }
+  if (ticket?.cloud) return cloudTerminalHandlers({ kind: "service", id: pathServiceId,
+    context: ticket.context, cloud: ticket.cloud, resumeToken });
 
   // Resolve runtime + containerId. Org-scoped + admin-permission-gated
   // — refuses if the parent project doesn't belong to the caller's active
   // organization, OR if the caller lacks admin permission on the project
   // (opening a service shell is admin-tier).
-  const resolved = await resolveServiceForOrg(pathServiceId, activeOrgId, userId);
+  const resolved = await resolveServiceForOrg(pathServiceId, actor, !resumeToken);
   if (!resolved.ok) {
     const closeCode =
       resolved.code === "server_not_found"
@@ -354,10 +364,14 @@ export const serviceTerminalWsHandler = upgradeWebSocket(async (c) => {
     const userAgent = c.req.header("user-agent") ?? null;
 
     const ctx: HandshakeCtx = {
+      actor: ticket?.context ?? actor,
       userId,
+      projectId: resolved.projectId,
       serviceId: pathServiceId,
       containerId: resolved.containerId,
       runtime: resolved.runtime,
+      openShell: resolved.openShell,
+      release: resolved.release,
       clientIp,
       userAgent,
       subprotocol: tokenProto,
@@ -368,7 +382,10 @@ export const serviceTerminalWsHandler = upgradeWebSocket(async (c) => {
     handedOff = true;
     return handlers;
   } finally {
-    if (!handedOff) disposeRuntime(resolved.runtime);
+    if (!handedOff) {
+      if (resolved.release) await resolved.release();
+      else disposeRuntime(resolved.runtime);
+    }
   }
 
 });
@@ -376,10 +393,14 @@ export const serviceTerminalWsHandler = upgradeWebSocket(async (c) => {
 // ─── Per-connection state ───────────────────────────────────────────────────
 
 interface HandshakeCtx {
+  projectId: string;
+  actor: ExecutionContext;
   userId: string;
   serviceId: string;
   containerId: string;
   runtime: import("@repo/adapters").RuntimeAdapter;
+  openShell?: () => Promise<ShellSession>;
+  release?: () => Promise<void>;
   clientIp: string | null;
   userAgent: string | null;
   subprotocol: string | undefined;
@@ -392,6 +413,7 @@ export interface ConnState {
   shell: ShellSession | null;
   ws: WSLike | null;
   heartbeatTimer: ReturnType<typeof setInterval> | null;
+  stopAuthorizationWatch?: () => void;
   /** True when this WebSocket connection has detached; stops its data pump and incoming messages. */
   closed: boolean;
   /** True when this connection's session has been fully ended (shell killed, audit row closed). */
@@ -416,6 +438,15 @@ function buildHandlers(ctx: HandshakeCtx) {
     ended: false,
     userTerminated: false,
   };
+
+  function watchAuthorization(ws: WSLike) {
+    state.stopAuthorizationWatch = watchTerminalAuthorization(ctx.actor, { resourceType: "project", resourceId: ctx.projectId }, () => {
+      sendControl(ws, { type: "error", code: "ssh_auth", message: "Terminal authorization expired. Reconnect to continue." });
+      state.userTerminated = true;
+      safeWsClose(ws, 4401, "authorization_expired");
+      void teardown(state, "client_close", null, false, true);
+    });
+  }
 
   return {
     async onOpen(_evt: unknown, ws: WSLike) {
@@ -473,6 +504,7 @@ function buildHandlers(ctx: HandshakeCtx) {
           sendControl(ws, { type: "pong" });
         }, HEARTBEAT_INTERVAL_MS);
         (state.heartbeatTimer as { unref?: () => void }).unref?.();
+        watchAuthorization(ws);
 
         sendControl(ws, {
           type: "ready",
@@ -490,12 +522,13 @@ function buildHandlers(ctx: HandshakeCtx) {
         if (!ctx.runtime.openServiceShell) {
           throw new Error("Runtime does not implement openServiceShell");
         }
-        shell = await ctx.runtime.openServiceShell(ctx.containerId, {
+        shell = await (ctx.openShell?.() ?? ctx.runtime.openServiceShell(ctx.containerId, {
           cols: 80,
           rows: 24,
           term: "xterm-256color",
-        });
+        }));
       } catch (err) {
+        observeCaughtError(err, "api/modules/service-terminal/service-terminal.controller");
         const code: ErrorCode = "ssh_connect";
         sendControl(ws, {
           type: "error",
@@ -506,7 +539,10 @@ function buildHandlers(ctx: HandshakeCtx) {
         // The shell never opened, so no session takes ownership of the runtime
         // below — release it here or a terminal that fails to attach leaks its
         // transport (the likeliest case being an unreachable host).
-        disposeRuntime(ctx.runtime);
+        if (ctx.release) await ctx.release().catch((diagnosticFailure) => {
+          observeCaughtError(diagnosticFailure, "api/modules/service-terminal/service-terminal.controller");
+        });
+        else disposeRuntime(ctx.runtime);
         return;
       }
 
@@ -522,7 +558,7 @@ function buildHandlers(ctx: HandshakeCtx) {
         auditId = row.id;
       } catch {
         // eslint-disable-next-line no-console
-        console.error("[service-terminal] failed to write audit open row");
+        errorDiagnostics.error("api/modules/service-terminal/service-terminal.controller", "[service-terminal] failed to write audit open row");
       }
 
       const sessionId = auditId ?? `transient-${randomUUID()}`;
@@ -534,6 +570,7 @@ function buildHandlers(ctx: HandshakeCtx) {
         // Handed over: the session outlives this connection (park/resume), so it
         // is the only thing that knows when this transport is finished with.
         runtime: ctx.runtime,
+        release: ctx.release,
         onTimeout: (_sid, reason) => {
           sendControl(ws, {
             type: "error",
@@ -583,6 +620,7 @@ function buildHandlers(ctx: HandshakeCtx) {
         sendControl(ws, { type: "pong" });
       }, HEARTBEAT_INTERVAL_MS);
       (state.heartbeatTimer as { unref?: () => void }).unref?.();
+      watchAuthorization(ws);
 
       sendControl(ws, {
         type: "ready",
@@ -648,14 +686,27 @@ function buildHandlers(ctx: HandshakeCtx) {
   };
 }
 
-export async function teardown(
+export function teardown(
   state: ConnState,
   reason: TerminalExitReason,
   exitCode: number | null,
   alreadyUnregistered = false,
   forceClose = true,
 ) {
+  return trackBackgroundWork(
+    teardownConnection(state, reason, exitCode, alreadyUnregistered, forceClose),
+  );
+}
+
+async function teardownConnection(
+  state: ConnState,
+  reason: TerminalExitReason,
+  exitCode: number | null,
+  alreadyUnregistered: boolean,
+  forceClose: boolean,
+) {
   // Full teardown already completed for this connection.
+  state.stopAuthorizationWatch?.();
   if (state.ended) return;
 
   // The WS side of this connection is already gone and this is not the
@@ -702,7 +753,8 @@ export async function teardown(
         exitCode,
         exitReason: reason,
       });
-    } catch {
+    } catch (diagnosticFailure) {
+      observeCaughtError(diagnosticFailure, "api/modules/service-terminal/service-terminal.controller");
       // boot-time sweep will close orphaned rows
     }
   }

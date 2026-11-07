@@ -1,25 +1,28 @@
 import { parseInput, EnsureProjectBody, BuildAccessBody, type ProjectOperations, type SourceOperations, type DeploymentOperations } from "@repo/contracts";
 import type { DeploySourceInput, SourceDeploymentResult } from "./source-input";
+import { runtimeNeedsInstall } from "@repo/core";
 
 /** Identical orchestration for native and remote sources; transports only stage the bytes. */
 export async function deploySourceWorkflow(ship: { projects: ProjectOperations; sources: SourceOperations; deployments: DeploymentOperations }, input: DeploySourceInput): Promise<SourceDeploymentResult> {
   const { source, signal, onStep } = input;
   const step = (message: string) => { signal?.throwIfAborted(); onStep?.(message); };
   step("Preparing source");
-  const session = await ship.sources.stage({ source, name: input.name, projectId: input.projectId }, { signal, onStep });
+  const session = await ship.sources.stage({ source, name: input.name, projectId: input.projectId, serverId: input.serverId }, { signal, onStep });
   step("Detecting build config");
   const scan = await ship.sources.scan(session.sessionId);
+  const serverId = scan.serverId ?? session.serverId ?? input.serverId;
   const services = scan.services?.map(service => ({ ...service, commandArgv: service.commandArgv ?? undefined }));
   step("Creating project");
-  const hasBuild = Boolean(scan.buildCommand), hasServer = scan.workloadType !== "worker" && Boolean(scan.startCommand);
+  const hasBuild = Boolean(scan.buildCommand) || runtimeNeedsInstall(scan.stack, scan.runtimeVersion, scan.installCommand), hasServer = scan.workloadType !== "worker" && Boolean(scan.startCommand);
   const ensured = await ship.projects.ensure(parseInput(EnsureProjectBody, {
-    name: scan.name || input.name || "app", projectId: input.projectId, serverId: input.serverId,
+    name: scan.name || input.name || "app", projectId: input.projectId, serverId,
     deploymentEnvironment: input.environment,
     gitProvider: "upload", uploadSessionId: session.sessionId,
     framework: scan.stack, projectType: scan.projectType, packageManager: scan.packageManager,
     installCommand: scan.installCommand, buildCommand: scan.buildCommand, startCommand: scan.startCommand || undefined,
     releaseCommands: scan.releaseCommands,
-    outputDirectory: scan.outputDirectory, rootDirectory: scan.rootDirectory, buildImage: scan.buildImage,
+    roles: scan.roles,
+    outputDirectory: scan.outputDirectory, rootDirectory: scan.rootDirectory, buildImage: scan.buildImage, runtimeVersion: scan.runtimeVersion, runtimeImage: scan.runtimeImage,
     productionPaths: Array.isArray(scan.productionPaths) ? scan.productionPaths.join(",") : undefined,
     hasBuild, hasServer, productionMode: scan.productionMode ?? (hasServer ? "standalone" : "static"),
     workloadType: scan.workloadType, runtimeMode: scan.runtimeMode,
@@ -31,7 +34,7 @@ export async function deploySourceWorkflow(ship: { projects: ProjectOperations; 
   step("Deploying");
   const deployment = await ship.deployments.buildAccess(parseInput(BuildAccessBody, {
     projectId: ensured.project_id, uploadSessionId: session.sessionId,
-    ...(input.serverId ? { deployTarget: "server", serverId: input.serverId } : {}),
+    ...(serverId ? { serverId } : {}),
     environment: input.environment,
     ...(services?.length ? { services } : {}),
     ...(input.serviceIds?.length ? { serviceIds: input.serviceIds } : {}),

@@ -12,12 +12,67 @@ import type { Database } from "../client";
 const testEncryption = createEncryption("repository-test-secret");
 const configuration = createConfigurationSecrets(testEncryption);
 
+/** Record the resulting row, including columns a partial update preserves. */
+function recordingServiceDatabase(initial: Record<string, unknown>) {
+  let row = initial;
+  const writes: Array<Record<string, unknown>> = [];
+  const db = {
+    transaction: async (run: (tx: Database) => Promise<unknown>) => run(db),
+    select: () => ({ from: () => ({ where: () => ({ orderBy: () => ({
+      for: async () => [{ deletionInProgress: false, cloudPromotion: null }],
+    }) }) }) }),
+    query: { service: { findMany: async () => [row] } },
+    update: () => ({
+      set: (data: Record<string, unknown>) => ({
+        where: () => ({
+          returning: async () => {
+            row = { ...row, ...data };
+            writes.push(configuration.openService(row));
+            return [row];
+          },
+        }),
+      }),
+    }),
+  } as unknown as Database;
+  return { db, writes };
+}
+
 const multiRoute = [
   { port: 3210, domainType: "free" as const, domain: "acme-backend" },
   { port: 3211, domainType: "free" as const, domain: "acme-backend-http" },
 ];
 
 describe("normalizeRoutingFields", () => {
+  it("keeps distinct free and custom hostnames on the same port", () => {
+    const endpoints = [
+      { port: 4000, domainType: "free" as const, domain: "web" },
+      { port: 4000, domainType: "custom" as const, customDomain: "app.example.com" },
+      { port: 4000, domainType: "custom" as const, customDomain: "alias.example.com" },
+    ];
+    expect(normalizeRoutingFields({ publicEndpoints: endpoints })).toMatchObject({
+      exposed: true,
+      exposedPort: "4000",
+      domain: "web",
+      customDomain: null,
+      publicEndpoints: endpoints,
+    });
+  });
+
+  it("deduplicates normalized hostnames instead of their target ports", () => {
+    expect(
+      normalizeRoutingFields({
+        publicEndpoints: [
+          { port: 4000, domainType: "custom", customDomain: "https://APP.example.com/" },
+          { port: 5000, domainType: "custom", customDomain: "app.example.com" },
+          { port: 4000, domainType: "custom", customDomain: "alias.example.com" },
+        ],
+      }).publicEndpoints,
+    ).toEqual([
+      { port: 4000, domainType: "custom", customDomain: "app.example.com" },
+      { port: 4000, domainType: "custom", customDomain: "alias.example.com" },
+    ]);
+  });
+
   it("pauses without erasing on an explicit exposed:false, array notwithstanding", () => {
     // `exposed:false` is authoritative over a non-empty array (which used to flip
     // the row back to exposed:true, so it could never be paused) — but the route
@@ -80,16 +135,7 @@ describe("reconcileFromCompose keeps the route set", () => {
   const importedSpec = toComposeSpec(existing);
 
   it("carries publicEndpoints through the auto-apply write", async () => {
-    const writes: Array<Record<string, unknown>> = [];
-    const db = {
-      query: { service: { findMany: async () => [{ ...existing, importedSpec }] } },
-      update: () => ({
-        set: (data: Record<string, unknown>) => {
-          writes.push(configuration.openService(data));
-          return { where: async () => undefined };
-        },
-      }),
-    } as unknown as Database;
+    const { db, writes } = recordingServiceDatabase({ ...existing, importedSpec });
 
     await createServiceRepo(db, testEncryption).reconcileFromCompose("proj_1", [
       { name: "backend", image: "convex:2" },
@@ -104,34 +150,19 @@ describe("reconcileFromCompose keeps the route set", () => {
 
 describe("reconcileFromCompose bootstraps dynamic env provenance (#673)", () => {
   it("restores known expressions and preserves ambiguous legacy values as overrides", async () => {
-    const writes: Array<Record<string, unknown>> = [];
-    const db = {
-      query: {
-        service: {
-          findMany: async () => [
-            {
-              id: "svc_1",
-              projectId: "proj_1",
-              name: "api",
-              kind: "compose",
-              environment: {
-                POSTGRES_PASSWORD: "manual-secret",
-                DATABASE_URL: "postgresql://user:@db/app",
-              },
-              advanced: { readiness: { enabled: true } },
-              importedSpec: null,
-              driftSpec: null,
-            },
-          ],
-        },
+    const { db, writes } = recordingServiceDatabase({
+      id: "svc_1",
+      projectId: "proj_1",
+      name: "api",
+      kind: "compose",
+      environment: {
+        POSTGRES_PASSWORD: "manual-secret",
+        DATABASE_URL: "postgresql://user:@db/app",
       },
-      update: () => ({
-        set: (data: Record<string, unknown>) => {
-          writes.push(configuration.openService(data));
-          return { where: async () => undefined };
-        },
-      }),
-    } as unknown as Database;
+      advanced: { readiness: { enabled: true } },
+      importedSpec: null,
+      driftSpec: null,
+    });
 
     await createServiceRepo(db, testEncryption).reconcileFromCompose("proj_1", [
       {
@@ -185,30 +216,15 @@ describe("legacy compose provenance baselines", () => {
   };
 
   it("restores unchanged source expressions while preserving live operator edits", async () => {
-    const writes: Array<Record<string, unknown>> = [];
-    const db = {
-      query: {
-        service: {
-          findMany: async () => [
-            {
-              id: "svc_1",
-              projectId: "proj_1",
-              kind: "compose",
-              ...oldBaseline,
-              environment: { PORT: "20011", NODE_ENV: "production" },
-              importedSpec: oldBaseline,
-              driftSpec: { image: "stale" },
-            },
-          ],
-        },
-      },
-      update: () => ({
-        set: (data: Record<string, unknown>) => {
-          writes.push(configuration.openService(data));
-          return { where: async () => undefined };
-        },
-      }),
-    } as unknown as Database;
+    const { db, writes } = recordingServiceDatabase({
+      id: "svc_1",
+      projectId: "proj_1",
+      kind: "compose",
+      ...oldBaseline,
+      environment: { PORT: "20011", NODE_ENV: "production" },
+      importedSpec: oldBaseline,
+      driftSpec: { image: "stale" },
+    });
 
     const result = await createServiceRepo(db, testEncryption).reconcileFromCompose("proj_1", [parsedNow]);
 
@@ -222,7 +238,6 @@ describe("legacy compose provenance baselines", () => {
   });
 
   it("does not attach new image provenance to an image the operator already changed", async () => {
-    const writes: Array<Record<string, unknown>> = [];
     const parsedWithImageTemplate = {
       ...oldBaseline,
       advanced: {
@@ -233,29 +248,15 @@ describe("legacy compose provenance baselines", () => {
         },
       },
     };
-    const db = {
-      query: {
-        service: {
-          findMany: async () => [
-            {
-              id: "svc_1",
-              projectId: "proj_1",
-              kind: "compose",
-              ...oldBaseline,
-              image: "registry.example.com/acme/api:manual",
-              importedSpec: oldBaseline,
-              driftSpec: null,
-            },
-          ],
-        },
-      },
-      update: () => ({
-        set: (data: Record<string, unknown>) => {
-          writes.push(configuration.openService(data));
-          return { where: async () => undefined };
-        },
-      }),
-    } as unknown as Database;
+    const { db, writes } = recordingServiceDatabase({
+      id: "svc_1",
+      projectId: "proj_1",
+      kind: "compose",
+      ...oldBaseline,
+      image: "registry.example.com/acme/api:manual",
+      importedSpec: oldBaseline,
+      driftSpec: null,
+    });
 
     await createServiceRepo(db, testEncryption).reconcileFromCompose("proj_1", [parsedWithImageTemplate]);
 
@@ -319,7 +320,6 @@ describe("Compose image provenance (#809)", () => {
   });
 
   it("records an authoritative import baseline so later literal edits have clear ownership", async () => {
-    const writes: Array<Record<string, unknown>> = [];
     const row = {
       id: "svc_1",
       projectId: "proj_1",
@@ -331,14 +331,7 @@ describe("Compose image provenance (#809)", () => {
       importedSpec: null,
       driftSpec: null,
     };
-    const db = {
-      query: { service: { findMany: async () => [row] } },
-      update: () => ({
-        set: (data: Record<string, unknown>) => ({
-          where: async () => writes.push(configuration.openService(data)),
-        }),
-      }),
-    } as unknown as Database;
+    const { db, writes } = recordingServiceDatabase(row);
     const parsed = {
       name: "api",
       image: stored.image,
@@ -358,7 +351,6 @@ describe("Compose image provenance (#809)", () => {
 
   it("repairs an untouched legacy scan without taking ownership of a manual image", async () => {
     const reconcile = async (image: string) => {
-      const writes: Array<Record<string, unknown>> = [];
       const row = {
         id: "svc_1",
         projectId: "proj_1",
@@ -372,14 +364,7 @@ describe("Compose image provenance (#809)", () => {
         importedSpec: null,
         driftSpec: null,
       };
-      const db = {
-        query: { service: { findMany: async () => [row] } },
-        update: () => ({
-          set: (data: Record<string, unknown>) => ({
-            where: async () => writes.push(configuration.openService(data)),
-          }),
-        }),
-      } as unknown as Database;
+      const { db, writes } = recordingServiceDatabase(row);
       const parsed = {
         name: "api",
         image: "ghcr.io/acme/api:2.0.0",
@@ -411,7 +396,6 @@ describe("Compose image provenance (#809)", () => {
 
 describe("reconcileFromCompose bootstraps legacy build args (#689)", () => {
   it("normalizes an old baseline once even when the compose file has no args", async () => {
-    const writes: Array<Record<string, unknown>> = [];
     const row = {
       id: "svc_1",
       projectId: "proj_1",
@@ -425,19 +409,12 @@ describe("reconcileFromCompose bootstraps legacy build args (#689)", () => {
     };
     const oldBaseline = toComposeSpec(row) as Record<string, unknown>;
     delete oldBaseline.buildArgs;
-    const db = {
-      query: { service: { findMany: async () => [{ ...row, importedSpec: oldBaseline }] } },
-      update: () => ({
-        set: (data: Record<string, unknown>) => {
-          writes.push(configuration.openService(data));
-          return { where: async () => undefined };
-        },
-      }),
-    } as unknown as Database;
+    const { db, writes } = recordingServiceDatabase({ ...row, importedSpec: oldBaseline });
 
-    await createServiceRepo(db, testEncryption).reconcileFromCompose("proj_1", [
-      { name: "api", image: "example/api:1" },
-    ]);
+    const repo = createServiceRepo(db, testEncryption);
+    for (let sync = 0; sync < 2; sync++) {
+      await repo.reconcileFromCompose("proj_1", [{ name: "api", image: "example/api:1" }]);
+    }
 
     expect(writes).toHaveLength(1);
     expect((writes[0].importedSpec as Record<string, unknown>).buildArgs).toEqual({});
@@ -460,34 +437,19 @@ describe("reconcileFromCompose bootstraps legacy build args (#689)", () => {
   ])(
     "$label before advancing a null baseline",
     async ({ stored, expected, expectedTemplateKeys }) => {
-      const writes: Array<Record<string, unknown>> = [];
-      const db = {
-        query: {
-          service: {
-            findMany: async () => [
-              {
-                id: "svc_1",
-                projectId: "proj_1",
-                name: "api",
-                kind: "compose",
-                build: ".",
-                dockerfile: "Dockerfile",
-                buildArgs: stored,
-                environment: {},
-                advanced: {},
-                importedSpec: null,
-                driftSpec: null,
-              },
-            ],
-          },
-        },
-        update: () => ({
-          set: (data: Record<string, unknown>) => {
-            writes.push(configuration.openService(data));
-            return { where: async () => undefined };
-          },
-        }),
-      } as unknown as Database;
+      const { db, writes } = recordingServiceDatabase({
+        id: "svc_1",
+        projectId: "proj_1",
+        name: "api",
+        kind: "compose",
+        build: ".",
+        dockerfile: "Dockerfile",
+        buildArgs: stored,
+        environment: {},
+        advanced: {},
+        importedSpec: null,
+        driftSpec: null,
+      });
 
       await createServiceRepo(db, testEncryption).reconcileFromCompose("proj_1", [
         {

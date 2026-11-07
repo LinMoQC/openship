@@ -5,6 +5,8 @@ import type {
   ServiceEnvironment,
   ServiceEnvironmentInput,
   MergeServiceEnvVarsInput,
+  ServiceEnvironmentReview,
+  TUpdateServiceBody,
 } from "@repo/contracts";
 
 export type { ComposeAdvanced, ComposeAdvancedPatch, ComposeHealthcheck, OpenshipReadiness } from "@repo/core";
@@ -46,7 +48,7 @@ export function sortServicesByPublicFirst<T extends { exposed?: boolean | null }
  *   - PIPELINE (true): compose stack, monorepo sub-app, or anything that BUILDS
  *     from source → keeps per-service Redeploy (build page) + reload-env.
  *   - APP (false): an image app added to a normal/static project → Start/Stop,
- *     internal IP, no Redeploy, no build page.
+ *     internal IP, and the shared image refresh/redeploy operation.
  */
 export function serviceUsesDeployPipeline(
   service: { kind?: "compose" | "monorepo" | string | null; build?: string | null; volumes?: string[] | null },
@@ -96,10 +98,12 @@ export interface Service {
   domainType: "free" | "custom" | null;
   /** Additional public routes (one per port). Entry[0] mirrors the scalars. */
   publicEndpoints?: Array<{
-    port: number;
+    port?: number;
     domainType: "free" | "custom";
     domain?: string;
     customDomain?: string;
+    redirectTo?: string;
+    redirectStatus?: number;
   }> | null;
   enabled: boolean;
   sortOrder: number;
@@ -131,6 +135,8 @@ export interface ServiceContainer {
   serviceName: string;
   containerId: string | null;
   status: string;
+  /** Docker's reported healthcheck result; absent/null is not proof of health. */
+  health?: "healthy" | "starting" | "unhealthy" | null;
   ip: string | null;
   hostPort: number | null;
   imageRef: string | null;
@@ -193,6 +199,7 @@ export type ServiceInput = {
   environment?: Record<string, string | null> | null;
   volumes?: string[];
   command?: string;
+  commandArgv?: string[];
   restart?: string;
   advanced?: ComposeAdvancedPatch;
   exposed?: boolean;
@@ -205,6 +212,8 @@ export type ServiceInput = {
     port?: number | string;
     domain?: string;
     customDomain?: string;
+    redirectTo?: string;
+    redirectStatus?: number;
     domainType?: "free" | "custom";
   }>;
   enabled?: boolean;
@@ -225,6 +234,9 @@ export type ServiceInput = {
 /* ------------------------------------------------------------------ */
 /*  Services API (compose / multi-service projects)                   */
 /* ------------------------------------------------------------------ */
+
+type ServiceUpdateInput = Omit<Partial<ServiceInput>, "domain" | "customDomain"> &
+  Pick<TUpdateServiceBody, "domain" | "customDomain">;
 
 export const servicesApi = {
   /** List all services for a project */
@@ -258,7 +270,7 @@ export const servicesApi = {
    * keep the ServiceEditorModal payload shape uniform between create
    * and edit without sprouting kind-omitting branches all over.
    */
-  update: (projectId: string | number, serviceId: string, data: Partial<ServiceInput>) => {
+  update: (projectId: string | number, serviceId: string, data: ServiceUpdateInput) => {
     // Strip `kind` defensively. The backend validator rejects unknown
     // and disallowed keys (additionalProperties:false on UpdateServiceBody),
     // but stripping client-side keeps a uniform payload shape between
@@ -308,7 +320,10 @@ export const servicesApi = {
   },
 
   mergeEnv: (projectId: string | number, serviceId: string, input: MergeServiceEnvVarsInput) =>
-    api.patch<{ success: boolean }>(endpoints.services.envSet(projectId, serviceId), input),
+    api.patch<{ success: boolean; affectedServices?: Array<{ id: string; name: string }> }>(endpoints.services.envSet(projectId, serviceId), input),
+
+  reviewEnv: (projectId: string | number, serviceId: string, input: Omit<MergeServiceEnvVarsInput, "shared">) =>
+    api.post<ServiceEnvironmentReview>(`${endpoints.services.envSet(projectId, serviceId)}/review`, input),
 
   /** Real values for named keys only. Pass environment for service-scoped
    * env_var rows; omit it for compose-inline values. */

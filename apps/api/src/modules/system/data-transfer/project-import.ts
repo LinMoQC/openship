@@ -1,5 +1,7 @@
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import {
   db,
+  createTransferReader,
   inArray,
   linkedProjectIds,
   schema,
@@ -14,7 +16,6 @@ import {
   type DatabaseTransaction,
 } from "@repo/db";
 import { isLoopbackHost } from "@repo/core";
-import { getCloudConnectionStatusForOrg } from "@repo/platform/engine/lib/cloud/session";
 import { needsExplicitServerMapping, transferServer } from "./export.service";
 import { resolveExportSelection, summarizeExportCounts } from "./selection";
 import { transferSecretsRequirePassphrase } from "./passphrase-crypto";
@@ -97,6 +98,7 @@ function normalizeHost(host: unknown): string {
 }
 function sameServer(source: TransferServer, target: TransferServer): boolean {
   return (
+    !!normalizeHost(source.host) &&
     !needsExplicitServerMapping(source) &&
     normalizeHost(source.host) === normalizeHost(target.host) &&
     source.port === target.port &&
@@ -268,6 +270,7 @@ export interface ProjectImportPlan {
   selectedSourceIds: Map<string, Set<string>>;
   retargetedProjects: Set<string>;
   retargetedDeployments: Set<string>;
+  replacementRows: Map<string, string[]>;
 }
 
 /** Read-only preflight, run again inside the restore transaction at apply time. */
@@ -276,7 +279,6 @@ export async function planProjectImport(
   selection: ImportSelection,
   context: ImportContext,
   reader: Reader = db,
-  cloud?: Awaited<ReturnType<typeof getCloudConnectionStatusForOrg>>,
 ): Promise<ProjectImportPlan> {
   validateImportSelection(selection);
   const allProjects = file.dump.tables.project ?? [];
@@ -339,8 +341,7 @@ export async function planProjectImport(
         row.id === project.id ||
         (row.organizationId === context.organizationId &&
           !row.deletedAt &&
-          ((row.groupId === groupId && row.environmentSlug === project.environmentSlug) ||
-            (!!project.cloudWorkspaceId && row.cloudWorkspaceId === project.cloudWorkspaceId))),
+          row.groupId === groupId && row.environmentSlug === project.environmentSlug),
     );
     const match = matches[0];
     const selected = requested.includes(String(project.id));
@@ -390,6 +391,7 @@ export async function planProjectImport(
       : { tables: {}, serverIds: [], warnings: [] };
     assertActiveDeploymentOwnership(graph.tables);
   } catch (error) {
+    observeCaughtError(error, "api/modules/system/data-transfer/project-import");
     throw new ProjectImportError(
       error instanceof Error ? error.message : "The selected project snapshot is incomplete.",
     );
@@ -443,7 +445,7 @@ export async function planProjectImport(
     if (!sourceServers.has(String(row.id))) sourceServers.set(String(row.id), transferServer(row));
   }
   const neededServerIds = new Set(graph.serverIds);
-  if ((graph.tables.project ?? []).some((row) => !row.serverId && !row.cloudWorkspaceId))
+  if ((graph.tables.project ?? []).some((row) => !row.serverId && !row.workspaceId))
     neededServerIds.add("local");
   if (
     (graph.tables.deployment ?? []).some(
@@ -510,31 +512,6 @@ export async function planProjectImport(
     (row) => !retargetedServerIds.has(typeof row.serverId === "string" ? row.serverId : "local"),
   );
 
-  const cloudProjects = (graph.tables.project ?? []).filter((row) => row.cloudWorkspaceId);
-  if (cloudProjects.length) {
-    const connection = cloud ?? (await getCloudConnectionStatusForOrg(context.organizationId));
-    const expected = new Set(
-      cloudProjects
-        .map((project) =>
-          file.manifest?.cloudAccounts
-            .find((account) => account.organizationId === project.organizationId)
-            ?.email?.toLowerCase(),
-        )
-        .filter(Boolean),
-    );
-    if (!connection.connected || !connection.user?.email)
-      blockers.push(
-        "Connect this destination workspace to the source Openship Cloud account before importing cloud projects. Cloud servers will not work with a different account.",
-      );
-    else if ([...expected].some((email) => email !== connection.user!.email.toLowerCase()))
-      blockers.push(
-        `Cloud account mismatch. Connect this workspace to ${[...expected].join(", ")} before importing these cloud projects.`,
-      );
-    else if (expected.size === 0)
-      warnings.push(
-        "The source cloud identity is unavailable in this archive. Verify that the connected account owns these cloud workspaces.",
-      );
-  }
   if (!file.secrets || selection.includeSecrets === false)
     warnings.push(
       "Environment values and credentials will not be restored. Existing destination secrets are kept when overwriting; add missing values before deploying new projects.",
@@ -576,8 +553,11 @@ export async function planProjectImport(
       }
       if (name === "project") {
         row.deletionInProgress = false;
-        if (!source.serverId && !source.cloudWorkspaceId)
+        if (!source.serverId && !source.workspaceId)
           row.serverId = maps.get("servers")?.get("local") ?? null;
+        // A subscription cannot be imported. Placement comes only from the
+        // selected, organization-owned destination server, never archive IDs.
+        row.workspaceId = destinationServers.find(server => server.id === row.serverId)?.workspaceId ?? null;
       }
       return row;
     });
@@ -682,7 +662,9 @@ export async function planProjectImport(
   const retargetedProjects = new Set<string>();
   for (const project of graph.tables.project ?? []) {
     const serverId = typeof project.serverId === "string" ? project.serverId : "local";
-    if (!project.cloudWorkspaceId && retargetedServerIds.has(serverId)) {
+    // Managed projects are configuration imports. Reusing their remote runtime
+    // handles would create two controllers claiming the same running workload.
+    if (project.workspaceId || retargetedServerIds.has(serverId)) {
       retargetedProjects.add(maps.get("project")?.get(String(project.id)) ?? String(project.id));
     }
   }
@@ -718,6 +700,14 @@ export async function planProjectImport(
       // A transferred hook must be explicitly delegated by a user in this
       // installation. Imported JSON must never forge an execution identity.
       if (name === "incoming_webhook") next.executionAuthority = null;
+      if (name === "route_protection") next.appliedRevision = null;
+      // Project archives omit preview ownership and builder-local cache proof.
+      // Re-enable automation explicitly after import on the destination.
+      if (name === "project") {
+        next.previewSettings = null;
+        next.previewScannedAt = null;
+        next.buildCacheReceipts = null;
+      }
       for (const [key, value] of Object.entries(next)) {
         if (typeof value === "string" && SOFT_REFS[key])
           next[key] = maps.get(SOFT_REFS[key]!)?.get(value) ?? value;
@@ -756,11 +746,17 @@ export async function planProjectImport(
         (name === "service_deployment" && retargetedDeployments.has(String(next.deploymentId)))
       ) {
         next.containerId = null;
+        next.imageRef = null;
         if (name === "deployment") {
           next.meta = null;
           next.status = "cancelled";
+          next.artifactRetainedAt = null;
+          next.pinned = false;
         } else {
+          next.allocatedResources = null;
+          next.hostPort = null;
           next.hostPorts = null;
+          next.ip = null;
           next.status = "stopped";
         }
       }
@@ -778,6 +774,32 @@ export async function planProjectImport(
     warnings.push(
       "Projects mapped to a different host are imported disabled, with live container bindings cleared. Migrate or restore their volumes, then deploy and verify domains before enabling them.",
     );
+
+  // Overwrite is an authoritative snapshot of the selected projects. Preserve
+  // unrelated projects and unselected categories, but remove destination-only
+  // children rather than leaving stale environment keys and services behind.
+  const replacementRows = new Map<string, string[]>();
+  const overwritten = previewProjects
+    .filter((project) => project.action === "overwrite" && project.existingProjectId)
+    .map((project) => project.existingProjectId!);
+  if (overwritten.length && !blockers.length) {
+    const read = createTransferReader(reader);
+    const destination = await selectProjectTransfer(read, {
+      ...exportSelection,
+      projectIds: overwritten,
+      includeServers: false,
+      includeIntegrations: false,
+    }, excludedTables);
+    destination.tables.project_connection = await read("project_connection", "targetProjectId", overwritten);
+    for (const [name, rows] of Object.entries(destination.tables)) {
+      if (!projectOwned.has(name) || name === "project" || file.dump.tables[name] === undefined) continue;
+      if (name === "env_var" && (!file.secrets || selection.includeSecrets === false)) continue;
+      const incoming = new Set((restored[name] ?? []).map((row) => row.id));
+      const removed = rows.filter((row) => !incoming.has(row.id)).map((row) => String(row.id));
+      if (removed.length) replacementRows.set(name, removed);
+    }
+    blockers.push(...await replacementReferenceBlockers(reader, replacementRows, restored));
+  }
   const preview: ImportPreview = {
     scope: "projects",
     projects: previewProjects,
@@ -787,6 +809,7 @@ export async function planProjectImport(
       Object.fromEntries(Object.entries(graph.tables).map(([name, rows]) => [name, rows.length])),
     ).history,
     rows: Object.values(restored).reduce((sum, rows) => sum + rows.length, 0),
+    rowsRemoved: [...replacementRows.values()].reduce((sum, ids) => sum + ids.length, 0),
     hasSecrets: !!file.secrets,
     requiresPassphrase: transferSecretsRequirePassphrase(file.secrets),
     warnings: [...new Set(warnings)],
@@ -800,7 +823,49 @@ export async function planProjectImport(
     selectedSourceIds,
     retargetedProjects,
     retargetedDeployments,
+    replacementRows,
   };
+}
+
+/** Never let FK cascades erase an unselected project's records during overwrite. */
+async function replacementReferenceBlockers(
+  reader: Reader,
+  removed: Map<string, string[]>,
+  incoming: DatabaseDump["tables"],
+): Promise<string[]> {
+  const blockers = new Set<string>();
+  const read = createTransferReader(reader);
+  for (const ref of transferReferences) {
+    const ids = removed.get(ref.parent);
+    if (!ids?.length || ref.parentColumn !== "id") continue;
+    const deleting = new Set(removed.get(ref.table) ?? []);
+    const replaced = new Map((incoming[ref.table] ?? []).map((row) => [row.id, row]));
+    for (const row of await read(ref.table, ref.column, ids)) {
+      if (deleting.has(String(row.id))) continue;
+      const next = replaced.get(row.id);
+      if (next && ref.column in next && !ids.includes(String(next[ref.column]))) continue;
+      blockers.add(`Cannot overwrite this selection: ${ref.table} still references a ${ref.parent} record that the export removes. Include the dependent project or use an entire-instance replacement.`);
+    }
+  }
+  return [...blockers];
+}
+
+/** Called after upserts, inside the same transaction as credential restoration. */
+export async function removeReplacedProjectRows(
+  tx: DatabaseTransaction,
+  rows: Map<string, string[]>,
+): Promise<void> {
+  if (!rows.size) return;
+  const blockers = await replacementReferenceBlockers(tx, rows, {});
+  if (blockers.length) throw new ProjectImportError(blockers.join("\n"));
+  for (const spec of [...topoOrderedTables()].reverse()) {
+    const ids = rows.get(spec.sqlName);
+    if (!ids?.length) continue;
+    const id = (spec.table as unknown as { id: Parameters<typeof inArray>[0] }).id;
+    for (let i = 0; i < ids.length; i += 5_000) {
+      await tx.delete(spec.table).where(inArray(id, ids.slice(i, i + 5_000)));
+    }
+  }
 }
 
 export function remapProjectSecrets(

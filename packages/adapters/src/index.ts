@@ -46,6 +46,8 @@ export type {
 
 // The one clone-command assembler (token / relay / ssh / ambient) + its shell
 // quoting, shared with the API so a probe and the clone it predicts can't drift.
+export { projectBuildKitWorker, removeProjectBuildKitWorker } from "./runtime/docker-buildkit-worker";
+export { setDefaultBuildKitImage, resolveBuildKitImage } from "./runtime/docker-buildkit-image";
 export {
   sq,
   assembleGitClone,
@@ -59,7 +61,7 @@ export {
 
 export { BUILD_STEPS } from "./types";
 
-export { DEFAULT_RESOURCE_CONFIG, DEFAULT_BUILD_RESOURCE_CONFIG } from "./types";
+export { cloudCpus, DEFAULT_RESOURCE_CONFIG, DEFAULT_BUILD_RESOURCE_CONFIG } from "./types";
 
 // ─── Runtime layer ───────────────────────────────────────────────────────────
 export type {
@@ -87,11 +89,13 @@ export {
   buildNetworkAliases,
   parsePortBindings,
   ownsBuiltImage,
+  toStopConfig,
   type BuildCachePruneOptions,
   type BuildCachePruneResult,
   type DockerConnectionOptions,
 } from "./runtime/docker";
 export { containerInfoFromDockerSummary } from "./runtime/docker-container-info";
+export { DEFAULT_BUILD_CACHE_KEEP_BYTES, BUILD_STORAGE_GC_FREE_FRACTION } from "./runtime/docker-build-cache";
 // The pull-auth shape, so the API can type the credential resolver it injects (#581).
 export type { DockerRegistryAuth } from "./runtime/docker-auth";
 export {
@@ -100,6 +104,7 @@ export {
 } from "./runtime/docker-transport";
 export {
   transferImage,
+  resolveTransferredImageRef,
   type ImageTransferOptions,
   type ImageTransferResult,
 } from "./runtime/image-transfer";
@@ -114,20 +119,28 @@ export {
 // location with the SAME confinement rules the deploy used (no reimplementation:
 // this function is what rejects absolute paths and `../` traversal out of the root).
 export { resolveServedStaticPath, resolveStaticOutputPath } from "./runtime/stack-output";
-export {
-  CloudRuntime,
-  type CloudAdminProxy,
-  PAGE_CONTAINER_PREFIX,
-  provisionCloudWorkspace,
-} from "./runtime/cloud";
+export type { CloudAdminProxy } from "./infra/cloud-admin";
+export { HostBuildForbiddenError, isHostBuildForbiddenError } from "./runtime/host-build-policy";
 export {
   CloudDockerRuntime,
   CLOUD_DOCKER_IMAGE,
   type CloudDockerOptions,
 } from "./runtime/cloud/docker";
-export { cloudWorkspaceStatus, waitForCloudDockerWorkspace } from "./runtime/cloud/workspace-ready";
+export {
+  cloudWorkspaceStatus,
+  waitForCloudDockerWorkspace,
+  waitForCloudWorkspaceStopped,
+} from "./runtime/cloud/workspace-ready";
+export { cloudDockerProjectPaths } from "./runtime/cloud/docker-paths";
+export { ensureCloudProjectVolume } from "./runtime/cloud/docker-volume";
+export { updateCloudWorkspaceResources } from "./runtime/cloud/workspace-resources";
 export { CloudWorkspaceExecutor } from "./runtime/cloud/workspace-executor";
-export { BuildLogger } from "./runtime/build-pipeline";
+export { CloudServerConnection } from "./runtime/cloud/server-connection";
+export {
+  withManagedCommandTracking,
+  currentManagedCommandTracking,
+} from "./runtime/cloud/command-tracking";
+export { BuildLogger, BuildLogger as PipelineLogger } from "./runtime/build-pipeline";
 export {
   type DeployEnvironment,
   type DeployRouting,
@@ -156,7 +169,10 @@ export {
 export {
   type PortOccupant,
   type PortStopTarget,
+  type AlternativeHostPort,
+  type SuggestAlternativeHostPort,
   probeListeningPort,
+  isDockerHostPortAvailable,
   ensurePortAvailable,
 } from "./runtime/port-conflict";
 // Exported because apps/ consumes them, and only for that: the label keys and the
@@ -180,7 +196,13 @@ export {
 } from "./runtime/volume-namespace";
 
 // ─── Infrastructure layer ────────────────────────────────────────────────────
-export type { RoutingProvider, SslProvider, ProvisionCertOptions, DnsCertificateProvider } from "./infra/types";
+export type {
+  RoutingProvider,
+  SslProvider,
+  ProvisionCertOptions,
+  DnsCertificateProvider,
+} from "./infra/types";
+export { createRouteProtection, revokeRouteSessions, assertRouteProtection, type RouteProtection } from "./infra/route-protection";
 export { NginxProvider, type NginxProviderOptions, type RateLimitConfig } from "./infra/nginx";
 // For the upstream-down e2e in apps/api: it asserts on the real marker rather than a copy of
 // the string, which could drift from the page it is checking for.
@@ -294,6 +316,7 @@ export {
   type ContainerEdgeOptions,
   type ContainerEdgeResult,
   type EdgeServingVerdict,
+  type EdgeProviderOptions,
 } from "./system/proxy/ensure-container-edge";
 export {
   ensureContainerMail,
@@ -395,7 +418,9 @@ export { elevatedExecutor, elevateCommand } from "./system/elevated-executor";
 export type { Privileged, RootChecked } from "./system/privilege";
 export { privilegedExecutor, rootChecked, rootOrDegrade } from "./system/privilege";
 export { systemCatalog, MIN_DOCKER_VERSION } from "./system/catalog";
-export { SERVER_STATS_COMMAND } from "./system/server-stats";
+export { SERVER_STATS_COMMAND, readServerStats, type ServerStats } from "./system/server-stats";
+export { dockerProjectStorage, type DockerStorageSnapshot } from "./runtime/docker-storage";
+export { deleteCloudWorkspace } from "./runtime/cloud/workspace-delete";
 // Native-module versioning + migration framework (verify → reconcile).
 export {
   resolveVerifiedCatalog,
@@ -579,7 +604,7 @@ export {
 } from "./platform";
 
 // ─── Oblien SDK (re-export for single source of truth) ───────────────────────
-export { Oblien } from "./oblien";
+export { Oblien, OblienError, cloudWorkspaceCreationFailure } from "./oblien";
 export type {
   NamespaceUsageUnits,
   NamespaceUsageUnitBucket,
@@ -610,8 +635,33 @@ export * from "./cluster/storage";
 export * from "./cluster/storage-host";
 export * from "./cluster/volumes";
 export * from "./cluster/kubernetes-label";
+export * from "./cluster/project-manifests";
 export * from "./cluster/database";
 export { databaseArchiveName } from "./cluster/redis-backups";
 export * from "./runtime/kubernetes";
 export { splitRuntimeEnv, droppedRuntimeEnvMessage } from "./runtime/runtime-env";
 export type { ServiceCutoverRecord, CutoverPersistence } from "./runtime/docker-cutover";
+
+export {
+  managedProcessState,
+  readManagedProcessStatus,
+  waitForManagedProcess,
+} from "./runtime/cloud/server-connection";
+
+export { resolveSshAuthSock } from "./system/ssh-support";
+export { probeLocalGitHubToken } from "./system/local-github";
+export {
+  ActionsWorker,
+  probeActionCapabilities,
+  type ActionWorkerSnapshot,
+} from "./actions/worker";
+
+export {
+  ensureDockerEmulation,
+  probeDockerExecutionPlatforms,
+  DOCKER_BINFMT_IMAGE,
+} from "./runtime/docker-platforms";
+export { inspectDockerSwarm } from "./runtime/swarm/inspect";
+export { SwarmRuntime } from "./runtime/swarm/runtime";
+export { assertSwarmServiceConfig } from "./runtime/swarm/spec";
+export { prepareRemoteSource } from "./runtime/remote-source";

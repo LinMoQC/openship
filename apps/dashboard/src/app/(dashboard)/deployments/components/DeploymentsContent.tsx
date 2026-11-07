@@ -1,11 +1,15 @@
 "use client";
 
+import type { DeploymentHistorySummary } from "@repo/core";
+import { DeploymentOverview } from "./DeploymentOverview";
 import { Icon as UiIcon } from "@repo/ui/icons";
 
 import React, { useState, useEffect, useMemo, useCallback } from "react";
 import Link from "next/link";
 import { deployApi, projectsApi, getApiErrorMessage } from "@/lib/api";
 import { useI18n, interpolate } from "@/components/i18n-provider";
+import { useCloudResourceKey } from "@/context/CloudResourceContext";
+import { Button } from "@/components/ui/button";
 import { DeploymentsFilters } from "./DeploymentsFilters";
 import { DeploymentsList } from "./DeploymentsList";
 import { LoadingSkeleton } from "./LoadingSkeleton";
@@ -17,6 +21,7 @@ import {
 } from "../utils";
 
 interface DeploymentsContentProps {
+  monitoring?: boolean;
   /** When set, scope to this project and hide the project selector */
   projectId?: string;
   projectName?: string;
@@ -26,13 +31,15 @@ interface DeploymentsContentProps {
   appTemplateId?: string;
 }
 
-export const DeploymentsContent: React.FC<DeploymentsContentProps> = (props) => (
-  <DeploymentHistory key={props.projectId ?? "all-projects"} {...props} />
-);
+export const DeploymentsContent: React.FC<DeploymentsContentProps> = (props) => {
+  const resourceKey = useCloudResourceKey();
+  return <DeploymentHistory key={`${resourceKey}:${props.projectId ?? "all-projects"}`} {...props} />;
+};
 
 const PAGE_SIZE = 20;
 
 const DeploymentHistory: React.FC<DeploymentsContentProps> = ({
+  monitoring = false,
   projectId,
   projectName,
   hideHeader = false,
@@ -45,11 +52,12 @@ const DeploymentHistory: React.FC<DeploymentsContentProps> = ({
   const [deployments, setDeployments] = useState<Deployment[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [summary, setSummary] = useState<DeploymentHistorySummary | null>(null);
   const [total, setTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [revision, setRevision] = useState(0);
   const [query, setQuery] = useDeploymentHistoryQuery(isProject);
-  const { page, filter, searchQuery, selectedProjectId } = query;
+  const { page, days, filter, searchQuery, selectedProjectId } = query;
   const refreshDeployments = useCallback(() => setRevision((value) => value + 1), []);
 
   useEffect(() => {
@@ -59,6 +67,7 @@ const DeploymentHistory: React.FC<DeploymentsContentProps> = ({
     const params = {
       page,
       perPage: PAGE_SIZE,
+      ...(monitoring ? { days } : {}),
       status: filter === "all" ? undefined : filter,
       search: searchQuery.trim() || undefined,
     };
@@ -79,6 +88,7 @@ const DeploymentHistory: React.FC<DeploymentsContentProps> = ({
       }));
       setDeployments(mapped);
       setTotal(res.total);
+      setSummary(res.summary ?? null);
       if (!isProject) {
         setProjects((previous) => {
           if (res.projects) return res.projects;
@@ -94,12 +104,12 @@ const DeploymentHistory: React.FC<DeploymentsContentProps> = ({
         });
       }
     }).catch((err) => {
-      if (!controller.signal.aborted) setError(getApiErrorMessage(err, t.deployments.loadFailed));
+      if (!controller.signal.aborted) { setError(getApiErrorMessage(err, t.deployments.loadFailed)); setSummary(null); }
     }).finally(() => {
       if (!controller.signal.aborted) setIsLoading(false);
     });
     return () => controller.abort();
-  }, [projectId, projectName, isProject, page, filter, searchQuery, selectedProjectId, revision, t.deployments.loadFailed, setQuery]);
+  }, [monitoring, days, projectId, projectName, isProject, page, filter, searchQuery, selectedProjectId, revision, t.deployments.loadFailed, setQuery]);
 
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
@@ -108,8 +118,28 @@ const DeploymentHistory: React.FC<DeploymentsContentProps> = ({
   const activeCount = (stats.building || 0) + (stats.pending || 0);
   const failedCount = (stats.failed || 0) + (stats.canceled || 0);
 
+  const filters = (
+    <DeploymentsFilters
+            isProject={isProject}
+            filter={filter}
+            searchQuery={searchQuery}
+            selectedProjectId={selectedProjectId}
+            projects={projects}
+            onFilterChange={(value) => setQuery((previous) => ({ ...previous, filter: value, page: 1 }))}
+            onSearchChange={(value) => setQuery((previous) => ({ ...previous, searchQuery: value, page: 1 }))}
+            onProjectChange={(value) => setQuery((previous) => ({ ...previous, selectedProjectId: value, page: 1 }))}
+          />
+  );
+
   return (
     <div>
+      {monitoring && <div className="mb-5">{filters}</div>}
+      {monitoring && <DeploymentOverview summary={summary} loading={isLoading} days={days} projects={projects}
+        onDaysChange={days => setQuery(previous => ({ ...previous, days, page: 1 }))}
+        onFilterChange={filter => setQuery(previous => ({ ...previous, filter, page: 1 }))}
+        onProjectChange={selectedProjectId => setQuery(previous => ({ ...previous, selectedProjectId, filter: "all", page: 1 }))}
+        onRefresh={refreshDeployments} />}
+      {monitoring && <h2 className="mb-3 text-base font-medium">{t.deployments.monitoring.history}</h2>}
       {/* Header */}
       {!hideHeader && (
         <div className="mb-6">
@@ -131,16 +161,7 @@ const DeploymentHistory: React.FC<DeploymentsContentProps> = ({
       <div className={hideSidebar ? "" : "grid grid-cols-1 lg:grid-cols-[1fr_340px] gap-6"}>
         {/* LEFT COLUMN */}
         <div className="space-y-4 min-w-0">
-          <DeploymentsFilters
-            isProject={isProject}
-            filter={filter}
-            searchQuery={searchQuery}
-            selectedProjectId={selectedProjectId}
-            projects={projects}
-            onFilterChange={(value) => setQuery((previous) => ({ ...previous, filter: value, page: 1 }))}
-            onSearchChange={(value) => setQuery((previous) => ({ ...previous, searchQuery: value, page: 1 }))}
-            onProjectChange={(value) => setQuery((previous) => ({ ...previous, selectedProjectId: value, page: 1 }))}
-          />
+          {!monitoring && filters}
           {isLoading ? (
             <LoadingSkeleton />
           ) : error ? (
@@ -168,19 +189,17 @@ const DeploymentHistory: React.FC<DeploymentsContentProps> = ({
                 })}
               </span>
               <div className="flex items-center gap-3">
-                <button type="button" disabled={isLoading || page <= 1}
+                <Button type="button" variant="secondary" size="icon" disabled={isLoading || page <= 1}
                   aria-label={t.deployments.pagination.previous}
-                  onClick={() => setQuery((previous) => ({ ...previous, page: previous.page - 1 }))}
-                  className="rounded-lg border border-border/60 p-2 enabled:hover:bg-muted disabled:opacity-40">
+                  onClick={() => setQuery((previous) => ({ ...previous, page: previous.page - 1 }))}>
                   <UiIcon name="chevron-left" className="size-4 rtl:rotate-180" />
-                </button>
+                </Button>
                 <span>{interpolate(t.deployments.pagination.pageOf, { page: String(page), total: String(pageCount) })}</span>
-                <button type="button" disabled={isLoading || page >= pageCount}
+                <Button type="button" variant="secondary" size="icon" disabled={isLoading || page >= pageCount}
                   aria-label={t.deployments.pagination.next}
-                  onClick={() => setQuery((previous) => ({ ...previous, page: previous.page + 1 }))}
-                  className="rounded-lg border border-border/60 p-2 enabled:hover:bg-muted disabled:opacity-40">
+                  onClick={() => setQuery((previous) => ({ ...previous, page: previous.page + 1 }))}>
                   <UiIcon name="chevron-right" className="size-4 rtl:rotate-180" />
-                </button>
+                </Button>
               </div>
             </nav>
           )}

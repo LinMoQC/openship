@@ -43,13 +43,16 @@
  * surfaces as `onClose` and reconnects with the new credentials.
  */
 
+import { reportCaughtError as observeCaughtError, diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import { safeErrorMessage } from "@repo/core";
+import { repos } from "@repo/db";
+import { activeDeploymentForProject } from "../../lib/active-deployment";
 import { trackBackgroundWork } from "../../lib/background-work";
 import {
   type ContainerLifecycleEvent,
   type RuntimeAdapter,
 } from "@repo/adapters";
-import { containerHealthEventsAvailable } from "./health-watch-policy";
+import { containerHealthEventsAvailable, isManagedServerIdle } from "./health-watch-policy";
 import { resolveDeploymentRuntimeForRead } from "@repo/platform/engine/lib/deployment-runtime";
 import { sshManager } from "@repo/platform/engine/lib/ssh-manager";
 import { isTrackedHealthContainer, parseWatchGroupKey, runHealthWatch } from "@repo/platform/engine/modules/monitoring/health-watch";
@@ -101,6 +104,7 @@ interface Subscription {
   key: string;
   serverId: string | null;
   organizationId: string;
+  projectId?: string;
   /** Held for the subscription's whole life — not disposed per sweep. */
   runtime: RuntimeAdapter | null;
   stopStream: (() => void) | null;
@@ -156,12 +160,13 @@ export async function renewEventWatchers(groupKeys: readonly string[]): Promise<
       armLease(existing);
       continue;
     }
-    const { serverId, organizationId } = parseWatchGroupKey(key);
+    const { serverId, organizationId, projectId } = parseWatchGroupKey(key);
     if (!organizationId) continue;
     const sub: Subscription = {
       key,
       serverId,
       organizationId,
+      projectId,
       runtime: null,
       stopStream: null,
       retained: false,
@@ -216,9 +221,19 @@ async function connect(sub: Subscription): Promise<void> {
     // The same read-path resolver the sweep uses, so the transport decision (local
     // socket vs SSH bridge) is made in exactly one place. Re-resolved on every
     // reconnect, which is how a credential change is picked up.
+    let savedMeta = {};
+    if (sub.projectId) {
+      const project = await repos.project.findByIdInOrganization(sub.projectId, sub.organizationId);
+      const current = project?.activeDeploymentId ? await repos.deployment.findById(project.activeDeploymentId) : null;
+      const deployment = project ? activeDeploymentForProject(project, current) : null;
+      if (!deployment || project?.serverId !== sub.serverId)
+        throw new Error("Managed event watcher no longer has an active deployment on this server");
+      savedMeta = deployment.meta ?? {};
+    }
     const { runtime } = await resolveDeploymentRuntimeForRead({
-      meta: { serverId: sub.serverId ?? undefined },
+      meta: { ...savedMeta, serverId: sub.serverId ?? undefined, runtimeMode: "docker" },
       organizationId: sub.organizationId,
+      projectId: sub.projectId,
     });
     if (sub.closed) {
       await closeTransport(runtime, sub.key);
@@ -237,7 +252,7 @@ async function connect(sub: Subscription): Promise<void> {
       return;
     }
 
-    if (sub.serverId) {
+    if (sub.serverId && !sub.projectId) {
       sshManager.retain(sub.serverId);
       sub.retained = true;
     }
@@ -252,6 +267,11 @@ async function connect(sub: Subscription): Promise<void> {
     // were not listening has no event left to replay.
     schedule(sub);
   } catch (err) {
+    observeCaughtError(err, "platform/engine/modules/monitoring/container-events");
+    if (isManagedServerIdle(err)) {
+      await teardown(sub, "managed server is stopped or starting");
+      return;
+    }
     await onClose(sub, err instanceof Error ? err : new Error(safeErrorMessage(err)));
   } finally {
     sub.connecting = false;
@@ -279,7 +299,7 @@ async function onClose(sub: Subscription, err: Error | null): Promise<void> {
   if (sub.closed) return;
   await releaseTransport(sub);
   if (err) {
-    console.warn(`[container-events] ${sub.key} stream closed: ${safeErrorMessage(err)}`);
+    errorDiagnostics.warn("platform/engine/modules/monitoring/container-events", `[container-events] ${sub.key} stream closed: ${safeErrorMessage(err)}`);
   }
   // Lease already gone, or the feature was turned off mid-stream: don't reconnect.
   if (sub.leaseUntil <= Date.now() || !eventsEnabled()) {
@@ -341,7 +361,7 @@ async function sweep(sub: Subscription): Promise<void> {
     }
   } catch (err) {
     // runHealthWatch swallows its own failures; this only catches the unexpected.
-    console.error(`[container-events] ${sub.key} sweep failed: ${safeErrorMessage(err)}`);
+    errorDiagnostics.error("platform/engine/modules/monitoring/container-events", `[container-events] ${sub.key} sweep failed: ${safeErrorMessage(err)}`, err);
   } finally {
     sub.lastRunAt = Date.now();
     sub.running = false;
@@ -369,7 +389,7 @@ async function releaseTransport(sub: Subscription): Promise<void> {
     // Logged, not rethrown: the SSH hold below is released in the same breath, and
     // stranding it would leak a pooled connection for a stream that was already going
     // away. But an aborter that throws every reconnect is a leak of its own.
-    console.error(`[container-events] ${sub.key} stream would not close: ${safeErrorMessage(err)}`);
+    errorDiagnostics.error("platform/engine/modules/monitoring/container-events", `[container-events] ${sub.key} stream would not close: ${safeErrorMessage(err)}`, err);
   }
   const runtime = sub.runtime;
   sub.runtime = null;
@@ -410,7 +430,7 @@ async function closeTransport(runtime: RuntimeAdapter | null, key: string): Prom
     // release is the next statement at every call site. It does leak an ssh child and
     // its fd though, so it says so: a reconnect loop over a transport that never
     // disposes is otherwise invisible until the process runs out of descriptors.
-    console.error(`[container-events] ${key} transport did not close cleanly: ${safeErrorMessage(err)}`);
+    errorDiagnostics.error("platform/engine/modules/monitoring/container-events", `[container-events] ${key} transport did not close cleanly: ${safeErrorMessage(err)}`, err);
   }
 }
 

@@ -6,7 +6,7 @@
  * the STACKS registry in @repo/core - no duplication.
  *
  * Supports:
- *   JS/TS:   Next.js, Nuxt, SvelteKit, Astro, Vite, Angular, Gatsby, Remix,
+ *   JS/TS:   Farm.js, Next.js, Nuxt, SvelteKit, Astro, Vite, Angular, Gatsby, Remix,
  *            TanStack Start, CRA, Vue, Express, Fastify, Hono, NestJS, Koa,
  *            AdonisJS, Elysia
  *   Go:      Standard, Gin, Fiber, Echo
@@ -27,11 +27,14 @@ import {
   categoryServesFiles,
   getProjectType,
   getBuildImage,
+  nodeImageForEngine,
+  bunBuildImage,
   parseRubyVersion,
   LANGUAGE_MANIFEST_FILES,
   collectDependencies,
   detectPort as detectPortFromLanguages,
   parseDeploymentMetadata,
+  resolveWebCommand,
   type StackId,
   type ProjectType,
   type StackDefinition,
@@ -106,20 +109,17 @@ export function detectPackageManager(
     if (lower.endsWith(".csproj") || lower.endsWith(".fsproj") || lower.endsWith(".sln")) return "dotnet";
   }
 
-  // ── JS/TS lock files (most reliable) ──
+  // Explicit repository tool selection wins over stale lockfiles.
+  const declared = packageJson?.packageManager?.split("@")[0] ??
+    (packageJson as { devEngines?: { packageManager?: { name?: string } } } | undefined)
+      ?.devEngines?.packageManager?.name;
+  if (declared && ["npm", "pnpm", "yarn", "bun"].includes(declared)) return declared;
+
+  // Lockfiles provide the fallback when no manager is declared.
   if (fileSet.has("pnpm-lock.yaml")) return "pnpm";
   if (fileSet.has("bun.lockb") || fileSet.has("bun.lock")) return "bun";
   if (fileSet.has("package-lock.json")) return "npm";
   if (fileSet.has("yarn.lock")) return "yarn";
-
-  // packageManager field in package.json
-  if (packageJson?.packageManager) {
-    const pm = packageJson.packageManager;
-    if (pm.startsWith("pnpm")) return "pnpm";
-    if (pm.startsWith("yarn")) return "yarn";
-    if (pm.startsWith("bun")) return "bun";
-    if (pm.startsWith("npm")) return "npm";
-  }
 
   // Scripts hints
   if (packageJson?.scripts) {
@@ -250,6 +250,7 @@ function hasAnyContentMatch(detection: StackDetection | undefined, fileContents:
 const FRAMEWORK_RULES: FrameworkRule[] = [
   // ── Frontend / Fullstack JS (check first - they may also have backend deps) ──
   { stack: "nextjs" },
+  { stack: "farmjs" },
   { stack: "nuxt" },
   { stack: "sveltekit" },
   { stack: "astro" },
@@ -500,6 +501,22 @@ export function detectStack(
     }
   }
 
+  // The Docker builder uses a repository Dockerfile when present. Classify it
+  // before deriving language commands, otherwise an inferred package-manager
+  // command overrides an image whose runtime may not contain that tool.
+  // A root Compose file alongside that Dockerfile owns the service topology,
+  // even when a framework matched first. Without a Dockerfile, keep framework
+  // detection: the Compose file may only provide local-development dependencies.
+  // Explicit metadata is applied below.
+  if (
+    matched !== "docker-compose" &&
+    files.some((file) => file.type === "file" && file.name === "Dockerfile")
+  ) {
+    matched = hasAnyRootMarker(STACKS["docker-compose"].detection, fileSet)
+      ? "docker-compose"
+      : "docker";
+  }
+
   const pm = detectPackageManager(files, packageJson as Record<string, unknown> & {
     packageManager?: string;
     scripts?: Record<string, string>;
@@ -562,7 +579,12 @@ export function detectStack(
     buildImage: getBuildImage(matched, pm),
     outputDirectory: OUTPUT_DIRECTORIES[matched] ?? "dist",
     productionPaths,
-    port: detectPortFromLanguages({ packageJson, fileContents: fc }) ?? stackDef.defaultPort,
+    port:
+      detectPortFromLanguages(
+        matched === "docker"
+          ? { fileContents: { dockerfile: fc.dockerfile ?? "" } }
+          : { packageJson, fileContents: fc },
+      ) ?? stackDef.defaultPort,
   };
 
   // Fold metadata (vercel.json / render.yaml / …) over heuristic detection so a
@@ -570,9 +592,17 @@ export function detectStack(
   const resolved = applyMetadataOverrides(result, parseDeploymentMetadata(fc));
   // Metadata can reclassify the framework. Resolve the pin after the final
   // classification so it cannot be discarded by a framework override.
+  const defaultBuildImage = getBuildImage(
+    resolved.stack, resolved.packageManager, detectRubyVersion(fc),
+  );
   return {
     ...resolved,
-    buildImage: getBuildImage(resolved.stack, resolved.packageManager, detectRubyVersion(fc)),
+    buildImage: defaultBuildImage.startsWith("oven/bun:")
+      ? bunBuildImage(packageJson)
+      : nodeImageForEngine(
+          defaultBuildImage,
+          (packageJson?.engines as { node?: unknown } | undefined)?.node,
+        ),
   };
 }
 
@@ -603,12 +633,15 @@ export function applyMetadataOverrides(
 ): StackResult {
   let out = result;
 
-  for (const meta of metadataList) {
+  for (const meta of [...metadataList].reverse()) {
     // A nonLocal file's build/install/output/framework all pertain to a
     // different directory - ignore them here (rewrites are handled elsewhere).
     if (meta.nonLocal) continue;
 
     const takeOver = (current: string, next: string | undefined): string => {
+      // Vercel explicitly uses an empty command to disable that step. A shell
+      // no-op preserves the intent through legacy nonempty-command validation.
+      if (meta.source === "vercel" && next === "") return ":";
       if (!isSet(next)) return current;
       if (meta.fillOnly && isSet(current)) return current;
       return next;
@@ -637,6 +670,16 @@ export function applyMetadataOverrides(
   if (declaresOutputDir && !isTrueServerStack(out)) {
     out = classifyAsStaticOutput(out);
   }
+
+  // Resolve the selected stack's opt-in startup optimization once, after the
+  // final web command and stack classification. A nonLocal file describes a
+  // different directory, so its flag is ignored like its build-shaping fields.
+  const optimize = metadataList.some((m) => !m.nonLocal && m.optimize === true);
+  const { optimizeCommand } = STACKS[out.stack] as StackDefinition;
+  out = {
+    ...out,
+    startCommand: resolveWebCommand({ command: out.startCommand, optimize, optimizeCommand }),
+  };
 
   return out;
 }
@@ -812,6 +855,8 @@ export function getBuildCommand(
   packageJson?: Record<string, unknown>,
   files?: RepoFile[],
 ): string {
+  // Docker owns these steps; package scripts are not runtime overrides.
+  if (stack === "docker" || stack === "docker-compose") return "";
   const scripts = (packageJson?.scripts ?? {}) as Record<string, string>;
   const runner = scriptRunner(pm);
 
@@ -851,6 +896,8 @@ export function getBuildCommand(
 
 /** Start command - prefers project scripts, then falls back to registry defaults */
 export function getStartCommand(pm: string, stack: StackId, packageJson?: Record<string, unknown>): string {
+  // Docker owns these steps; package scripts are not runtime overrides.
+  if (stack === "docker" || stack === "docker-compose") return "";
   const scripts = (packageJson?.scripts ?? {}) as Record<string, string>;
   const runner = scriptRunner(pm);
 

@@ -40,7 +40,7 @@ vi.mock("@repo/db", () => ({
 // diagnosis and a stand-in for it would keep passing after the two stopped agreeing.
 vi.mock("@repo/platform/engine/lib/ssh-manager", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
-  sshManager: { withExecutor: h.withExecutor, diagnoseReachability: h.diagnose },
+  sshManager: { acquire: vi.fn(async () => ({})), retain: vi.fn(), release: vi.fn(), withExecutor: h.withExecutor, diagnoseReachability: h.diagnose },
 }));
 
 vi.mock("../../lib/permission", () => ({ permission: { assert: h.assert } }));
@@ -53,7 +53,12 @@ import { checkServer as checkServerHandler } from "./server-check.controller";
 /** Enough of a Hono context for this handler: a JSON body in, a JSON reply out. */
 function context(body: unknown) {
   const sent: { body: unknown; status: number } = { body: undefined, status: 0 };
+  const vars = new Map<string, unknown>();
   const c = {
+    set: (key: string, value: unknown) => vars.set(key, value),
+    get: (key: string) => vars.get(key),
+    header: vi.fn(),
+    res: new Response(),
     req: { json: async () => body },
     json: (payload: unknown, status = 200) => {
       sent.body = payload;

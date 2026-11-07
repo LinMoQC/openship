@@ -10,6 +10,10 @@ import type { DeployConfig } from "../types";
 import type { ClusterVolumeMount } from "@repo/core";
 import { kubernetesIdLabel } from "../cluster/kubernetes-label";
 import { clusterDatabaseNamespace } from "../cluster/database";
+import {
+  admitProjectManifests,
+  PROJECT_MANIFEST_LABEL,
+} from "../cluster/project-manifests";
 
 const image = `ghcr.io/team/api@sha256:${"a".repeat(64)}`;
 const config = (id = "deploy-1"): DeployConfig => ({
@@ -22,7 +26,9 @@ const config = (id = "deploy-1"): DeployConfig => ({
   envVars: { DATABASE_URL: "private-value" },
   resources: { cpuCores: 0.5, memoryMb: 256, diskMb: 1024 },
 });
-function setup() {
+function setup(
+  sharedDatabases?: () => Promise<readonly { databaseId: string; projectId: string }[]>,
+) {
   const resources = new Map<string, KubernetesObject>();
   let version = 1;
   const ready = (object: KubernetesObject) => {
@@ -115,6 +121,7 @@ function setup() {
       api,
       projectId,
       runtimeId: "runtime-1",
+      sharedDatabases,
       edgePrivateIp: "10.20.0.1",
       servers: [{ serverId: "server-a", name: "Production A", nodeName: "openship-a" }],
       config: { replicas: 3, imageRepository: "ghcr.io/team/api", mounts },
@@ -166,8 +173,10 @@ function discoverForCleanup(
 }
 
 describe("Kubernetes workload lifecycle", () => {
-  async function withDatabaseConnections() {
-    const fixture = setup();
+  async function withDatabaseConnections(
+    sharedDatabases?: () => Promise<readonly { databaseId: string; projectId: string }[]>,
+  ) {
+    const fixture = setup(sharedDatabases);
     const databases = [];
     for (const [id, group, collection, host] of [
       ["orders", "postgresql.cnpg.io/v1", "clusters", "database-rw"],
@@ -203,6 +212,81 @@ describe("Kubernetes workload lifecycle", () => {
     };
     return { ...fixture, databases, deployment };
   }
+  it.each(["orders", "cache", "sessions"])(
+    "deploys an explicitly shared native database without changing source ownership (%s)",
+    async (databaseId) => {
+      const fixture = await withDatabaseConnections(async () => [
+        { databaseId, projectId: "source-project" },
+      ]);
+      for (const object of fixture.resources.values())
+        if (object.metadata.labels?.["openship.io/database"] === databaseId)
+          object.metadata.labels["openship.io/project"] = kubernetesIdLabel("source-project");
+      const result = await fixture.runtime.deploy(fixture.deployment);
+      expect(result.status).toBe("running");
+      for (const object of fixture.resources.values())
+        if (object.metadata.labels?.["openship.io/database"] === databaseId)
+          expect(object.metadata.labels["openship.io/project"]).toBe(
+            kubernetesIdLabel("source-project"),
+          );
+    },
+  );
+
+  it("rejects a foreign database without an explicit grant before reading its credentials", async () => {
+    const fixture = await withDatabaseConnections();
+    const db = fixture.databases[0];
+    fixture.resources.get(`/api/v1/namespaces/${db.namespace}`)!.metadata.labels![
+      "openship.io/project"
+    ] = "foreign";
+    fixture.request.mockClear();
+    await expect(fixture.runtime.deploy(fixture.deployment)).rejects.toMatchObject({
+      code: "CLUSTER_DATABASE_UNAVAILABLE",
+    });
+    expect(
+      fixture.request.mock.calls.some(
+        ([, path]) => path === `/api/v1/namespaces/${db.namespace}/secrets/credentials`,
+      ),
+    ).toBe(false);
+  });
+
+  it("refuses cutover when the database grant is revoked while the candidate starts", async () => {
+    let checks = 0;
+    const fixture = await withDatabaseConnections(async () =>
+      ++checks === 1 ? [{ databaseId: "orders", projectId: "source-project" }] : [],
+    );
+    for (const object of fixture.resources.values())
+      if (object.metadata.labels?.["openship.io/database"] === "orders")
+        object.metadata.labels["openship.io/project"] = "source-project";
+    await expect(fixture.runtime.deploy(fixture.deployment)).rejects.toThrow(
+      "database connection is unavailable",
+    );
+    expect(
+      [...fixture.resources.values()].some(
+        (object) => object.kind === "Service" && object.metadata.name === "app",
+      ),
+    ).toBe(false);
+  });
+
+  it.each(["start", "restart"] as const)(
+    "rechecks an explicit database grant before %s",
+    async (operation) => {
+      let granted = true;
+      const fixture = await withDatabaseConnections(async () =>
+        granted ? [{ databaseId: "orders", projectId: "source-project" }] : [],
+      );
+      for (const object of fixture.resources.values())
+        if (object.metadata.labels?.["openship.io/database"] === "orders")
+          object.metadata.labels["openship.io/project"] = "source-project";
+      const result = await fixture.runtime.deploy(fixture.deployment);
+      await fixture.runtime.stop(result.containerId!);
+      granted = false;
+      fixture.request.mockClear();
+      await expect(fixture.runtime[operation](result.containerId!)).rejects.toMatchObject({
+        code: "CLUSTER_DATABASE_UNAVAILABLE",
+      });
+      expect(fixture.request.mock.calls.some(([method]) => method === "PATCH")).toBe(false);
+    },
+  );
+
   it("restarts a release with the same databases even when saved connection keys arrive in a different order", async () => {
     const { runtime, resources, deployment } = await withDatabaseConnections();
     const result = await runtime.deploy(deployment);
@@ -587,6 +671,66 @@ describe("Kubernetes workload lifecycle", () => {
     await fixture.runtime.cleanupProject("project-1");
     expect(fixture.resources.has(`/api/v1/namespaces/${fixture.runtime.namespace}`)).toBe(false);
   });
+  it("keeps manifest Deployments out of native release inventory and cleans their owned namespace", async () => {
+    const fixture = setup();
+    const deployment = await fixture.runtime.deploy(config());
+    const namespace = `/api/v1/namespaces/${fixture.runtime.namespace}`;
+    const manifest = admitProjectManifests(
+      [
+        {
+          apiVersion: "apps/v1",
+          kind: "Deployment",
+          metadata: { name: "custom-api" },
+          spec: {
+            selector: { matchLabels: { app: "custom-api" } },
+            template: {
+              metadata: { labels: { app: "custom-api" } },
+              spec: { containers: [{ name: "api", image: "nginx:alpine" }] },
+            },
+          },
+        },
+      ],
+      { projectId: "project-1", runtimeId: "runtime-1", namespace: fixture.runtime.namespace },
+    )[0]!;
+    const created = await fixture.request(
+      "POST",
+      `/apis/apps/v1/namespaces/${fixture.runtime.namespace}/deployments`,
+      manifest,
+    );
+    expect(await fixture.runtime.listProjectContainerIds("project-1")).toEqual([
+      deployment.containerId,
+    ]);
+    await fixture.runtime.destroy(deployment.containerId!);
+    expect(await fixture.runtime.listProjectContainerIds("project-1")).toEqual([]);
+    discoverForCleanup(fixture, { kind: "Deployment", name: "deployments", value: created });
+    await fixture.runtime.cleanupProject("project-1");
+    expect(fixture.resources.has(namespace)).toBe(false);
+  });
+  it.each(["openship.io/project", "openship.io/runtime"])(
+    "still rejects foreign manifest Deployments with a mismatched %s",
+    async (label) => {
+      const fixture = setup();
+      const deployment = await fixture.runtime.deploy(config());
+      const namespace = `/api/v1/namespaces/${fixture.runtime.namespace}`;
+      const labels = {
+        ...fixture.resources.get(namespace)!.metadata.labels,
+        [PROJECT_MANIFEST_LABEL]: "true",
+        [label]: "foreign",
+      };
+      fixture.resources.set(
+        `/apis/apps/v1/namespaces/${fixture.runtime.namespace}/deployments/custom-api`,
+        { kind: "Deployment", metadata: { name: "custom-api", labels } },
+      );
+      await fixture.runtime.destroy(deployment.containerId!);
+      await expect(fixture.runtime.listProjectContainerIds("project-1")).rejects.toMatchObject({
+        code: "CLUSTER_WORKLOAD_OWNERSHIP",
+      });
+      await expect(fixture.runtime.cleanupProject("project-1")).rejects.toMatchObject({
+        code: "CLUSTER_WORKLOAD_OWNERSHIP",
+      });
+      expect(fixture.resources.has(namespace)).toBe(true);
+    },
+  );
   it.each(["PersistentVolumeClaim", "PostgresCluster"])(
     "preserves attached %s even with copied ownership labels and omitted item kind",
     async (kind) => {
@@ -611,4 +755,37 @@ describe("Kubernetes workload lifecycle", () => {
       ).toBe(false);
     },
   );
+  it.each(["ConfigMap", "Job", "CronJob"])(
+    "removes a project-manifest %s that carries this project's ownership labels (#1039)",
+    async (kind) => {
+      const fixture = setup();
+      const deployment = await fixture.runtime.deploy(config());
+      const namespace = `/api/v1/namespaces/${fixture.runtime.namespace}`;
+      const labels = fixture.resources.get(namespace)!.metadata.labels;
+      await fixture.runtime.destroy(deployment.containerId!);
+      discoverForCleanup(fixture, {
+        kind,
+        name: "manifest-objects",
+        value: { kind, metadata: { name: "from-manifest", uid: "manifest", labels } },
+      });
+      await fixture.runtime.cleanupProject("project-1");
+      expect(fixture.resources.has(namespace)).toBe(false);
+    },
+  );
+  it("still preserves a ConfigMap this project does not own", async () => {
+    const fixture = setup();
+    const deployment = await fixture.runtime.deploy(config());
+    const namespace = `/api/v1/namespaces/${fixture.runtime.namespace}`;
+    await fixture.runtime.destroy(deployment.containerId!);
+    discoverForCleanup(fixture, {
+      kind: "ConfigMap",
+      name: "configmaps",
+      value: {
+        kind: "ConfigMap",
+        metadata: { name: "operator-config", uid: "foreign", labels: {} },
+      },
+    });
+    await expect(fixture.runtime.cleanupProject("project-1")).rejects.toThrow("ConfigMap");
+    expect(fixture.resources.has(namespace)).toBe(true);
+  });
 });

@@ -10,6 +10,7 @@
  * apt is first-class (the common case); dnf/yum/apk are best-effort.
  */
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { compareSemver, type SystemPackageManager } from "@repo/core";
 import type { CommandExecutor } from "../types";
 import type { EnvironmentProfile } from "./environment";
@@ -63,6 +64,9 @@ const READ_CANDIDATE: Readonly<Record<SystemPackageManager, ((out: string) => st
       const versions = [...out.matchAll(/^\s+([\w.+~-]+):\s*$/gm)].map((m) => m[1]!);
       return versions.length ? versions[versions.length - 1]! : null;
     },
+    // `pacman -Si` prints `Version         : 2.51.0-1`. The revision after `-` is
+    // dropped by normalizePkgVersion, the same way an rpm revision is.
+    pacman: (out) => out.match(/^Version\s*:\s*(\S+)/m)?.[1]?.trim() ?? null,
     // Both refuse the probe itself, so there is no output to read. Stated rather than
     // omitted — `null` here is paired with a refusal, not with a missing branch.
     brew: null,
@@ -113,7 +117,8 @@ export async function enrichAvailableVersions(
           s.availableVersion = avail;
           s.updateAvailable = true;
         }
-      } catch {
+      } catch (diagnosticFailure) {
+        observeCaughtError(diagnosticFailure, "adapters/system/available-version");
         /* best-effort: leave this component without an available version */
       }
     }),

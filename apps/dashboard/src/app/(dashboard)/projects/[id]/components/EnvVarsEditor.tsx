@@ -1,3 +1,5 @@
+import { useComposeReview } from "@/hooks/useComposeReview";
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { Icon as UiIcon } from "@repo/ui/icons";
 import React, { useCallback, useEffect, useState } from "react";
 import { Modal } from "@/components/ui/Modal";
@@ -45,9 +47,10 @@ export function EnvVarsEditor({
   onClose: () => void;
 }) {
   const { showToast } = useToast();
-  const showCloudPricing = useCloudDeployPricing();
   const { t } = useI18n();
   const { projectData } = useProjectSettings();
+  const showCloudPricing = useCloudDeployPricing(projectData.workspaceId);
+  const showComposeReview = useComposeReview(projectId);
   const hasActiveDeployment = Boolean(projectData?.activeDeploymentId);
   const [rows, setRows] = useState<Row[]>([]);
   const [baseline, setBaseline] = useState<PersistedProjectEnv[] | null>(null);
@@ -81,7 +84,7 @@ export function EnvVarsEditor({
       setRows(loaded);
       setBaseline(envState.baseline);
       // Best-effort: which of these keys are managed by a service connection?
-      const conns = await connectionsApi.list(projectId).catch(() => ({ data: [] }));
+      const conns = await connectionsApi.list(projectId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "dashboard/app/(dashboard)/projects/[id]/components/EnvVarsEditor"); return ({ data: [] }); });
       const map: Record<string, ProjectConnection> = {};
       for (const cn of conns?.data ?? []) map[cn.envKey] = cn;
       setLinked(map);
@@ -165,14 +168,14 @@ export function EnvVarsEditor({
       showToast(t.projectSettings.envVars.toast.applying, "success", t.projectSettings.envVars.toast.applyingTitle);
       onClose();
     } catch (err) {
-      if (!showCloudPricing(err)) showToast(getApiErrorMessage(err, t.projectSettings.envVars.toast.applyFailed), "error", t.projectSettings.envVars.toast.applyFailedTitle);
+      if (!showComposeReview(err) && !showCloudPricing(err)) showToast(getApiErrorMessage(err, t.projectSettings.envVars.toast.applyFailed), "error", t.projectSettings.envVars.toast.applyFailedTitle);
     } finally {
       setApplying(false);
     }
   };
 
   // Remove a linked connection: drops the injected env var + the link, then
-  // re-syncs. On a live deployment, offer the no-rebuild apply.
+  // re-syncs. The connection API already requests a redeploy for a live target.
   const handleUnlink = async () => {
     if (!linkDetail) return;
     setUnlinking(true);
@@ -181,7 +184,6 @@ export function EnvVarsEditor({
       showToast(t.projects.connections.removed, "success");
       setLinkDetail(null);
       await load();
-      if (hasActiveDeployment) setPendingApply(true);
     } catch (err) {
       showToast(getApiErrorMessage(err, t.projects.connections.failed), "error");
     } finally {

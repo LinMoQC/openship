@@ -1,5 +1,6 @@
 "use client";
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { Icon as UiIcon, type IconName } from "@repo/ui/icons";
 
 import { useState } from "react";
@@ -10,6 +11,7 @@ import { useI18n } from "@/components/i18n-provider";
 import { Button } from "@/components/ui/button";
 import {
   renderableOAuthProviders,
+  renderableOidcProvider,
   type AdvertisedAuthProvider,
   type RenderableOAuthProviderId,
 } from "@/lib/auth-providers";
@@ -33,17 +35,20 @@ const PROVIDER_ICONS: Record<RenderableOAuthProviderId, IconName> = {
 export function OAuthButtons({
   providers,
   callbackURL = "/",
+  showDivider = true,
 }: {
   providers: readonly AdvertisedAuthProvider[] | undefined;
   callbackURL?: string;
+  showDivider?: boolean;
 }) {
   const { toast } = useToast();
   const { t } = useI18n();
-  const [loading, setLoading] = useState<RenderableOAuthProviderId | null>(null);
+  const [loading, setLoading] = useState<RenderableOAuthProviderId | "oidc" | null>(null);
 
   const visible = renderableOAuthProviders(providers);
+  const oidc = renderableOidcProvider(providers);
 
-  async function handleOAuth(provider: RenderableOAuthProviderId) {
+  async function handleOAuth(provider: RenderableOAuthProviderId | "oidc") {
     setLoading(provider);
     try {
       // Resolve callbackURL against the DASHBOARD origin. Better Auth resolves
@@ -52,6 +57,7 @@ export function OAuthButtons({
       // subdomain after the OAuth callback instead of returning to the app.
       const appOrigin = window.location.origin;
       const cb = new URL(callbackURL, appOrigin).toString();
+      const errorCb = new URL("/login", appOrigin).toString();
       // better-auth resolves sign-in errors into `{ error }` rather than
       // throwing, so inspecting the return value is what actually surfaces a
       // misconfigured/failed provider — the try/catch only covers thrown
@@ -59,9 +65,8 @@ export function OAuthButtons({
       const { error } = await signIn.social({
         provider,
         callbackURL: cb,
-        // First-time OAuth users take the newUser branch; keep them on the app.
         newUserCallbackURL: cb,
-        errorCallbackURL: new URL("/login", appOrigin).toString(),
+        errorCallbackURL: errorCb,
       });
       if (error) {
         toast("error", error.message ?? t.auth.errors.oauthFailed);
@@ -70,6 +75,7 @@ export function OAuthButtons({
       // Success → better-auth redirects the browser; keep the spinner until the
       // navigation happens rather than flashing the button back.
     } catch (err) {
+      observeCaughtError(err, "dashboard/components/oauth-buttons");
       const msg = isAbortError(err)
         ? t.auth.errors.serverUnreachable
         : t.auth.errors.oauthFailed;
@@ -80,19 +86,27 @@ export function OAuthButtons({
 
   // Nothing configured server-side → no divider, no buttons. This is what makes
   // the callers' unconditional `<OAuthButtons providers={…} />` safe.
-  if (visible.length === 0) return null;
+  if (visible.length === 0 && !oidc) return null;
+
+  // Every shipped locale's GitHub label contains the literal "GitHub", so the
+  // OIDC button reuses that sentence with the IdP display name in its place.
+  const oidcLabel = oidc
+    ? t.auth.oauth.github.includes("GitHub")
+      ? t.auth.oauth.github.replace("GitHub", oidc.name)
+      : `Continue with ${oidc.name}`
+    : null;
 
   return (
     <>
       {/* Divider */}
-      <div className="my-6 flex items-center gap-3">
+      {showDivider && <div className="my-6 flex items-center gap-3">
         <div className="h-px flex-1 bg-border" />
         <span className="select-none text-xs text-muted-foreground">{t.auth.oauth.or}</span>
         <div className="h-px flex-1 bg-border" />
-      </div>
+      </div>}
 
       {/* OAuth buttons */}
-      <div className="space-y-2.5">
+      <div className={showDivider ? "space-y-2.5" : "mt-2.5 space-y-2.5"}>
         {visible.map((provider) => (
           <Button
             key={provider}
@@ -105,6 +119,18 @@ export function OAuthButtons({
             {t.auth.oauth[provider]}
           </Button>
         ))}
+        {oidc && (
+          <Button
+            key="oidc"
+            variant="ghost"
+            disabled={loading !== null}
+            onClick={() => handleOAuth("oidc")}
+            className="w-full border-0 bg-foreground/[0.04] hover:bg-foreground/[0.08]"
+          >
+            {loading === "oidc" ? <UiIcon name="spinner" className="animate-spin" /> : <UiIcon name="key" size={17} />}
+            {oidcLabel}
+          </Button>
+        )}
       </div>
     </>
   );

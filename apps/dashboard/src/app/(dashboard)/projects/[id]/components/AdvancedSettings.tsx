@@ -1,3 +1,4 @@
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { Icon as UiIcon, type IconName } from "@repo/ui/icons";
 import React, { useCallback, useEffect, useState } from "react";
 import { useProjectSettings } from "@/context/ProjectSettingsContext";
@@ -9,7 +10,7 @@ import { useI18n, interpolate } from "@/components/i18n-provider";
 import { projectsApi } from "@/lib/api";
 import { getApiErrorMessage } from "@/lib/api/client";
 import { invalidateProjectCaches } from "@/hooks/useProjectEndpoints";
-import { migrationNeedsOperator } from "@/utils/project-status";
+import { getProjectStatus, migrationNeedsOperator } from "@/utils/project-status";
 import { formatBytes } from "@/lib/formatBytes";
 import type { RouteStrategy } from "@/lib/api/settings";
 import type { OpenshipReadiness } from "@repo/core";
@@ -25,6 +26,7 @@ import { ProjectRollbackSettings } from "@/components/rollback/ProjectRollbackSe
 import { isSchemaAppTemplate } from "@/components/app-settings/AppSettingsForm";
 import { AppConfiguration } from "./AppConfiguration";
 import { BuildSettings } from "./BuildSettings";
+import { CloudStaticHosting } from "@/components/project-settings/CloudStaticHosting";
 
 interface Props {
   onDeleteProject: (wipeVolumes?: boolean, recordOnly?: boolean) => void;
@@ -119,6 +121,7 @@ export const AdvancedSettings = ({ onDeleteProject }: Props) => {
   const { selfHosted } = usePlatform();
   const { t } = useI18n();
   const { projectData, servicesData } = useProjectSettings();
+  const isDeleting = getProjectStatus(projectData) === "deleting";
   // `enabled` is the server's answer (derived from disabled_at in enrichProject).
   // This local copy exists only so the button flips the instant the call returns;
   // the effect below re-seeds it from the payload, so a refresh — or a toggle that
@@ -251,7 +254,8 @@ export const AdvancedSettings = ({ onDeleteProject }: Props) => {
     try {
       await navigator.clipboard.writeText(id);
       showToast(id, "success", menu.idCopied);
-    } catch {
+    } catch (diagnosticFailure) {
+      observeCaughtError(diagnosticFailure, "dashboard/app/(dashboard)/projects/[id]/components/AdvancedSettings");
       // Insecure context or a denied clipboard permission — say so rather than
       // reporting a copy that never happened.
       showToast(menu.copyFailed, "error", menu.copyId);
@@ -289,9 +293,10 @@ export const AdvancedSettings = ({ onDeleteProject }: Props) => {
     },
     {
       id: "delete",
-      label: menu.delete,
-      icon: <UiIcon name="trash" className="size-4" />,
+      label: isDeleting ? t.projects.status.deleting : menu.delete,
+      icon: <UiIcon name={isDeleting ? "spinner" : "trash"} className={`size-4 ${isDeleting ? "animate-spin" : ""}`} />,
       onClick: () => setShowDeleteModal(true),
+      disabled: isDeleting,
       variant: "danger",
     },
   ];
@@ -544,6 +549,27 @@ export const AdvancedSettings = ({ onDeleteProject }: Props) => {
           </SectionCard>
         )}
 
+        {projectData?.deployTarget === "cloud" &&
+          projectData.releaseSource?.artifactKind !== "image" &&
+          (projectData.serviceCount ?? 0) === 0 &&
+          workloadOf({
+            workloadType: projectData.workloadType ?? projectData.options?.workloadType,
+            hasServer: projectData.options?.hasServer,
+          }) === "static" && (
+            <SectionCard
+              title={t.projectSettings.cloudStaticHosting.title}
+              description={t.projectSettings.cloudStaticHosting.nextDeploy}
+              icon="cloud"
+              iconTone="primary"
+              collapsible
+            >
+              <CloudStaticHostingSetting
+                projectId={projectData.id}
+                initial={projectData.cloudStaticHosting ?? "pages"}
+              />
+            </SectionCard>
+          )}
+
         {/* Routing (edge → app upstream) — self-hosted only; cloud handles its
             own ingress. Advanced opt-in; loopback-port is the safe default. */}
         {projectData?.deployTarget !== "cloud" && (
@@ -631,8 +657,8 @@ export const AdvancedSettings = ({ onDeleteProject }: Props) => {
 
         {selfHosted && user?.role === "admin" && projectId && (
           <SectionCard
-            title="Export project"
-            description="Download all project settings, environment values, and credentials as plain JSON."
+            title={t.projectSettings.advanced.export.title}
+            description={t.projectSettings.advanced.export.description}
             icon={"download"}
             iconTone="primary"
             collapsible
@@ -672,11 +698,14 @@ export const AdvancedSettings = ({ onDeleteProject }: Props) => {
               {t.projectSettings.advanced.danger.body}
             </p>
             <button
+              type="button"
               onClick={() => setShowDeleteModal(true)}
-              className="mt-4 inline-flex h-9 items-center gap-2 rounded-xl bg-danger-solid px-4 text-[13px] font-medium text-white transition-colors hover:bg-danger-solid/90"
+              disabled={isDeleting}
+              aria-busy={isDeleting}
+              className="mt-4 inline-flex h-9 items-center gap-2 rounded-xl bg-danger-solid px-4 text-[13px] font-medium text-white transition-colors hover:bg-danger-solid/90 disabled:cursor-wait disabled:opacity-70"
             >
-              <UiIcon name="trash" className="size-3.5" />
-              {t.projectSettings.advanced.danger.delete}
+              <UiIcon name={isDeleting ? "spinner" : "trash"} className={`size-3.5 ${isDeleting ? "animate-spin" : ""}`} />
+              {isDeleting ? t.projects.status.deleting : t.projectSettings.advanced.danger.delete}
             </button>
           </div>
         </div>
@@ -687,7 +716,7 @@ export const AdvancedSettings = ({ onDeleteProject }: Props) => {
       />
 
       <DeletionModal
-        isOpen={showDeleteModal}
+        isOpen={showDeleteModal && !isDeleting}
         onClose={() => setShowDeleteModal(false)}
         onConfirm={onDeleteProject}
         projectName={projectData?.name || projectData?.domain}
@@ -736,7 +765,8 @@ function RoutingStrategyCard({
         "success",
         t.projectSettings.advanced.routing.title,
       );
-    } catch {
+    } catch (diagnosticFailure) {
+      observeCaughtError(diagnosticFailure, "dashboard/app/(dashboard)/projects/[id]/components/AdvancedSettings");
       setStrategy(prev);
       showToast(
         t.projectSettings.advanced.routing.toast.failed,
@@ -828,7 +858,8 @@ function InternalAliasCard({
       if ((res as { success?: boolean })?.success === false) throw new Error("update failed");
       setSaved(trimmed);
       showToast(c.toast.saved, "success", c.title);
-    } catch {
+    } catch (diagnosticFailure) {
+      observeCaughtError(diagnosticFailure, "dashboard/app/(dashboard)/projects/[id]/components/AdvancedSettings");
       showToast(c.toast.failed, "error", c.title);
     } finally {
       setSaving(false);
@@ -929,7 +960,8 @@ function ReadinessCard({
         const res = await projectsApi.update(projectId, { readiness: resolved });
         if ((res as { success?: boolean })?.success === false) throw new Error("update failed");
         savedRef.current = resolved;
-      } catch {
+      } catch (diagnosticFailure) {
+        observeCaughtError(diagnosticFailure, "dashboard/app/(dashboard)/projects/[id]/components/AdvancedSettings");
         setValue(previous);
         showToast(t.projectSettings.advanced.routing.toast.failed, "error", title);
       }
@@ -1019,4 +1051,36 @@ function TransferOptions({
       </div>
     </div>
   );
+}
+
+function CloudStaticHostingSetting({
+  projectId,
+  initial,
+}: {
+  projectId: string;
+  initial: "pages" | "server";
+}) {
+  const [value, setValue] = useState(initial);
+  const [saving, setSaving] = useState(false);
+  const { showToast } = useToast();
+  const { t } = useI18n();
+  const { updateProjectData } = useProjectSettings();
+  useEffect(() => setValue(initial), [initial]);
+  const save = async (next: "pages" | "server") => {
+    if (saving || next === value) return;
+    setSaving(true);
+    try {
+      const result = await projectsApi.update(projectId, { cloudStaticHosting: next });
+      if ((result as { success?: boolean }).success === false)
+        throw new Error("Could not save hosting settings");
+      setValue(next);
+      updateProjectData({ cloudStaticHosting: next });
+      showToast(t.projectSettings.cloudStaticHosting.nextDeploy, "success");
+    } catch (error) {
+      showToast(getApiErrorMessage(error), "error");
+    } finally {
+      setSaving(false);
+    }
+  };
+  return <CloudStaticHosting value={value} disabled={saving} onChange={save} />;
 }

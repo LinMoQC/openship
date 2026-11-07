@@ -1,4 +1,5 @@
 import { requireGitopsRelease } from "../releases/release-gate";
+import { reportCaughtError as observeCaughtError, diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import { findActiveDeployment } from "@repo/platform/engine/lib/active-deployment";
 import type { ProjectControlSchemas } from "@repo/contracts";
 import type { ResourceServices } from "../../../resource-operations";
@@ -61,7 +62,7 @@ async function reRegisterDomainRoute(
     id: string;
     activeDeploymentId: string | null;
     port: number | null;
-    cloudWorkspaceId: string | null;
+    workspaceId: string | null;
     organizationId: string;
     webhookDomain: string | null;
     routeStrategy: string | null;
@@ -85,8 +86,8 @@ async function reRegisterDomainRoute(
     // (dependency) order, so the first one with a container was the database (#498).
     const svcDeps = await repos.service.listByDeployment(dep.id);
     const [projectServices, domainRows] = await Promise.all([
-      repos.service.listByProject(project.id).catch(() => []),
-      repos.domain.listByProject(project.id).catch(() => []),
+      repos.service.listByProject(project.id).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/projects/project-git.operations"); return []; }),
+      repos.domain.listByProject(project.id).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/projects/project-git.operations"); return []; }),
     ]);
     const primaryId = pickPrimaryServiceId(
       projectServices.filter((s) => s.enabled),
@@ -110,8 +111,8 @@ async function reRegisterDomainRoute(
     try {
       ({ runtime } = await resolveDeploymentRuntimeForRead(dep));
     } catch (err) {
-      console.warn(
-        `[Webhook Domain] could not resolve the live runtime for ${hostname}; leaving its route unchanged: ${safeErrorMessage(err)}`,
+      errorDiagnostics.warn("platform/engine/modules/projects/project-git.operations",
+        `[Webhook Domain] could not resolve the live runtime for ${hostname}; leaving its route unchanged: ${safeErrorMessage(err)}`, err,
       );
       return;
     }
@@ -143,7 +144,7 @@ async function reRegisterDomainRoute(
     }
     const loopbackPort = loopbackHostPortFromUrl(targetUrl);
     if (loopbackPort && isReservedLoopbackPort(loopbackPort)) {
-      console.warn(
+      errorDiagnostics.warn("platform/engine/modules/projects/project-git.operations",
         `[Webhook Domain] refusing reserved loopback upstream port ${loopbackPort} for ${hostname}`,
       );
       return;
@@ -174,7 +175,7 @@ async function reRegisterDomainRoute(
       ],
     });
   } catch (err) {
-    console.error(`[Webhook Domain] Failed to update nginx for ${hostname}:`, err);
+    errorDiagnostics.error("platform/engine/modules/projects/project-git.operations", `[Webhook Domain] Failed to update nginx for ${hostname}:`, err);
   }
 }
 export function createProjectGitOperations(
@@ -236,6 +237,12 @@ export function createProjectGitOperations(
           url: c.url,
         })),
         auto_deploy: info.autoDeploy ?? false,
+        github_checks: info.githubChecks,
+        github_checks_delivery: info.githubChecksDelivery ? {
+          error: info.githubChecksDelivery.error,
+          updatedAt: info.githubChecksDelivery.updatedAt.toISOString(),
+          pending: info.githubChecksDelivery.pending?.toISOString() ?? null,
+        } : null,
         webhook_strategy: strategy,
         webhook_active: webhookActive,
         webhook_domain: info.webhookDomain ?? null,
@@ -248,11 +255,12 @@ export function createProjectGitOperations(
     },
     async listBranches(ctx, id, input) {
       const { organizationId } = ctx;
-      const info = await projectService.getGitInfo(id, organizationId);
+      const info = await repos.project.findByIdInOrganization(id, organizationId);
+      assertResourceInOrg(info, "Project", organizationId, id);
       if (!info.gitOwner || !info.gitRepo) {
         return failOperation({ success: false, error: "No repository connected" }, 400);
       }
-      const { branches, page, perPage, hasMore } = await listGitHubBranches(ctx, info.gitOwner, info.gitRepo, input);
+      const { branches, page, perPage, hasMore } = await listGitHubBranches(ctx, info.gitOwner, info.gitRepo, { ...input, serverId: info.serverId ?? undefined });
       return {
         data: branches.map((branch) => ({ name: branch.name, sha: branch.commit.sha, protected: branch.protected })),
         pagination: { page, perPage, hasMore },
@@ -322,7 +330,9 @@ export function createProjectGitOperations(
           before.gitOwner,
           before.gitRepo,
           before.webhookId,
-        ).catch(() => {});
+        ).catch((diagnosticFailure) => {
+          observeCaughtError(diagnosticFailure, "platform/engine/modules/projects/project-git.operations");
+        });
       }
       recordAudit(ctx, {
         eventType: "project.updated",
@@ -349,7 +359,8 @@ export function createProjectGitOperations(
       const response = await withLiveProjectRuntimeMutation(id, async (project) => {
         try {
           assertResourceInOrg(project, "Project", organizationId, id);
-        } catch {
+        } catch (diagnosticFailure) {
+          observeCaughtError(diagnosticFailure, "platform/engine/modules/projects/project-git.operations");
           return failOperation({ error: "Project not found" }, 404);
         }
         const owner = project.gitOwner;
@@ -429,7 +440,7 @@ export function createProjectGitOperations(
         } catch (err) {
           if (err instanceof OperationError) throw err;
           const msg = safeErrorMessage(err);
-          console.error(`[setAutoDeploy] strategy=${strategy} enabled=${enabled}:`, msg);
+          errorDiagnostics.error("platform/engine/modules/projects/project-git.operations", `[setAutoDeploy] strategy=${strategy} enabled=${enabled}:`, msg, err);
           // Structured denial from the GitHub access gate. The branches below sniff
           // `msg` for GitHub's own "GitHub API error (403): …" shape, which this error
           // does not have — its status lives on the object, so without this it would
@@ -510,7 +521,8 @@ export function createProjectGitOperations(
       const initialProject = await repos.project.findById(id);
       try {
         assertResourceInOrg(initialProject, "Project", organizationId, id);
-      } catch {
+      } catch (diagnosticFailure) {
+        observeCaughtError(diagnosticFailure, "platform/engine/modules/projects/project-git.operations");
         return failOperation({ error: "Project not found" }, 404);
       }
       const result = await withLiveProjectRuntimeMutation(id, async (project) => {

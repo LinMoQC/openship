@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, it } from "vitest";
-import { getTableColumns } from "drizzle-orm";
+import { getTableColumns, sql } from "drizzle-orm";
 import { getTableConfig, type PgTable } from "drizzle-orm/pg-core";
 import { clusterRuntimePlanFixture } from "../../contracts/test/cluster-runtime-fixtures";
 
@@ -148,9 +148,17 @@ async function seedOneRowPerTable(): Promise<Map<string, Record<string, unknown>
       }
 
       if (col.notNull && !col.hasDefault) row[field] = sampleValue(col, spec.sqlName);
-      else if (field === "id") row[field] = `${spec.sqlName}_1`;
+      else if (field === "id") row[field] = col.dataType === "number" ? 37 : `${spec.sqlName}_1`;
     }
 
+    // A project chooses exactly one execution target. Other instance parents
+    // still get their own rows and are independently round-tripped.
+    if (spec.sqlName === "project") { row.clusterId = null; }
+    if (spec.sqlName === "project_security") { row.autoRefresh = true; }
+    // A standalone workflow has nullable repository fields but must carry its YAML.
+    if (spec.sqlName === "action_workflow") {
+      row.source = "name: Automation\non: workflow_dispatch\njobs:\n  run:\n    runs-on: self-hosted\n    steps:\n      - run: echo restored\n";
+    }
     await db.insert(spec.table).values(row as never);
 
     const bySqlColumn: Record<string, unknown> = {};
@@ -207,11 +215,15 @@ describe("whole-instance dump → restore round trip", () => {
     for (const spec of topoOrderedTables()) {
       expect(await rowCount(spec), `${spec.sqlName} did not survive the restore`).toBe(1);
     }
-    const restoredRuntime = (await dumpSubgraph({ kind: "instance" })).tables.cluster_runtime;
+    const restored = (await dumpSubgraph({ kind: "instance" })).tables;
+    const restoredRuntime = restored.cluster_runtime;
     expect(JSON.parse(JSON.stringify(restoredRuntime))).toEqual(overTheWire.tables.cluster_runtime);
     const restoredRelease = await dumpSubgraph({ kind: "instance" });
     for (const name of ["release_binding", "release_plan", "release_run", "service_cutover_journal"])
       expect(JSON.parse(JSON.stringify(restoredRelease.tables[name])), `${name} ownership or recovery evidence changed`).toEqual(overTheWire.tables[name]);
+    expect(restored.project_security?.[0]?.autoRefresh).toBe(true);
+    for (const table of ["project_security", "security_refresh_attempt"])
+      expect(JSON.parse(JSON.stringify(restored[table]))).toEqual(overTheWire.tables[table]);
 
     // Spot-check the exact edge that broke in production: a domain bound to a
     // service, restored with its binding intact rather than nulled or dropped.
@@ -233,6 +245,46 @@ describe("whole-instance dump → restore round trip", () => {
     const dump = await dumpSubgraph({ kind: "organization", organizationId: "unrelated-tenant" });
     expect(dump.tables.project).toEqual([]);
   });
+  it("advances generated artifact IDs after importing explicit IDs", async () => {
+    const spec = topoOrderedTables().find((table) => table.sqlName === "action_storage_object")!;
+    const dump = JSON.parse(JSON.stringify(await dumpSubgraph({ kind: "instance" })));
+    await restoreSubgraph(dump, { mode: "wipe" });
+    const [saved] = await db.select().from(spec.table);
+    const { id, ...copy } = saved!;
+    const [created] = await db.insert(spec.table).values(copy as never).returning();
+    expect(created!.id).toBeGreaterThan(Number(id));
+    // Keep the one-row-per-table fixture intact for later restore assertions.
+    await db.execute(sql`DELETE FROM ${sql.identifier(spec.sqlName)} WHERE id = ${created!.id}`);
+  });
+
+  it.each([true, false])(
+    "restores legacy authenticator confirmation from the local account state (%s)",
+    async (enabled) => {
+      const original = await dumpSubgraph({ kind: "instance" });
+      const legacy = JSON.parse(JSON.stringify(original)) as typeof original;
+      const factor = legacy.tables.two_factor![0]!;
+      const user = legacy.tables.user!.find((row) => row.id === factor.userId)!;
+      user.twoFactorEnabled = enabled;
+      delete factor.verified;
+      delete factor.failedVerificationCount;
+      delete factor.lockedUntil;
+      try {
+        await restoreSubgraph(legacy, { mode: "wipe" });
+        const restored = (await dumpSubgraph({ kind: "instance" })).tables
+          .two_factor![0]!;
+        expect(restored).toMatchObject({
+          verified: enabled,
+          failedVerificationCount: 0,
+          lockedUntil: null,
+          secret: factor.secret,
+          backupCodes: factor.backupCodes,
+        });
+        expect(factor).not.toHaveProperty("verified");
+      } finally {
+        await restoreSubgraph(original, { mode: "wipe" });
+      }
+    },
+  );
 
   it("lets callers include follow-up work in the same atomic restore transaction", async () => {
     const projectSpec = topoOrderedTables().find((s) => s.sqlName === "project")!;

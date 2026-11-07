@@ -8,6 +8,7 @@
  *   - SSE heartbeat keep-alive for proxy compatibility
  */
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { SYSTEM } from "@repo/core";
 import type { InstallPhaseEvent, InstallPhaseId } from "@repo/core";
 import { TtlCache } from "../state/cache";
@@ -32,6 +33,8 @@ export interface BuildSessionState {
   logs: LogEntry[];
   warningMessage?: string;
   errorMessage?: string;
+  errorCode?: string;
+  errorDetails?: Record<string, unknown>;
   /** A partial-failure deploy is HELD for an explicit keep/reject decision
    *  (#664). Stored — like warningMessage — so a refresh/reconnect replays the
    *  modal trigger instead of hiding it until the next REST poll. */
@@ -56,6 +59,27 @@ export interface BuildSessionState {
 }
 
 export type SseWriter = (event: string, data: string) => boolean;
+
+/** Live completion and reconnect replay must carry the same recovery data. */
+function completionPayload(session: BuildSessionState, portCheck?: PortCheckResult[]) {
+  const recovery = {
+    ...(session.errorCode ? { errorCode: session.errorCode } : {}),
+    ...(session.errorDetails ? { errorDetails: session.errorDetails } : {}),
+  };
+  if (session.status === "ready") {
+    return {
+      type: "complete", success: true, ...recovery,
+      ...(session.warningMessage ? { warningMessage: session.warningMessage } : {}),
+      ...(session.decisionPending ? { decisionPending: true } : {}),
+      ...(portCheck?.length ? { portCheck } : {}),
+    };
+  }
+  const lastError = [...session.logs].reverse().find(entry => entry.level === "error");
+  return {
+    type: "complete", success: false, ...recovery,
+    message: session.errorMessage || lastError?.message || "Build failed",
+  };
+}
 
 // The prompt shape is the ONE shared PromptPayload from @repo/adapters (used by
 // the deploy pipeline, server-setup, CLI, and dashboard modal). Re-exported here
@@ -258,29 +282,13 @@ export function createSessionManager(options: SessionManagerOptions = {}) {
     session.status = status;
     session.warningMessage = meta?.warningMessage;
     session.errorMessage = meta?.errorMessage;
+    session.errorCode = meta?.errorCode;
+    session.errorDetails = meta?.errorDetails;
     session.decisionPending = meta?.decisionPending;
 
     // Broadcast typed events matching frontend expectations
-    if (status === "ready") {
-      const payload = JSON.stringify({
-        type: "complete",
-        success: true,
-        ...(session.warningMessage ? { warningMessage: session.warningMessage } : {}),
-        ...(session.decisionPending ? { decisionPending: true } : {}),
-        ...(meta?.portCheck && meta.portCheck.length > 0 ? { portCheck: meta.portCheck } : {}),
-      });
-      for (const writer of session.subscribers) {
-        writer("complete", payload);
-      }
-    } else if (status === "failed") {
-      const lastError = [...session.logs].reverse().find((l) => l.level === "error");
-      const payload = JSON.stringify({
-        type: "complete",
-        success: false,
-        message: session.errorMessage || lastError?.message || "Build failed",
-        ...(meta?.errorCode && { errorCode: meta.errorCode }),
-        ...(meta?.errorDetails && { errorDetails: meta.errorDetails }),
-      });
+    if (status === "ready" || status === "failed") {
+      const payload = JSON.stringify(completionPayload(session, meta?.portCheck));
       for (const writer of session.subscribers) {
         writer("complete", payload);
       }
@@ -397,26 +405,8 @@ export function createSessionManager(options: SessionManagerOptions = {}) {
 
     // If session already finished, send typed completion + end events
     if (["ready", "failed", "cancelled"].includes(session.status)) {
-      if (session.status === "ready") {
-        writer(
-          "complete",
-          JSON.stringify({
-            type: "complete",
-            success: true,
-            ...(session.warningMessage ? { warningMessage: session.warningMessage } : {}),
-            ...(session.decisionPending ? { decisionPending: true } : {}),
-          }),
-        );
-      } else if (session.status === "failed") {
-        const lastError = [...session.logs].reverse().find((l) => l.level === "error");
-        writer(
-          "complete",
-          JSON.stringify({
-            type: "complete",
-            success: false,
-            message: session.errorMessage || lastError?.message || "Build failed",
-          }),
-        );
+      if (session.status === "ready" || session.status === "failed") {
+        writer("complete", JSON.stringify(completionPayload(session)));
       } else if (session.status === "cancelled") {
         writer("cancelled", JSON.stringify({ type: "cancelled", message: "Build cancelled" }));
       }
@@ -479,7 +469,8 @@ export function createSessionManager(options: SessionManagerOptions = {}) {
     for (const writer of session.subscribers) {
       try {
         writer("prompt", payload);
-      } catch {
+      } catch (diagnosticFailure) {
+        observeCaughtError(diagnosticFailure, "platform/deployments/session-manager");
         session.subscribers.delete(writer);
       }
     }
@@ -491,10 +482,13 @@ export function createSessionManager(options: SessionManagerOptions = {}) {
    * Called from the API route handler.
    */
   function respondToPrompt(sessionId: string, action: string): boolean {
+    const session = sessions.get(sessionId);
+    // In particular, a delayed response to an earlier backup retry must not
+    // approve skipping a later failure. Callers publish attempt-specific ids.
+    if (!session?.currentPrompt?.actions.some((choice) => choice.id === action)) return false;
     const ok = promptRegistry.respond(sessionId, action);
     if (ok) {
-      const session = sessions.get(sessionId);
-      if (session) session.currentPrompt = undefined;
+      session.currentPrompt = undefined;
     }
     return ok;
   }
@@ -524,7 +518,8 @@ export function createSessionManager(options: SessionManagerOptions = {}) {
       for (const writer of session.subscribers) {
         try {
           writer("end", JSON.stringify({ message: "Platform closed" }));
-        } catch {
+        } catch (diagnosticFailure) {
+          observeCaughtError(diagnosticFailure, "platform/deployments/session-manager");
           /* Disconnected subscriber. */
         }
       }

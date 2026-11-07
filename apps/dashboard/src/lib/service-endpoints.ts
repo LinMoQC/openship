@@ -1,5 +1,5 @@
 import { firstServicePort } from "@repo/core";
-import type { Service, ServiceInput } from "@/lib/api/services";
+import type { Service, ServiceContainer, ServiceInput } from "@/lib/api/services";
 import { resolvePublicEndpointHostname } from "./public-endpoint-payload";
 
 export type ServiceEndpoint = NonNullable<Service["publicEndpoints"]>[number];
@@ -22,10 +22,11 @@ export function configuredServiceEndpoints(service: Service): ServiceEndpoint[] 
   return routes.flatMap((route) => {
     const port = validPort(route.port);
     const hostname = route.domainType === "custom" ? route.customDomain?.trim() : route.domain?.trim();
-    if (!port || !hostname) return [];
+    if ((!port && !route.redirectTo) || !hostname) return [];
     return [{
-      port,
+      ...(port ? { port } : {}),
       domainType: route.domainType,
+      ...(route.redirectTo !== undefined ? { redirectTo: route.redirectTo, redirectStatus: route.redirectStatus } : {}),
       ...(route.domainType === "custom" ? { customDomain: hostname } : { domain: hostname }),
     }];
   });
@@ -37,7 +38,7 @@ export function serviceEndpointsPatch(endpoints: ServiceEndpoint[], exposed = tr
   return {
     publicEndpoints: endpoints,
     exposed: exposed && endpoints.length > 0,
-    exposedPort: primary ? String(primary.port) : "",
+    exposedPort: primary?.port === undefined ? "" : String(primary.port),
     domainType: primary?.domainType ?? "free",
     domain: primary?.domain ?? "",
     customDomain: primary?.customDomain ?? "",
@@ -71,7 +72,7 @@ export function servicePortTargets(service: Service, baseDomain: string): Servic
   // Some source-built services have only an exposedPort, without a Compose ports list.
   const exposedPort = validPort(service.exposedPort);
   const endpoints = configuredServiceEndpoints(service);
-  for (const port of [...(exposedPort ? [exposedPort] : []), ...endpoints.map((endpoint) => endpoint.port)]) {
+  for (const port of [...(exposedPort ? [exposedPort] : []), ...endpoints.flatMap((endpoint) => endpoint.port ? [endpoint.port] : [])]) {
     const key = `${port}/tcp`;
     if (!targets.has(key)) targets.set(key, {
       key, port, label: String(port), protocol: "tcp", bindings: [], endpoints: [],
@@ -82,4 +83,20 @@ export function servicePortTargets(service: Service, baseDomain: string): Servic
     if (hostname) targets.get(`${endpoint.port}/tcp`)?.endpoints.push({ ...endpoint, hostname });
   }
   return [...targets.values()];
+}
+
+/** A private container port is reachable over SSH without a published host port.
+ * Never reinterpret a container-only port as a listener on the server itself.
+ * A null port asks the user which TCP port their container listens on. */
+export function serviceLocalhostTarget(service: Service, container?: ServiceContainer) {
+  if (container?.serviceId !== service.id || container.status !== "running") return null;
+  const ports = servicePortTargets(service, "");
+  const port = ports.find((target) => target.protocol === "tcp" && target.port)?.port;
+  if (port && container.ip) return { remoteHost: container.ip, remotePort: port };
+  const hostPort = validPort(container.hostPort);
+  // Preserve the live host-port path, including services with no saved port list.
+  if (hostPort && (port || ports.length === 0))
+    return { remoteHost: "127.0.0.1", remotePort: hostPort };
+  if (container.ip) return { remoteHost: container.ip, remotePort: null };
+  return null;
 }

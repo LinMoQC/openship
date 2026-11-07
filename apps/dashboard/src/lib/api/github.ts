@@ -125,6 +125,12 @@ function invalidateStatus(): void {
   statusInflight = null;
 }
 
+/** Notify every GitHub consumer only after a credential/source mutation commits. */
+export function notifyGitHubSourcesChanged(): void {
+  invalidateStatus();
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(GITHUB_SOURCES_CHANGED_EVENT));
+}
+
 /* ------------------------------------------------------------------ */
 /*  GitHub Integration API                                            */
 /* ------------------------------------------------------------------ */
@@ -144,10 +150,9 @@ export const githubApi = {
    * render a collapsible tree AND search it without a request per directory.
    * Server-side it's filtered to paths the caller may themselves read.
    */
-  getRepoTree: (owner: string, repo: string, branch?: string) =>
+  getRepoTree: (owner: string, repo: string, branch?: string, serverId?: string) =>
     api.get<{ data: RepoTreeEntry[] }>(
-      endpoints.github.repoTree(owner, repo) +
-        (branch ? `?branch=${encodeURIComponent(branch)}` : ""),
+      endpoints.github.repoTree(owner, repo), { params: { branch, serverId } },
     ),
 
   /** Repos for a specific GitHub org */
@@ -164,9 +169,9 @@ export const githubApi = {
 
   /** List a repo's branches (used before a project exists — e.g. the migration
    *  wizard's link-repo step, which can't use projectsApi.getBranches). */
-  listBranches: (owner: string, repo: string, page = 1) =>
+  listBranches: (owner: string, repo: string, page = 1, serverId?: string) =>
     api.get<BranchPageResponse>(endpoints.github.repoBranches(owner, repo), {
-      params: { page },
+      params: { page, serverId },
     }),
 
   /**
@@ -201,8 +206,8 @@ export const githubApi = {
    *   - "cli"   → only consider the gh CLI source.
    *   - omit    → server picks based on installation auth mode.
    */
-  connect: (source?: "oauth" | "cli") =>
-    api.post<any>(endpoints.github.connect, source ? { source } : undefined),
+  connect: (source?: "oauth" | "cli", state?: string) =>
+    api.post<any>(endpoints.github.connect, source || state ? { source, state } : undefined, { timeout: 60_000 }),
 
   /**
    * Connect this instance with a pasted GitHub token. Validated server-side
@@ -216,7 +221,7 @@ export const githubApi = {
     ),
 
   /** Poll device flow status */
-  pollConnect: () => api.get<any>(endpoints.github.connectPoll),
+  pollConnect: (state?: string) => api.get<any>(endpoints.github.connectPoll, state ? { params: { state }, dedupe: false } : undefined),
 
   /** Finalize a workspace-bound GitHub App installation callback. */
   claimInstallation: (input: { state: string; installationId: string; setupAction?: string }) =>
@@ -224,7 +229,7 @@ export const githubApi = {
       ok: boolean;
       pendingApproval?: boolean;
       installation?: { login?: string };
-    }>(endpoints.github.installationClaim, input),
+    }>(endpoints.github.installationClaim, input, { timeout: 60_000 }),
 
   /**
    * Disconnect a GitHub source.

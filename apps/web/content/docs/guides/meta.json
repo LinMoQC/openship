@@ -14,11 +14,14 @@
     "openship-json",
     "environment-variables",
     "custom-domains",
+    "route-password-protection",
+    "cloudflare-tunnel",
     "persistent-storage",
     "sleep-mode-resources",
     "---Operate---",
     "logs-monitoring",
     "jobs",
+    "actions",
     "backups-restore",
     "custom-servers",
     "mcp-clusters-and-scaling",
@@ -37,6 +40,8 @@
     "teams-members",
     "email-webmail",
     "billing",
+    "affiliates",
+    "cloud-workspaces",
     "---Extend Openship---",
     "add-an-app"
   ]

@@ -1,5 +1,6 @@
 "use client";
 
+import { observedAllSettled, reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { Icon as UiIcon } from "@repo/ui/icons";
 
 import { useEffect, useRef, useState } from "react";
@@ -290,7 +291,7 @@ export function NetworkWizard({
       // Reuse the existing read-only inspection endpoint, with bounded SSH fan-out.
       for (let start = 0; start < ids.length; start += 3) {
         const batch = ids.slice(start, start + 3);
-        const results = await Promise.allSettled(batch.map((id) => privateNetworksApi.inspect(id)));
+        const results = await observedAllSettled(batch.map((id) => privateNetworksApi.inspect(id)), "dashboard/components/servers/clusters/NetworkWizard");
         if (inspectionRun.current !== run) return;
         results.forEach((result, index) => {
           const id = batch[index]!;
@@ -396,7 +397,7 @@ export function NetworkWizard({
           // lost. Reattach to that saved attempt without submitting more work.
           const pendingId = preparationRequest.current?.requestId;
           if (pendingId) {
-            const saved = await privateNetworksApi.managedPreparation(pendingId).catch(() => null);
+            const saved = await privateNetworksApi.managedPreparation(pendingId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "dashboard/components/servers/clusters/NetworkWizard"); return null; });
             if (saved?.id === pendingId) {
               onManagedPreparation(saved);
               navigating = true;
@@ -430,6 +431,7 @@ export function NetworkWizard({
             );
         }
       } catch (err) {
+        observeCaughtError(err, "dashboard/components/servers/clusters/NetworkWizard");
         setError(validationMessage(err));
         return;
       }
@@ -667,7 +669,7 @@ export function NetworkWizard({
                           checked={selected}
                           disabled={unavailable}
                           onCheckedChange={() => selectServer(server.id)}
-                          aria-label={server.name || server.sshHost}
+                          aria-label={server.name || server.sshHost || server.id}
                         />
                         <UiIcon name="server" className="size-4 shrink-0 text-muted-foreground" />
                         <span className="min-w-0 flex-1 text-sm">
@@ -711,7 +713,7 @@ export function NetworkWizard({
                     "",
                   endpoint:
                     managedPeers[member.serverId]?.endpoint ||
-                    servers.find((server) => server.id === member.serverId)?.sshHost,
+                    servers.find((server) => server.id === member.serverId)?.sshHost || undefined,
                   listenPort: managedPeers[member.serverId]?.listenPort ?? 51820,
                 }))}
               />

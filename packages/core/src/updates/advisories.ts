@@ -3,11 +3,12 @@
  * both the desktop main process and the dashboard share identical logic.
  */
 
+import { reportCaughtError as observeCaughtError } from "../diagnostics/reporter";
 import type { Advisory, AdvisoryManifest, AdvisoryMode, AdvisorySeverity, LatestRelease, UpdateState } from "./types";
 import { ADVISORY_MODES } from "./types";
 import { changelogUrl } from "./changelog";
 import { compareSemver, satisfiesRange } from "./semver";
-import { customRuntimeUpdatePolicy } from "./custom-runtime";
+import { customRuntimeUpdatePolicy, magicRuntimeBaseline } from "./custom-runtime";
 
 const SEVERITY_RANK: Record<AdvisorySeverity, number> = { critical: 0, recommended: 1, info: 2 };
 const VALID_SEVERITY = new Set<AdvisorySeverity>(["critical", "recommended", "info"]);
@@ -108,7 +109,8 @@ export function matchAdvisories(
       if (a.modes && a.modes.length > 0 && (!mode || !a.modes.includes(mode))) return false;
       try {
         return satisfiesRange(currentVersion, a.affects);
-      } catch {
+      } catch (diagnosticFailure) {
+        observeCaughtError(diagnosticFailure, "core/updates/advisories");
         return false;
       }
     })
@@ -159,7 +161,10 @@ export function resolveUpdateState(input: ResolveUpdateInput): UpdateState {
   const custom = customRuntimeUpdatePolicy(currentVersion, latestVersion);
   const updateAvailable = !custom && !!latestVersion && compareSemver(latestVersion, currentVersion) > 0;
 
-  const advisories = (manifest ? matchAdvisories(currentVersion, manifest, mode) : []).filter((a) => {
+  // A custom runtime carries its upstream baseline's code, so that baseline's
+  // advisories apply; strict semver would otherwise treat it as a prerelease.
+  const advisoryVersion = magicRuntimeBaseline(currentVersion) ?? currentVersion;
+  const advisories = (manifest ? matchAdvisories(advisoryVersion, manifest, mode) : []).filter((a) => {
     if (a.severity === "critical") return true;
     if (muted) return false;
     return !dismissed.includes(a.id);

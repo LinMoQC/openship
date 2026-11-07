@@ -1,0 +1,222 @@
+"use client";
+
+import { Icon as UiIcon, type IconName } from "./icons";
+
+import { useEffect, useRef, useState, type ReactNode } from "react";
+
+/**
+ * Shared brand sources, including bundled catalog artwork. Unknown slugs resolve
+ * to a simpleicons brand mark. Convex uses its official favicon because the
+ * simpleicons "convex" glyph renders as a red mask, not the real orange logo.
+ */
+const BRAND_LOGO: Record<
+  string,
+  { slug?: string; src?: string; catalogIcon?: IconName; fill?: boolean; darkInvert?: boolean }
+> = {
+  // Runner capabilities are local information; their platform mark works offline too.
+  linux: { src: "/app-logos/linux.svg", darkInvert: true },
+  convex: { src: "https://www.google.com/s2/favicons?domain=convex.dev&sz=128" },
+  // simpleicons removed the Slack + Microsoft Teams brand marks (both 404 on the
+  // CDN now), so resolve their official colored favicons like convex above —
+  // otherwise they fall back to a generic monochrome glyph.
+  slack: { src: "https://www.google.com/s2/favicons?domain=slack.com&sz=128" },
+  microsoftteams: { src: "https://www.google.com/s2/favicons?domain=teams.microsoft.com&sz=128" },
+  // Supabase's official mark, rendered in its brand green by the simpleicons CDN.
+  supabase: { slug: "supabase" },
+  ollama: { src: "https://github.com/ollama.png?size=80" },
+  vllm: { src: "https://github.com/vllm-project.png?size=80" },
+  "open-webui": { src: "https://github.com/open-webui.png?size=80" },
+  // simpleicons carries no pgAdmin mark (cdn.simpleicons.org/pgadmin4 404s) —
+  // use the project's GitHub org avatar instead, same as Ollama/vLLM above.
+  pgadmin4: { src: "https://github.com/pgadmin-org.png?size=80" },
+  pocketbase: { slug: "pocketbase" },
+  mongodb: { slug: "mongodb" },
+  n8n: { slug: "n8n" },
+  // Ghost's brand mark is near-black — invert it on the dark themes so it
+  // stays visible (it's monochrome, so invert = clean white). Colored logos
+  // are left alone.
+  ghost: { slug: "ghost", darkInvert: true },
+  "uptime-kuma": { slug: "uptimekuma" },
+  // Vaultwarden's shield mark is pure #000000, so it sinks into a dark tile — invert
+  // renders it clean white there (single flat color, nothing to distort).
+  vaultwarden: { slug: "vaultwarden", darkInvert: true },
+  metabase: { slug: "metabase" },
+  // Directus' rabbit is near-black (#263238) → invert it on the dark themes.
+  directus: { slug: "directus", darkInvert: true },
+  // simpleicons DROPPED the NocoDB mark — `cdn.simpleicons.org/nocodb` 404s now, so the
+  // slug it used to resolve left the card on the generic app glyph. Vendored brand SVG
+  // instead (indigo gradient, so it reads on light and dark alike — no invert).
+  nocodb: { src: "/app-logos/nocodb.svg" },
+  // Grafana's mark stays colored; Gitea's tea-cup mark is fine as-is.
+  grafana: { slug: "grafana" },
+  appwrite: { slug: "appwrite" },
+  alertmanager: { slug: "prometheus" },
+  listmonk: { src: "/app-logos/listmonk.png" },
+  prometheus: { slug: "prometheus" },
+  "otel-collector": { slug: "opentelemetry" },
+  // simpleicons has no Loki mark, so the official logo is vendored.
+  loki: { src: "/app-logos/loki.png" },
+  victoriametrics: { slug: "victoriametrics" },
+  gitea: { slug: "gitea" },
+  "paperless-ngx": { src: "/app-logos/paperless-ngx.svg" },
+  "wiki-js": { src: "/app-logos/wiki-js.png", fill: true },
+  homepage: { src: "/app-logos/homepage.png", fill: true },
+  immich: { src: "/app-logos/immich.svg" },
+  jellyfin: { src: "/app-logos/jellyfin.svg" },
+  wordpress: { slug: "wordpress" },
+  odoo: { slug: "odoo" },
+  postgresql: { slug: "postgresql" },
+  mariadb: { slug: "mariadb" },
+  rabbitmq: { slug: "rabbitmq" },
+  authentik: { slug: "authentik" },
+  nextcloud: { slug: "nextcloud" },
+  minio: { slug: "minio" },
+  freshrss: { slug: "freshrss" },
+  excalidraw: { slug: "excalidraw" },
+  qdrant: { slug: "qdrant" },
+  // Neon's mark is brand green (#34D59A) — colored, stays visible everywhere.
+  neon: { slug: "neon" },
+  // PostHog + Umami marks are near-black (#000000) → darkInvert flips them to
+  // white on the dark/dim tiles so they don't vanish. Meilisearch is brand pink.
+  posthog: { slug: "posthog", darkInvert: true },
+  meilisearch: { slug: "meilisearch" },
+  umami: { slug: "umami", darkInvert: true },
+  redis: { catalogIcon: "redis" },
+  // Valkey has no simpleicons mark; use its official favicon.
+  valkey: { src: "https://www.google.com/s2/favicons?domain=valkey.io&sz=128" },
+  // Kafka's catalog id is "kafka"; its simpleicons brand slug is "apachekafka".
+  // The mark is near-black (brand color #231F20), so it vanishes on the dark/dim
+  // tiles — darkInvert flips it to near-white there (dark on light themes as-is).
+  kafka: { slug: "apachekafka", darkInvert: true },
+  // Buzz (block/buzz) — vendored bee mark (its own favicon, OS-recolor stripped).
+  // Monochrome near-black, so darkInvert flips it to light on the dark themes.
+  buzz: { slug: undefined, src: "/app-logos/buzz.svg", darkInvert: true },
+  // simpleicons carries a mark for none of these four (Microsoft's VS Code icon is gone
+  // from the CDN too), and ClickHouse's exists only in brand yellow — unreadable on the
+  // light theme, see the note in clickhouse.svg. All four are vendored under
+  // public/app-logos, so they also render air-gapped. Stirling PDF, IT-Tools and
+  // ClickHouse are square marks carrying their own background → `fill`.
+  clickhouse: { src: "/app-logos/clickhouse.svg", fill: true },
+  // code-server = VS Code in the browser, so it wears the VS Code logo. NO darkInvert:
+  // the mark is brand blue, and inverting it would come out orange.
+  "code-server": { src: "/app-logos/code-server.svg" },
+  "it-tools": { src: "/app-logos/it-tools.png", fill: true },
+  "stirling-pdf": { src: "/app-logos/stirling-pdf.svg", fill: true },
+  // openship-native mail stack — its own brand mark, a full-bleed square icon.
+  // "mail" is the engine flow; "webmail" the catalog app that installs the client.
+  // "mail-webmail" is the retired template id still stored on pre-catalog webmail
+  // project rows — keep it so those rows keep their logo.
+  "mail-webmail": { src: "/apple-touch-icon.png", fill: true },
+  webmail: { src: "/apple-touch-icon.png", fill: true },
+  mail: { src: "/apple-touch-icon.png", fill: true },
+  radicale: {
+    src: "https://raw.githubusercontent.com/Kozea/Radicale/v3.9.0/radicale/web/internal_data/css/logo.svg",
+  },
+  // The control plane self-registered as an app (CLI self-deploy) — Openship's
+  // own brand mark, a full-bleed square icon.
+  openship: { src: "/apple-touch-icon.png", fill: true },
+  // MindWire's own monochrome mark is vendored so the catalog works offline and
+  // the brand stays legible on both dashboard themes.
+  mindwire: { src: "/app-logos/mindwire.svg", fill: true },
+  // Beszel is not on simpleicons; vendor its official gradient B mark.
+  beszel: { src: "/app-logos/beszel.svg" },
+};
+
+// The Valkey app retains the historical "redis" template ID. Keep that alias
+// scoped to app IDs so a Redis image's brand slug still gets the Redis logo.
+export const APP_LOGO: typeof BRAND_LOGO = {
+  ...BRAND_LOGO,
+  redis: BRAND_LOGO.valkey!,
+};
+
+/**
+ * Brand logo for a catalog app. Resolves an official URL / simpleicons mark and
+ * gracefully falls back to a monochrome catalog icon (offline / air-gapped /
+ * unknown app). Keeps the UI clean while adding a touch of real color.
+ */
+/**
+ * The image address a logo value names directly: an `https:` URL or an image data
+ * URI. Brand slugs and every other scheme return undefined.
+ */
+export function logoImageSource(logo: string | undefined): string | undefined {
+  if (!logo) return undefined;
+  if (/^https:\/\/\S+$/i.test(logo)) return logo;
+  if (/^data:image\/(?:png|jpeg|gif|webp|svg\+xml)[;,]/i.test(logo)) return logo;
+  return undefined;
+}
+
+export function AppLogo({
+  appId,
+  slug,
+  src,
+  icon: Icon = "window",
+  className = "size-5",
+  fallback,
+  invertOnDark = true,
+}: {
+  appId?: string;
+  slug?: string;
+  src?: string;
+  icon?: IconName;
+  className?: string;
+  fallback?: ReactNode;
+  /** Disable on fixed light surfaces, even when the operating system prefers dark. */
+  invertOnDark?: boolean;
+}) {
+  const [failedSource, setFailedSource] = useState<string>();
+  const imageRef = useRef<HTMLImageElement>(null);
+  // Resolve config by appId first, then by the bare slug — so callers that pass
+  // only a `slug` (e.g. the migrate-sources brand row) can still pick up a
+  // vendored src override for brands simpleicons doesn't carry.
+  const cfg = APP_LOGO[appId ?? ""] ?? BRAND_LOGO[slug ?? ""];
+  // A custom app's `logo` can be an image address instead of a brand slug (#1507).
+  // Anything else that looks like an address is not a slug either: show the fallback
+  // rather than asking simpleicons for a path it cannot serve.
+  const slugImage = logoImageSource(slug);
+  const resolvedSlug = slug && /[:/]/.test(slug) ? undefined : (slug ?? cfg?.slug);
+  const url =
+    src ??
+    slugImage ??
+    cfg?.src ??
+    (resolvedSlug ? `https://cdn.simpleicons.org/${resolvedSlug}` : undefined);
+
+  useEffect(() => {
+    // Detect images that failed before hydration attached the error handler.
+    const image = imageRef.current;
+    if (!image?.complete || image.naturalWidth > 0 || !image.decode) return;
+    let mounted = true;
+    void image.decode().catch(() => {
+      /* diagnostics-ignore: Unavailable brand artwork intentionally uses the logo fallback. */
+      if (mounted) setFailedSource(url);
+    });
+    return () => {
+      mounted = false;
+    };
+  }, [url]);
+
+  if (!src && cfg?.catalogIcon) return <UiIcon name={cfg.catalogIcon} className={className} />;
+  if (!url || failedSource === url)
+    return fallback ?? <UiIcon name={Icon} className={`${className} text-muted-foreground`} />;
+  // Full-bleed square marks (own background) fill the tile; transparent brand
+  // glyphs stay at the requested size. Dark monochrome marks invert on the dark
+  // themes so they don't vanish against a dark tile.
+  // Full-bleed marks round to the tile they sit in (rounded-[inherit] takes the
+  // parent tile's radius) so they don't render as a hard square.
+  // Non-fill marks: object-contain so a non-square brand SVG fits the box without
+  // squishing (square favicons/simpleicons are unaffected).
+  const base = cfg?.fill
+    ? "size-full object-cover rounded-[inherit]"
+    : `${className} object-contain`;
+  return (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      ref={imageRef}
+      src={url}
+      alt=""
+      loading="lazy"
+      decoding="async"
+      className={cfg?.darkInvert && invertOnDark ? `${base} dark:invert dim:invert` : base}
+      onError={() => setFailedSource(url)}
+    />
+  );
+}

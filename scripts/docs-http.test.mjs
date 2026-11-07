@@ -7,6 +7,23 @@ const router =
   'const r = secureRouter(new Hono(), { module: "system", basePath: "/api/system", localOnly: true });';
 const parse = (body) => moduleHttpSurface("routes.ts", router + "\n" + body);
 
+test("documents root-mounted API-only landing pages without inventing an API prefix", () => {
+  const routes = moduleHttpSurface(
+    "access-page.ts",
+    [
+      'const r = secureRouter(new Hono(), { module: "instance-access", basePath: "", localOnly: true });',
+      'for (const path of ["/", "/login", "/accept-invite/:id"]) {',
+      '  r.public("get", path, { reason: "Static landing page" }, handler);',
+      "}",
+    ].join("\n"),
+  );
+  assert.deepEqual(
+    routes.map((route) => route.path),
+    ["/", "/login", "/accept-invite/:id"],
+  );
+  assert.ok(routes.every((route) => route.localOnly));
+});
+
 test("resolves correlated route aliases and shared permission metadata without executing handlers", () => {
   const routes = parse(
     [
@@ -136,4 +153,14 @@ test("the real network inventory includes both generations with their permission
     assert.equal(matches[0].access, "server:admin");
   }
   assert.equal(find("GET", "/.well-known/oauth-protected-resource/api/mcp").length, 1);
+});
+
+test("Cloud product telemetry does not shadow the authenticated traffic analytics relay", () => {
+  const routes = httpSurface();
+  const relay = routes.filter((route) => route.method === "POST" && route.path === "/api/cloud/analytics");
+  assert.equal(relay.length, 1, "the existing Cloud analytics relay must have exactly one handler");
+  assert.equal(relay[0].access, "cloud:write");
+  const telemetry = routes.filter((route) => route.method === "POST" && route.path === "/api/cloud/telemetry");
+  assert.equal(telemetry.length, 1);
+  assert.equal(telemetry[0].access, "Handler authentication");
 });

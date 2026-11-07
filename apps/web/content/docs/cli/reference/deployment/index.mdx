@@ -29,8 +29,25 @@ openship deployment|deployments [options] [command]
 | [`keep <id>`](/docs/cli/reference/deployment#openship-deployment-keep) | Keep a finished deployment awaiting a keep/reject decision |
 | [`pending <id>`](/docs/cli/reference/deployment#openship-deployment-pending) | Show a deployment's current prompt and pending decisions |
 | [`respond [options] <id>`](/docs/cli/reference/deployment#openship-deployment-respond) | Answer a pending deployment prompt |
+| [`wait [options] <id>`](/docs/cli/reference/deployment#openship-deployment-wait) | Wait for the persisted deployment outcome or a decision that needs your response |
 | [`rm [options] <id>`](/docs/cli/reference/deployment#openship-deployment-rm) | Delete a deployment |
 | [`ssl`](/docs/cli/reference/deployment#openship-deployment-ssl) | SSL certificate operations |
+| [`restore-plan <id>`](/docs/cli/reference/deployment#openship-deployment-restore-plan) | Inspect retained artifacts and which services a rollback would rebuild |
+| [`actions <id>`](/docs/cli/reference/deployment#openship-deployment-actions) | Inspect pending deployment, routing and certificate actions |
+| [`status <id>`](/docs/cli/reference/deployment#openship-deployment-status) | Read the complete persisted deployment state and outstanding prompts |
+| [`skip-port-check [options] <id> <target>`](/docs/cli/reference/deployment#openship-deployment-skip-port-check) | Skip one explicitly selected deployment port check |
+
+## openship deployment actions
+
+Inspect pending deployment, routing and certificate actions
+
+```text
+openship deployment actions [options] <id>
+```
+
+| Argument | Meaning |
+| --- | --- |
+| `id` | Deployment ID |
 
 ## openship deployment cancel
 
@@ -92,7 +109,11 @@ openship deployment list [options]
 | --- | --- |
 | `--project <id>` | Scope to a project (defaults to the linked project) |
 | `--env <environment>` | Filter by environment: production \| preview |
-| `--limit <n>` | Max rows to fetch (default: "50") |
+| `--limit <n>` | Page size (1–100) (default: 50) |
+| `--page <number>` | Page number (default: 1) |
+| `--status <status>` | Deployment history status filter |
+| `--search <text>` | Search deployment history |
+| `--page-info` | Return complete records and pagination as JSON |
 
 ## openship deployment pending
 
@@ -137,6 +158,7 @@ openship deployment redeploy [options] <id>
 | Option | Meaning |
 | --- | --- |
 | `--use-existing-commit` | Rebuild the same commit instead of the latest on the branch |
+| `--reuse-build` | Retry a failed attempt using its completed Docker images without rebuilding |
 
 ## openship deployment reject
 
@@ -178,6 +200,18 @@ openship deployment restart [options] <id>
 | --- | --- |
 | `id` | Deployment ID |
 
+## openship deployment restore-plan
+
+Inspect retained artifacts and which services a rollback would rebuild
+
+```text
+openship deployment restore-plan [options] <id>
+```
+
+| Argument | Meaning |
+| --- | --- |
+| `id` | Deployment ID |
+
 ## openship deployment rm
 
 Delete a deployment
@@ -205,6 +239,23 @@ openship deployment rollback [options] <id>
 | Argument | Meaning |
 | --- | --- |
 | `id` | Deployment ID to roll back to |
+
+## openship deployment skip-port-check
+
+Skip one explicitly selected deployment port check
+
+```text
+openship deployment skip-port-check [options] <id> <target>
+```
+
+| Argument | Meaning |
+| --- | --- |
+| `id` | Deployment ID |
+| `target` | Port number or target offered by the deployment |
+
+| Option | Meaning |
+| --- | --- |
+| `-y, --yes` | Acknowledge skipping this readiness check |
 
 ## openship deployment ssl
 
@@ -247,6 +298,18 @@ openship deployment ssl status [options] <domain>
 | --- | --- |
 | `domain` | Domain to probe |
 
+## openship deployment status
+
+Read the complete persisted deployment state and outstanding prompts
+
+```text
+openship deployment status [options] <id>
+```
+
+| Argument | Meaning |
+| --- | --- |
+| `id` | Deployment ID |
+
 ## openship deployment usage
 
 Show container resource usage for a deployment
@@ -258,3 +321,20 @@ openship deployment usage [options] <id>
 | Argument | Meaning |
 | --- | --- |
 | `id` | Deployment ID |
+
+## openship deployment wait
+
+Wait for the persisted deployment outcome or a decision that needs your response
+
+```text
+openship deployment wait [options] <id>
+```
+
+| Argument | Meaning |
+| --- | --- |
+| `id` | Deployment ID |
+
+| Option | Meaning |
+| --- | --- |
+| `--timeout <ms>` | Maximum wait duration; leaves the deployment running on timeout (default: 600000) |
+| `--interval <ms>` | Status polling interval (minimum 10 ms) (default: 1000) |

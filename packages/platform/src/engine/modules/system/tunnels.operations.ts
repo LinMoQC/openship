@@ -6,6 +6,7 @@
  * checks its organization and the tunnel's parent before using retained sockets.
  */
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import type { ExecutionContext } from "../../../context";
 import type { ResourceServices } from "../../../resource-operations";
 import {
@@ -17,7 +18,7 @@ import {
 import { repos, type ServerTunnel } from "@repo/db";
 import { resolvePlatformConfig } from "../../lib/platform-config";
 import { authorization } from "../../lib/authorization";
-import { requireSelfHostedServer, assertServerExecution } from "./server-access";
+import { requireConnectedServer, assertServerExecution } from "./server-access";
 import { assertNativeLocalForwarding } from "../../native/execution-policy";
 import { audit, operationAuditContext } from "../../lib/audit-emitter";
 import {
@@ -32,7 +33,7 @@ import {
  * before looking up any configured forward.
  */
 async function guardServer(ctx: ExecutionContext, serverId: string) {
-  const server = await requireSelfHostedServer(ctx, serverId);
+  const server = await requireConnectedServer(ctx, serverId);
   if (process.env.OPENSHIP_NATIVE !== "true" && resolvePlatformConfig().target !== "desktop")
     throw new OperationError("Not available in this mode", 404, "CAPABILITY_UNAVAILABLE");
   return { serverId, server };
@@ -170,7 +171,7 @@ async function startTunnelHandler(ctx: ExecutionContext, id: string, input: { tu
         });
         await getOwnedTunnel(id, row.id);
         assertNativeLocalForwarding();
-        await assertServerExecution(await requireSelfHostedServer(context, id));
+        await requireConnectedServer(context, id);
       },
     });
   } catch (err) {
@@ -189,7 +190,9 @@ async function startTunnelHandler(ctx: ExecutionContext, id: string, input: { tu
         localPort: status.localPort,
         autoStart: row.autoStart,
       })
-      .catch(() => {});
+      .catch((diagnosticFailure) => {
+        observeCaughtError(diagnosticFailure, "platform/engine/modules/system/tunnels.operations");
+      });
   }
 
   const fresh = await repos.serverTunnel.get(row.id);

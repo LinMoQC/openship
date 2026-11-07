@@ -1,4 +1,5 @@
 import { requireGitopsRelease } from "../releases/release-gate";
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { NotFoundError, safeErrorMessage } from "@repo/core";
 import type { ProjectIntegrationSchemas } from "@repo/contracts";
 import { repos } from "@repo/db";
@@ -55,6 +56,7 @@ export function createProjectIntegrationOperations(recordAudit: ProjectDependenc
       assertResourceInOrg(project, "Project", ctx.organizationId, id);
       try { return await readProjectEdgeConfig(project); }
       catch (error) {
+        observeCaughtError(error, "platform/engine/modules/projects/project-integrations.operations");
         return { reachable: false, error: safeErrorMessage(error), saved: project.routingConfig?.proxy ?? {}, hosts: [] };
       }
     },

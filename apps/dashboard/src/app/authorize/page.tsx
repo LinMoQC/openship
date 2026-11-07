@@ -2,10 +2,13 @@
 
 import { Icon as UiIcon } from "@repo/ui/icons";
 
-import { Suspense, useEffect } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { useSession } from "@/lib/auth-client";
-import { buildAuthPageHref, getCloudDesktopHandoffUrl } from "@/lib/cloud-auth";
+import { buildAuthPageHref } from "@/lib/cloud-auth";
+import { cloudApi } from "@/lib/api";
+import { ApiError, getApiErrorMessage } from "@/lib/api/client";
+import { CloudAuthorizationIdentity } from "@/components/cloud/CloudAuthorizationIdentity";
 import { AuthShell } from "@/components/auth-shell";
 import { Button } from "@/components/ui/button";
 import { useI18n, interpolate } from "@/components/i18n-provider";
@@ -18,7 +21,7 @@ import { useI18n, interpolate } from "@/components/i18n-provider";
  *   - Desktop opens /authorize?callback=...&app=...&machine=...
  *   - If not logged in → redirect to /login (preserving params)
  *   - If logged in → show authorize UI with explicit button
- *   - Authorize → handoff endpoint → redirect back to desktop API
+ *   - Authorize → authenticated consent POST → redirect back to desktop API
  */
 export default function AuthorizePage() {
   return (
@@ -43,19 +46,35 @@ function AuthorizePageInner() {
   const machine = searchParams.get("machine");
   const state = searchParams.get("state");
   const codeChallenge = searchParams.get("code_challenge");
-
-  // Build handoff URL with state + PKCE challenge
-  const handoffUrl = callback
-    ? getCloudDesktopHandoffUrl({
-        callbackUrl: callback,
-        state,
-        codeChallenge,
-      })
-    : null;
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const authorizationInFlight = useRef(false);
 
   // Preserve the desktop-cloud flow marker so login/register/OAuth
   // return to /authorize instead of falling back to the normal app flow.
   const loginUrl = buildAuthPageHref("/login", searchParams);
+
+  const handleAuthorize = async () => {
+    if (!callback || !state || !codeChallenge || authorizationInFlight.current) return;
+    authorizationInFlight.current = true;
+    setSubmitting(true);
+    setSubmitError(null);
+    try {
+      const result = await cloudApi.connectAuthorize({
+        redirect: callback,
+        state,
+        codeChallenge,
+        mode: "desktop",
+      });
+      if (!result.callbackUrl) throw new Error(t.misc.cloudAuthorize.authorizeError);
+      window.location.href = result.callbackUrl;
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) router.replace(loginUrl);
+      else setSubmitError(getApiErrorMessage(error, t.misc.cloudAuthorize.authorizeError));
+      authorizationInFlight.current = false;
+      setSubmitting(false);
+    }
+  };
 
   // Not logged in → redirect to login
   useEffect(() => {
@@ -65,14 +84,12 @@ function AuthorizePageInner() {
   }, [isPending, session, loginUrl, router]);
 
   // No callback → invalid request
-  if (!callback) {
+  if (!callback || !state || !codeChallenge) {
     return (
       <AuthShell>
         <div className="text-center">
           <h1 className="text-xl font-semibold">{t.misc.authorize.invalidRequest}</h1>
-          <p className="mt-2 text-sm text-muted-foreground">
-            {t.misc.authorize.missingParams}
-          </p>
+          <p className="mt-2 text-sm text-muted-foreground">{t.misc.authorize.missingParams}</p>
         </div>
       </AuthShell>
     );
@@ -90,12 +107,14 @@ function AuthorizePageInner() {
   }
 
   return (
-    <AuthShell>
-      <div className="mb-6 text-center">
-        <div className="mx-auto mb-4 flex size-14 items-center justify-center rounded-2xl bg-gradient-to-br from-primary/80 to-primary shadow-sm">
-          <UiIcon name="monitor" className="size-7 text-primary-foreground" />
+    <AuthShell maxWidth="max-w-[460px]">
+      <div className="mb-7">
+        <div className="mb-5 flex size-12 items-center justify-center rounded-2xl bg-card">
+          <UiIcon name="monitor" className="size-6 text-foreground" />
         </div>
-        <h1 className="text-xl font-semibold">{interpolate(t.misc.authorize.title, { app: appName })}</h1>
+        <h1 className="text-2xl font-medium tracking-tight text-foreground">
+          {interpolate(t.misc.authorize.title, { app: appName })}
+        </h1>
         <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
           {machine
             ? interpolate(t.misc.authorize.wantsToConnectOnMachine, { app: appName, machine })
@@ -103,43 +122,49 @@ function AuthorizePageInner() {
         </p>
       </div>
 
-      <div className="mb-6 rounded-lg border border-border bg-muted/30 p-4">
-        <p className="text-sm font-medium text-foreground">{t.misc.authorize.signedInAs}</p>
-        <p className="mt-0.5 text-sm text-muted-foreground">{session.user.email}</p>
+      <CloudAuthorizationIdentity session={session} disabled={submitting} loginUrl={loginUrl}>
+        {(ready) => (
+          <>
+            <div className="mb-5 space-y-2 text-sm text-muted-foreground">
+              <p className="font-medium text-foreground">{t.misc.authorize.willAllow}</p>
+              <p className="flex items-center gap-2">
+                <UiIcon name="check" className="size-4 shrink-0" aria-hidden="true" />
+                {t.misc.authorize.permDeploy}
+              </p>
+              <p className="flex items-center gap-2">
+                <UiIcon name="check" className="size-4 shrink-0" aria-hidden="true" />
+                {t.misc.authorize.permAccess}
+              </p>
+            </div>
 
-        <div className="mt-4 space-y-2">
-          <p className="text-sm font-medium text-foreground">{t.misc.authorize.willAllow}</p>
-          <ul className="space-y-1 text-sm text-muted-foreground">
-            <li className="flex items-center gap-2">
-              <UiIcon name="check" className="size-3.5 text-success shrink-0" />
-              {t.misc.authorize.permDeploy}
-            </li>
-            <li className="flex items-center gap-2">
-              <UiIcon name="check" className="size-3.5 text-success shrink-0" />
-              {t.misc.authorize.permAccess}
-            </li>
-          </ul>
-        </div>
-      </div>
-
-      <div className="space-y-2">
-        <Button
-          className="w-full"
-          size="lg"
-          onClick={() => {
-            if (handoffUrl) window.location.href = handoffUrl;
-          }}
-        >
-          {t.misc.authorize.authorize}
-        </Button>
-        <Button
-          variant="outline"
-          className="w-full"
-          onClick={() => window.close()}
-        >
-          {t.misc.authorize.cancel}
-        </Button>
-      </div>
+            <div className="space-y-2">
+              {submitError && (
+                <p role="alert" className="text-sm text-danger">
+                  {submitError}
+                </p>
+              )}
+              <Button
+                className="w-full"
+                size="lg"
+                disabled={!ready || submitting}
+                onClick={() => {
+                  void handleAuthorize();
+                }}
+              >
+                {submitting ? t.misc.cloudAuthorize.authorizing : t.misc.authorize.authorize}
+              </Button>
+              <Button
+                variant="outline"
+                className="w-full"
+                disabled={submitting}
+                onClick={() => window.close()}
+              >
+                {t.misc.authorize.cancel}
+              </Button>
+            </div>
+          </>
+        )}
+      </CloudAuthorizationIdentity>
     </AuthShell>
   );
 }

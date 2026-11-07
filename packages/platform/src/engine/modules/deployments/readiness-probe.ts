@@ -21,6 +21,7 @@
  * divergence that produced GH-583.
  */
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import type { CommandExecutor, RuntimeAdapter } from "@repo/adapters";
 import { safeErrorMessage } from "@repo/core";
 
@@ -91,6 +92,7 @@ export async function probeDeployedReadiness(args: {
           waitForReadyFromExecutor(executor, host, port, opts),
         );
   } catch (error) {
+    observeCaughtError(error, "platform/engine/modules/deployments/readiness-probe");
     // Reaching the machine that should dial is itself a "couldn't ask", not a verdict on
     // the workload — so it warns instead of failing the deploy.
     return {
@@ -105,19 +107,17 @@ export async function probeDeployedReadiness(args: {
     return {
       failure: null,
       skipped:
-        `${result.unverifiable}. Re-run \`openship up\` to re-provision the host channel, ` +
-        `then redeploy to have this checked.`,
+        `${result.unverifiable}. ` +
+        (result.via === "exec"
+          ? "Check the deployment host's control connection and `curl` installation, then redeploy."
+          : "Check the deployment host's connection, then redeploy to have this checked."),
     };
   }
 
-  // Named on both verdicts once it isn't the normal path: a `curl`-on-the-host answer has
-  // slightly different semantics (see waitForReadyFromExecutor), and an operator reading
-  // either outcome should know the channel needs re-provisioning rather than wonder why
-  // the wording changed.
+  // Name the execution point for transports that probe on the host.
   const viaNote =
     result.via === "exec"
-      ? " (probed with `curl` on the host — this channel refuses port forwarding; " +
-        "re-run `openship up` to re-provision it)"
+      ? " (probed with `curl` on the deployment host)"
       : "";
 
   if (!result.ready) {

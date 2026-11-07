@@ -1,3 +1,4 @@
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import {
   eq,
   and,
@@ -11,11 +12,19 @@ import {
   isNull,
   isNotNull,
   notExists,
+  notLike,
   sql,
 } from "drizzle-orm";
-import { ConflictError, generateId, DOMAIN_RETRY_DELAYS_MS } from "@repo/core";
+import {
+  ConflictError,
+  generateId,
+  DOMAIN_RETRY_DELAYS_MS,
+  normalizeCustomHostname,
+  resolveRedirectStatus,
+} from "@repo/core";
 import type { Database } from "../client";
-import { domain, orphanedResource, project, service } from "../schema";
+import { domain, orphanedResource, project, service, ingressConnection, ingressHostname } from "../schema";
+import { assertProjectConfigurationWritable, withProjectConfigurationWrite } from "./project-work-admission";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -26,6 +35,44 @@ type RepoTransaction = Parameters<Parameters<Database["transaction"]>[0]>[0];
 // ─── Repository ──────────────────────────────────────────────────────────────
 
 export function createDomainRepo(db: Database) {
+  const ownerPredicate = (id: string) => inArray(project.id,
+    db.select({ id: domain.projectId }).from(domain).where(eq(domain.id, id)));
+
+  /** Domain API writes and service endpoint intent describe the same redirect.
+   * Commit them together so a later service edit cannot restore an older choice. */
+  async function syncServiceRedirect(tx: RepoTransaction, row: Domain, patch: Partial<NewDomain>) {
+    if (
+      !row.projectId ||
+      !row.serviceId ||
+      (patch.redirectTo === undefined && patch.redirectStatus === undefined)
+    )
+      return;
+    const [owner] = await tx
+      .select({ publicEndpoints: service.publicEndpoints })
+      .from(service)
+      .where(and(eq(service.id, row.serviceId), eq(service.projectId, row.projectId)))
+      .for("update");
+    if (!owner?.publicEndpoints?.length) return;
+    const redirectTo = row.redirectTo ?? "";
+    const redirectStatus = redirectTo ? resolveRedirectStatus(row.redirectStatus) : undefined;
+    let changed = false;
+    const endpoints = owner.publicEndpoints.map((endpoint) => {
+      if (
+        endpoint.domainType !== "custom" ||
+        normalizeCustomHostname(endpoint.customDomain ?? "") !== row.hostname ||
+        (endpoint.redirectTo === redirectTo && endpoint.redirectStatus === redirectStatus)
+      )
+        return endpoint;
+      changed = true;
+      return { ...endpoint, redirectTo, redirectStatus };
+    });
+    if (changed)
+      await tx
+        .update(service)
+        .set({ publicEndpoints: endpoints, updatedAt: new Date() })
+        .where(and(eq(service.id, row.serviceId), eq(service.projectId, row.projectId)));
+  }
+
   // Filter before LIMIT so recent failures cannot starve older, eligible rows.
   // The same persisted counter/timestamp drives the next-check time in clients.
   function retryDue(now = new Date()) {
@@ -78,6 +125,7 @@ export function createDomainRepo(db: Database) {
     const [row] = await tx.select({ projectId: domain.projectId, hostname: domain.hostname })
       .from(domain).where(eq(domain.id, id));
     if (row?.projectId) {
+      await assertProjectConfigurationWritable(tx, eq(project.id, row.projectId));
       const [owner] = await tx.select({ compositeRoutes: project.compositeRoutes })
         .from(project).where(eq(project.id, row.projectId)).for("update");
       const routes = owner?.compositeRoutes ?? [];
@@ -103,11 +151,7 @@ export function createDomainRepo(db: Database) {
     domainId: string,
     patch: Partial<NewDomain> = {},
   ): Promise<boolean> {
-    await tx
-      .select({ id: project.id })
-      .from(project)
-      .where(eq(project.id, projectId))
-      .for("update");
+    await assertProjectConfigurationWritable(tx, or(eq(project.id, projectId), ownerPredicate(domainId))!);
 
     const [target] = await tx
       .select({ projectId: domain.projectId })
@@ -124,10 +168,12 @@ export function createDomainRepo(db: Database) {
       .where(
         and(eq(domain.projectId, projectId), eq(domain.isPrimary, true), ne(domain.id, domainId)),
       );
-    await tx
+    const [updated] = await tx
       .update(domain)
       .set({ ...patch, isPrimary: true, updatedAt: now })
-      .where(eq(domain.id, domainId));
+      .where(eq(domain.id, domainId))
+      .returning();
+    if (updated) await syncServiceRedirect(tx, updated, patch);
     return true;
   }
 
@@ -156,7 +202,32 @@ export function createDomainRepo(db: Database) {
    */
   async function insertAndRead(row: NewDomain & { id: string }): Promise<Domain> {
     await db.transaction(async (tx) => {
+      if (row.projectId) await assertProjectConfigurationWritable(tx, eq(project.id, row.projectId));
+      let connection: typeof ingressConnection.$inferSelect | undefined;
+      if (row.projectId && row.domainType === "custom") {
+        const [binding] = await tx.select({ connection: ingressConnection })
+          .from(ingressConnection)
+          .innerJoin(project, and(
+            eq(project.serverId, ingressConnection.serverId),
+            eq(project.organizationId, ingressConnection.organizationId),
+          ))
+          .where(and(
+            eq(project.id, row.projectId),
+            eq(ingressConnection.defaultForDomains, true),
+            ne(ingressConnection.status, "removing"),
+          )).limit(1);
+        connection = binding?.connection;
+        if (connection) {
+          if (row.hostname.startsWith("*."))
+            throw new ConflictError("Use an exact hostname with the managed Cloudflare Tunnel, or disable the server's automatic domain connection first.");
+          row.externalIngress = true;
+        }
+      }
       await tx.insert(domain).values(row);
+      if (connection) await tx.insert(ingressHostname).values({
+        id: generateId("igh"), connectionId: connection.id, domainId: row.id,
+        hostname: row.hostname, accessPolicyId: connection.defaultAccessPolicyId,
+      });
       // A force-deleted project's route orphan owns the hostname until its
       // physical vhost and managed registration are actually reclaimed. Check
       // AFTER the unique domain insert: if this insert waited for the old
@@ -207,7 +278,7 @@ export function createDomainRepo(db: Database) {
     // shape) instead, which is strictly better than throwing.
     const created = await db.query.domain
       .findFirst({ where: eq(domain.id, row.id) })
-      .catch(() => undefined);
+      .catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "db/repos/domain.repo"); return undefined; });
     return created ?? ({ ...row, createdAt: new Date(), updatedAt: new Date() } as Domain);
   }
 
@@ -337,12 +408,12 @@ export function createDomainRepo(db: Database) {
      * custom hostnames. Soft-deleted projects are excluded: their rows are
      * unreachable, and a slot that can't be used must not be charged for.
      */
-    async listHostnamesForOrg(organizationId: string): Promise<string[]> {
+    async listHostnamesForOrg(organizationId: string, workspaceId?: string | null): Promise<string[]> {
       const rows = await db
         .select({ hostname: domain.hostname })
         .from(domain)
         .innerJoin(project, eq(domain.projectId, project.id))
-        .where(and(eq(project.organizationId, organizationId), sql`${project.deletedAt} IS NULL`));
+        .where(and(eq(project.organizationId, organizationId), sql`${project.deletedAt} IS NULL`, projectWorkspaceScope(workspaceId)));
       return rows.map((r) => r.hostname);
     },
 
@@ -359,7 +430,7 @@ export function createDomainRepo(db: Database) {
      * Same join and filters as the counting query, so the list and the count can
      * never disagree about what occupies a slot.
      */
-    async listForOrgWithProject(organizationId: string): Promise<
+    async listForOrgWithProject(organizationId: string, workspaceId?: string | null): Promise<
       {
         id: string;
         hostname: string;
@@ -386,7 +457,7 @@ export function createDomainRepo(db: Database) {
         })
         .from(domain)
         .innerJoin(project, eq(domain.projectId, project.id))
-        .where(and(eq(project.organizationId, organizationId), sql`${project.deletedAt} IS NULL`))
+        .where(and(eq(project.organizationId, organizationId), sql`${project.deletedAt} IS NULL`, projectWorkspaceScope(workspaceId)))
         .orderBy(asc(project.name), asc(domain.hostname));
     },
 
@@ -401,15 +472,26 @@ export function createDomainRepo(db: Database) {
     },
 
     async update(id: string, data: Partial<NewDomain>) {
+      if (data.externalIngress === false || data.hostname !== undefined) {
+        const [binding] = await db.select().from(ingressHostname)
+          .where(eq(ingressHostname.domainId, id)).limit(1);
+        if (binding && (data.externalIngress === false || data.hostname?.toLowerCase() !== binding.hostname))
+          throw new ConflictError("Disconnect this hostname from Cloudflare Tunnel and wait for cleanup before changing its ingress mode or hostname.");
+      }
       if (data.isPrimary === true) {
         const row = await db.query.domain.findFirst({ where: eq(domain.id, id) });
         const targetProjectId = data.projectId === undefined ? row?.projectId : data.projectId;
         if (targetProjectId && (await promotePrimary(targetProjectId, id, data))) return;
       }
-      await db
-        .update(domain)
-        .set({ ...data, updatedAt: new Date() })
-        .where(eq(domain.id, id));
+      const predicate = or(ownerPredicate(id), data.projectId ? eq(project.id, data.projectId) : undefined)!;
+      await withProjectConfigurationWrite(db, predicate, async (tx) => {
+        const [updated] = await tx
+          .update(domain)
+          .set({ ...data, updatedAt: new Date() })
+          .where(eq(domain.id, id))
+          .returning();
+        if (updated) await syncServiceRedirect(tx, updated, data);
+      });
     },
 
     /** Return the primary domain for a project (or first domain, or null). */
@@ -548,7 +630,7 @@ export function createDomainRepo(db: Database) {
     },
 
     async markVerified(id: string) {
-      await db
+      await withProjectConfigurationWrite(db, ownerPredicate(id), async (tx) => tx
         .update(domain)
         .set({
           verified: true,
@@ -560,7 +642,7 @@ export function createDomainRepo(db: Database) {
           lastCheckedAt: new Date(),
           updatedAt: new Date(),
         })
-        .where(eq(domain.id, id));
+        .where(eq(domain.id, id)));
     },
 
     /**
@@ -589,6 +671,7 @@ export function createDomainRepo(db: Database) {
     ) {
       const { promote, ...ssl } = data;
       await db.transaction(async (tx) => {
+        await assertProjectConfigurationWritable(tx, or(ownerPredicate(id), promote ? eq(project.id, promote.projectId) : undefined)!);
         const now = new Date();
         const patch: Partial<NewDomain> = {
           verified: true,
@@ -613,7 +696,7 @@ export function createDomainRepo(db: Database) {
     /** A completed failed check is failed, even while its next retry is scheduled.
      * One SQL update prevents lost counters; a stale check cannot undo success. */
     async recordVerifyFailure(id: string, error: string): Promise<number> {
-      const [row] = await db
+      const [row] = await withProjectConfigurationWrite(db, ownerPredicate(id), async (tx) => tx
         .update(domain)
         .set({
           verifyAttempts: sql`${domain.verifyAttempts} + 1`,
@@ -623,27 +706,28 @@ export function createDomainRepo(db: Database) {
           updatedAt: new Date(),
         })
         .where(and(eq(domain.id, id), eq(domain.verified, false), ne(domain.status, "removing")))
-        .returning();
+        .returning());
       return row?.verifyAttempts ?? 0;
     },
 
-    /** A failed TLS operation records its retry state without claiming a known
-     * working certificate disappeared. Only a definitive missing/invalid read
-     * may replace that last known state. */
-    async recordSslFailure(id: string, error: string, definitive = false) {
-      await db
+    /** An unavailable observation preserves all certificate/DNS states. A failed
+     * operation preserves a working certificate; a proven invalid/missing
+     * certificate replaces it. All three share atomic retry bookkeeping. */
+    async recordSslFailure(id: string, error: string, kind: "operation" | "unknown" | "invalid" = "operation") {
+      await withProjectConfigurationWrite(db, ownerPredicate(id), async (tx) => tx
         .update(domain)
         .set({
           verifyAttempts: sql`${domain.verifyAttempts} + 1`,
           lastVerifyError: error,
           lastCheckedAt: new Date(),
-          status: sql`case when ${domain.verified} then 'active' else 'failed' end`,
-          sslStatus: definitive
-            ? "error"
-            : sql`case when ${domain.sslStatus} in ('active', 'external') then ${domain.sslStatus} else 'error' end`,
+          status: kind === "unknown" ? sql`${domain.status}`
+            : sql`case when ${domain.verified} then 'active' else 'failed' end`,
+          sslStatus: kind === "unknown" ? sql`${domain.sslStatus}`
+            : kind === "invalid" ? "error"
+              : sql`case when ${domain.sslStatus} in ('active', 'external') then ${domain.sslStatus} else 'error' end`,
           updatedAt: new Date(),
         })
-        .where(and(eq(domain.id, id), ne(domain.status, "removing")));
+        .where(and(eq(domain.id, id), ne(domain.status, "removing"))));
     },
 
     /** `manualSsl` is declared because callers pass it (via spread, which slips
@@ -665,16 +749,16 @@ export function createDomainRepo(db: Database) {
         await this.recordSslFailure(
           id,
           data.lastVerifyError ?? "No usable HTTPS certificate was found on the server.",
-          true,
+          "invalid",
         );
         return;
       }
-      if (data.sslStatus === "active" || data.sslStatus === "external") {
+      if (data.sslStatus === "active" || data.sslStatus === "external" || data.sslStatus === "provisioning") {
         const now = new Date();
         // A certificate read alone does not prove cloud DNS ownership. Clear
-        // TLS failures for verified rows; the verification transaction clears
+        // TLS failures/pending attempts for verified rows; the verification transaction clears
         // unverified rows when the ownership check itself succeeds.
-        await db
+        await withProjectConfigurationWrite(db, ownerPredicate(id), async (tx) => tx
           .update(domain)
           .set({
             ...data,
@@ -684,7 +768,7 @@ export function createDomainRepo(db: Database) {
             lastCheckedAt: sql`case when ${domain.verified} then ${now.toISOString()}::timestamp else ${domain.lastCheckedAt} end`,
             updatedAt: now,
           })
-          .where(and(eq(domain.id, id), ne(domain.status, "removing")));
+          .where(and(eq(domain.id, id), ne(domain.status, "removing"))));
         return;
       }
       await this.update(id, data);
@@ -713,6 +797,8 @@ export function createDomainRepo(db: Database) {
       servicePatch: { serviceId: string; routing: Record<string, unknown> },
     ) {
       await db.transaction(async (tx) => {
+        await assertProjectConfigurationWritable(tx, or(ownerPredicate(id), inArray(project.id,
+          tx.select({ id: service.projectId }).from(service).where(eq(service.id, servicePatch.serviceId))))!);
         await removeInTransaction(tx, id);
         await tx
           .update(service)
@@ -723,12 +809,13 @@ export function createDomainRepo(db: Database) {
 
     /** Hard-delete every domain row tied to a project. Frees managed slugs immediately on project teardown. */
     async deleteByProjectId(projectId: string) {
-      await db.delete(domain).where(eq(domain.projectId, projectId));
+      await withProjectConfigurationWrite(db, eq(project.id, projectId), async (tx) => tx.delete(domain).where(eq(domain.projectId, projectId)));
     },
 
     /** Hard-delete every domain row tied to a service. Clears derived routing rows on service teardown. */
     async deleteByServiceId(serviceId: string) {
-      await db.delete(domain).where(eq(domain.serviceId, serviceId));
+      const predicate = inArray(project.id, db.select({ id: service.projectId }).from(service).where(eq(service.id, serviceId)));
+      await withProjectConfigurationWrite(db, predicate, async (tx) => tx.delete(domain).where(eq(domain.serviceId, serviceId)));
     },
 
     /** Retry failed renewals while their existing certificate is due too.
@@ -738,6 +825,21 @@ export function createDomainRepo(db: Database) {
       return db.query.domain.findMany({
         where: and(inArray(domain.sslStatus, ["active", "error"]), lt(domain.sslExpiresAt, beforeDate), ne(domain.sslDnsMode, "manual")),
       });
+    },
+
+    /** Read-only health checks also revisit certificates the provider calls
+     * active. Scope, age and live ownership precede LIMIT for fair batching. */
+    async findDueCloudSslChecks(beforeDate: Date, limit = 25, domainId?: string) {
+      return db.select().from(domain).where(and(
+        domainId ? eq(domain.id, domainId) : undefined,
+        eq(domain.verified, true), eq(domain.domainType, "custom"),
+        eq(domain.externalIngress, false), eq(domain.manualSsl, false),
+        ne(domain.status, "removing"), notLike(domain.hostname, "%*%"),
+        or(isNull(domain.lastCheckedAt), lte(domain.lastCheckedAt, beforeDate)),
+        retryDue(), liveVerificationOwner(),
+        inArray(domain.projectId, db.select({ id: project.id }).from(project)
+          .where(isNotNull(project.workspaceId))),
+      )).orderBy(sql`coalesce(${domain.lastCheckedAt}, ${domain.createdAt})`, asc(domain.id)).limit(limit);
     },
 
     /**
@@ -812,3 +914,4 @@ export function createDomainRepo(db: Database) {
 
   return repository;
 }
+import { projectWorkspaceScope } from "./workspace-scope";

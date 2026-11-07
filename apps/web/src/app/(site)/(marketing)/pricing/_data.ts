@@ -1,4 +1,5 @@
 import { UI, paidLadder, type CloudPricing } from "@/lib/pricing";
+import { cloudPlanHref } from "@/lib/cloud-links";
 
 export interface FaqItem {
   q: string;
@@ -10,39 +11,46 @@ export function faq(pricing: CloudPricing): FaqItem[] {
 
   return [
     {
-      q: "Is self-hosting really free?",
-      a: "Yes — free forever. Run the full platform on your own servers with no metering, no seat caps, and no telemetry. It's open source under Apache 2.0, and there's nothing to buy or sign up for: install the CLI, point it at a box, and you're running.",
-    },
-    {
       q: "How much does Openship Cloud cost?",
       a: [
-        pricing.freeTier ? `The ${pricing.freeTier.name} tier costs nothing.` : null,
-        ladder ? `Paid plans are ${ladder}, ${UI.billedMonthly}.` : null,
-        !pricing.available ? "See your dashboard for current Cloud plans and availability." : null,
+        ladder
+          ? `Plans are ${ladder}, ${UI.billedMonthly}.`
+          : "See your dashboard for current Cloud plans and availability.",
+        pricing.annual.enabled ? "Yearly billing is also available; the cards show the monthly equivalent and full yearly charge." : null,
+        "Each subscription includes one Cloud Space for your projects, with no per-seat fees. Choose a plan and deploy; Openship handles server setup.",
         pricing.customTiers.length > 0
-          ? `${pricing.customTiers.map((p) => p.name).join(" and ")} is priced per contract — talk to sales.`
+          ? "Enterprise limits and pricing are agreed with sales."
           : null,
-        "Plans are billed per organization. The checkout shows the final amount before payment.",
       ]
-        .filter((s): s is string => s !== null)
+        .filter((text): text is string => text !== null)
         .join(" "),
     },
     {
-      q: "Can I move between self-hosted and cloud later?",
-      a: "Yes, either direction. Your containers travel as-is — no rebuild, no rewrites — because a deployment on Openship is a plain image and standard manifests. Move a workload from Cloud onto your own box, or the other way, without paying an exit tax.",
+      q: "What does a Cloud Space include?",
+      a: "A Cloud Space subscription covers its purchased CPU, RAM and disk for the entire paid period. Your apps and builds share those resources, with no second compute-credit allowance. Managed proxy transfer and backups are separate. Existing subscriptions keep their saved terms, shown in Billing.",
     },
     {
-      q: "What's the license?",
-      a: "Apache 2.0 — a permissive license. Use it, modify it, fork it, and ship it in commercial or closed-source products, no strings attached. Run it in your cloud, on a Raspberry Pi, or in production for a SaaS.",
+      q: "How is capacity shared?",
+      a: "Your projects and builds share the Cloud Space’s CPU, RAM and disk. Container limits do not allocate another machine or disk. Your dashboard shows actual usage separately from purchased capacity; add another subscribed server when you need a separate pool.",
     },
     {
-      q: "Do you store my source code?",
-      a: "Only what's needed to build. We never store unencrypted secrets, and source is fetched fresh from your repo for each build. Self-hosted keeps everything on your infrastructure by definition.",
+      q: "Can I change or cancel my plan?",
+      a: "Cancel renewal from Billing and keep access until the end of your paid period. Upgrades use the provider’s prorated price and apply after payment. Resource reductions and billing-mode changes start at renewal. Review the amount due, effective date and any server restarts before confirming. Retained disks can incur storage charges after coverage ends until they are deleted.",
+    },
+    {
+      q: "What happens if I cancel Manage?",
+      a: "Management remains available through your paid period. Your apps, databases and files keep running on your servers. Once the allowance ends, Openship Cloud stops managing those servers; it does not delete or stop them. You can manage them directly or subscribe again.",
+    },
+    {
+      q: "Is self-hosting really free?",
+      a: "Yes. Run the full Openship platform on your own servers, free under Apache 2.0, with no Openship subscription or per-seat fees. You pay your infrastructure provider directly.",
+    },
+    {
+      q: "Can I move between Cloud and my own servers?",
+      a: "Yes. Openship uses standard containers and supports migration between Cloud and your own infrastructure. Your apps are portable, so you can choose where they run as your needs change.",
     },
   ];
 }
 
-/** Where a Cloud plan's CTA goes. The marketing site has no signup route of its
- *  own; `/login` redirects to the app, same as the navbar. */
-export const CLOUD_CTA_HREF = "/login";
+export const CLOUD_CTA_HREF = cloudPlanHref();
 export const SELF_HOST_CTA_HREF = "/docs/getting-started/quickstart";

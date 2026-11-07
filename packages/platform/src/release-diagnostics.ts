@@ -6,7 +6,7 @@ class ReleaseRateLimitError extends AppError {
 
 /** Only defined diagnostics may cross the release API; never expose upstream bodies or credentials. */
 export function githubReleaseError(error: unknown): AppError {
-  if (error instanceof AppError && error.code === "GITHUB_CONNECTION_REQUIRED")
+  if (error instanceof AppError && (error.code === "GITHUB_TOKEN_REQUIRED" || error.code === "GITHUB_CONNECTION_REQUIRED"))
     return new AppError("尚未连接可读取发布仓库的 GitHub 身份，请连接 GitHub 账号", 403, "GITHUB_USER_CONNECTION_REQUIRED");
   const status = error && typeof error === "object" && "status" in error && typeof error.status === "number" ? error.status : 503;
   const credentialRejected = error && typeof error === "object" && "credentialRejected" in error && error.credentialRejected === true;

@@ -27,7 +27,7 @@ export const releaseDependencies: ReleaseDependencies = {
   recordAudit(ctx, projectId, operation, recordId) {
     audit.recordAsync(operationAuditContext(ctx), { eventType: "project:write", resourceType: "project", resourceId: projectId, after: { operation, recordId } });
   },
-  capabilities: () => ({ runtimeVersion: APP_VERSION, contractVersion: 1, upstreamCommit: "234d8a9d0bd571aff3fe3ce73a8408f226dcb4a0", gitops: true, serverEnvironment: true, strictServiceScope: true, durableCutover: true }),
+  capabilities: () => ({ runtimeVersion: APP_VERSION, contractVersion: 1, upstreamCommit: "278c9847363d04c1cb2e8768c878b94a65fb33a1", gitops: true, serverEnvironment: true, strictServiceScope: true, durableCutover: true }),
   async verifyAcceptance(ctx, b, plan, run, progress) {
     const receipt = progress.receipt;
     const noop = receipt?.status === "noop" && plan.target.services.length === 0;

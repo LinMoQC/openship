@@ -19,14 +19,11 @@
  *
  * Everything here is self-hosted-only and hard-guards CLOUD_MODE (mirror
  * github.local-auth.ts). Secrets use the same encrypt/decrypt as the existing
- * clone-token pipe; they are decrypted only at deploy time and never logged.
+ * clone-token pipe; they are decrypted only for authorized clones or repository reads and never logged.
  */
 
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
+import ssh2 from "ssh2";
 
 import { repos } from "@repo/db";
 import { env } from "../../config/env";
@@ -39,9 +36,6 @@ import { GITHUB_KNOWN_HOSTS } from "./github-known-hosts";
 import type { BuildGitCredential } from "./clone-auth";
 import { captureExecutionAuthority, resolveExecutionAuthority } from "../../lib/execution-authority";
 import { authorization } from "../../lib/authorization";
-import { assertNativeHostExecution } from "../../native/execution-policy";
-
-const execFileAsync = promisify(execFile);
 
 const flowKey = (serverId: string) => `server:${serverId}`;
 
@@ -57,27 +51,10 @@ async function probeLogin(token: string): Promise<string | null> {
   return user?.login ?? null;
 }
 
-/** Generate an Ed25519 keypair via ssh-keygen (OpenSSH private + public line). */
+/** Generate OpenSSH keys in memory; no host command or plaintext temp file. */
 async function generateEd25519(comment: string): Promise<{ privateKey: string; publicKey: string }> {
-  assertNativeHostExecution();
-  const dir = await mkdtemp(path.join(tmpdir(), "opsh-ghkey-"));
-  const keyPath = path.join(dir, "id_ed25519");
-  try {
-    await execFileAsync("ssh-keygen", ["-t", "ed25519", "-N", "", "-C", comment, "-f", keyPath], {
-      timeout: 15_000,
-    });
-    const [priv, pub] = await Promise.all([
-      readFile(keyPath, "utf8"),
-      readFile(`${keyPath}.pub`, "utf8"),
-    ]);
-    return { privateKey: priv, publicKey: pub.trim() };
-  } catch {
-    throw new Error(
-      "ssh-keygen is not available on this host — install openssh-client to use SSH-based GitHub auth",
-    );
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
+  const pair = ssh2.utils.generateKeyPairSync("ed25519", { comment });
+  return { privateKey: pair.private, publicKey: pair.public };
 }
 
 // ─── Populators (called from the controller) ─────────────────────────────────
@@ -240,16 +217,19 @@ export async function resolveServerGitCredential(opts: {
   ctx: RequestContext;
   owner: string | null;
   repo: string | null;
+  /** Repository inspection cannot mint deploy keys or expose SSH material. */
+  tokenOnly?: boolean;
 }): Promise<BuildGitCredential | null> {
   if (env.CLOUD_MODE) return null;
   const row = await repos.serverGithubAuth.getByServer(opts.serverId);
-  if (!row || !hasStoredCredential(row)) return null;
+  if (!row || (opts.tokenOnly && row.mode !== "token") || !hasStoredCredential(row)) return null;
 
   if (row.mode === "token") {
     if (!row.tokenEncrypted) return null;
     try {
       return { token: decrypt(row.tokenEncrypted) };
-    } catch {
+    } catch (diagnosticFailure) {
+      observeCaughtError(diagnosticFailure, "platform/engine/modules/github/server-github.service");
       return null;
     }
   }
@@ -264,7 +244,8 @@ export async function resolveServerGitCredential(opts: {
           knownHosts: GITHUB_KNOWN_HOSTS,
         },
       };
-    } catch {
+    } catch (diagnosticFailure) {
+      observeCaughtError(diagnosticFailure, "platform/engine/modules/github/server-github.service");
       return null;
     }
   }
@@ -289,10 +270,10 @@ export async function resolveServerGitCredential(opts: {
  * Same `hasStoredCredential` predicate the resolver gates on, without decrypting
  * or minting, so preflight reports the verdict the build will reach.
  */
-export async function canResolveServerGitCredential(serverId: string): Promise<boolean> {
+export async function canResolveServerGitCredential(serverId: string, opts: { tokenOnly?: boolean } = {}): Promise<boolean> {
   if (env.CLOUD_MODE) return false;
-  const row = await repos.serverGithubAuth.getByServer(serverId).catch(() => null);
-  return !!row && hasStoredCredential(row);
+  const row = await repos.serverGithubAuth.getByServer(serverId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/github/server-github.service"); return null; });
+  return !!row && (!opts.tokenOnly || row.mode === "token") && hasStoredCredential(row);
 }
 
 // ─── Status + disconnect ──────────────────────────────────────────────────────
@@ -329,7 +310,9 @@ export async function disconnectServerGithub(ctx: RequestContext, serverId: stri
     if (k.githubKeyId != null) {
       // Best-effort — a revoked/expired token or deleted repo shouldn't block
       // clearing our own state.
-      await revokeDeployKey(ctx, k.owner, k.repo, k.githubKeyId).catch(() => {});
+      await revokeDeployKey(ctx, k.owner, k.repo, k.githubKeyId).catch((diagnosticFailure) => {
+        observeCaughtError(diagnosticFailure, "platform/engine/modules/github/server-github.service");
+      });
     }
   }
   await repos.githubDeployKey.deleteByServer(serverId);

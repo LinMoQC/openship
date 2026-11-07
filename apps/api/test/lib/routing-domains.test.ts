@@ -95,7 +95,7 @@ describe("tracked SSL provisioning progress", () => {
     await tracked.provisionCert(missing.domain);
     expect(lines.some(line => line.includes("DNS problem: NXDOMAIN"))).toBe(true);
     expect(lines.join(" ")).not.toContain("SSL certificate issued");
-    expect(repos.domain.recordSslFailure).toHaveBeenCalledWith("dom_1", "DNS problem: NXDOMAIN", true);
+    expect(repos.domain.recordSslFailure).toHaveBeenCalledWith("dom_1", "DNS problem: NXDOMAIN", "invalid");
   });
 
   it("does not add a progress read when no logger is attached", async () => {
@@ -165,6 +165,138 @@ const customSvc = {
 } as any;
 
 describe("buildProjectRouteDomains", () => {
+  it.each([
+    { publicEndpoints: [] },
+    { publicEndpoints: [{ port: 3000, domainType: "custom", customDomain: "other.example.com" }] },
+  ])(
+    "routes a verified Domains-tab hostname through the single app when endpoints are %j (#1281)",
+    ({ publicEndpoints }) => {
+      const planned = buildProjectRouteDomains({
+        project: { slug: "laravel" } as any,
+        projectDomains: [{
+          hostname: "app.example.com", domainType: "custom", verified: true,
+          targetPort: null, targetPath: null, sslStatus: "active",
+        }] as any,
+        publicEndpoints: publicEndpoints as any,
+        defaultTargetPort: 8080,
+        runtimeName: "docker",
+        usesManagedRouting: false,
+      });
+      expect(planned).toContainEqual(expect.objectContaining({
+        hostname: "app.example.com", targetPort: 8080, tls: true, verified: true,
+      }));
+    },
+  );
+
+  it.each([
+    { verified: false },
+    { verified: true, serviceId: "database" },
+    { verified: true, targetPath: "/docs" },
+  ])("does not infer a single-app destination for %j", (extra) => {
+    expect(buildProjectRouteDomains({
+      project: { slug: "laravel" } as any,
+      projectDomains: [{
+        hostname: "app.example.com", domainType: "custom", targetPort: null,
+        targetPath: null, ...extra,
+      }] as any,
+      defaultTargetPort: 8080,
+      runtimeName: "docker",
+      usesManagedRouting: false,
+    })).toEqual([]);
+  });
+
+  it("preserves an explicitly mapped port instead of the single-app default", () => {
+    expect(buildProjectRouteDomains({
+      project: { slug: "laravel" } as any,
+      projectDomains: [{
+        hostname: "app.example.com", domainType: "custom", verified: true,
+        targetPort: 9000, sslStatus: "active",
+      }] as any,
+      defaultTargetPort: 8080,
+      runtimeName: "docker",
+      usesManagedRouting: false,
+    })).toEqual([expect.objectContaining({ targetPort: 9000 })]);
+  });
+
+  it("routes a CLI custom domain only after its public endpoint is attached", () => {
+    const input = {
+      project: { slug: "cli-app" } as any,
+      projectDomains: [{ hostname: "app.example.com", domainType: "custom", targetPort: null, targetPath: null }] as any,
+      runtimeName: "bare",
+      usesManagedRouting: false,
+      isStatic: false,
+    };
+    expect(buildProjectRouteDomains(input)).toEqual([]);
+    expect(buildProjectRouteDomains({
+      ...input,
+      publicEndpoints: [{ domainType: "custom", customDomain: "app.example.com", port: 3000 }],
+    })).toEqual([expect.objectContaining({ hostname: "app.example.com", targetPort: 3000 })]);
+  });
+
+  it("keeps a Cloud web endpoint when local managed routing is disabled", () => {
+    const input = {
+      project: { slug: "cloud-app" } as any,
+      projectDomains: [],
+      publicEndpoints: [{ domain: "cloud-app", domainType: "free" as const, port: 3000 }],
+      runtimeName: "docker",
+      usesManagedRouting: false,
+      isStatic: false,
+    };
+    const planned = buildProjectRouteDomains({ ...input, certificateManagement: "provider" });
+    expect(planned).toHaveLength(1);
+    expect(planned[0]).toMatchObject({
+      hostname: `cloud-app.${getRoutingBaseDomain()}`,
+      targetPort: 3000,
+      requiresSslTooling: false,
+      provisionSsl: false,
+    });
+    expect(buildProjectRouteDomains(input)).toEqual([]);
+  });
+
+  it.each([true, false])(
+    "routes container-served static roots during deploy and retry (endpoints=%s)",
+    (withEndpoints) => {
+      const planned = buildProjectRouteDomains({
+        project: { slug: "static-site" } as any,
+        projectDomains: [
+          {
+            hostname: "static-site.opsh.io",
+            targetPath: "/",
+            targetPort: null,
+            domainType: "free",
+            verified: true,
+            isPrimary: true,
+          } as any,
+        ],
+        managedSlug: "static-site",
+        ...(withEndpoints
+          ? {
+              publicEndpoints: [
+                { domain: "static-site", domainType: "free" as const, targetPath: "/" },
+              ],
+            }
+          : {}),
+        runtimeName: "docker",
+        certificateManagement: "provider",
+        usesManagedRouting: true,
+        isStatic: false,
+        staticContainerPort: 3000,
+      });
+      expect(planned).toHaveLength(1);
+      expect(planned[0]).toMatchObject({ hostname: "static-site.opsh.io", targetPort: 3000 });
+      expect(planned[0].targetPath).toBeUndefined();
+    },
+  );
+
+  it("does not turn stale paths on ordinary web apps into public ports", () => {
+    expect(resolveRouteDestination({ targetPath: "/", targetPort: null }, false)).toBeUndefined();
+    expect(resolveRouteDestination({ targetPath: "/docs" }, true, 3000)).toEqual({
+      targetPath: "/docs",
+    });
+    expect(() => resolveRouteDestination({ targetPath: "/docs" }, false, 3000)).toThrow("root (/)");
+    expect(resolveRouteDestination({}, false, 3000)).toBeUndefined();
+  });
+
   it("uses public endpoints as the only app routing source when they are provided", () => {
     const planned = buildProjectRouteDomains({
       project: { slug: "my-app" } as any,
@@ -685,7 +817,7 @@ describe("createTrackedSslProvider (deploy-time issuance)", () => {
     expect(repos.domain.recordSslFailure).toHaveBeenCalledWith(
       "dom_1",
       expect.stringContaining("DNS is not pointing here"),
-      true,
+      "invalid",
     );
     expect(repos.domain.markVerifiedActive).not.toHaveBeenCalled();
   });
@@ -706,7 +838,7 @@ describe("createTrackedSslProvider (deploy-time issuance)", () => {
     expect(repos.domain.recordSslFailure).toHaveBeenCalledWith(
       "dom_1",
       expect.stringContaining("No usable HTTPS certificate"),
-      true,
+      "invalid",
     );
     expect(repos.domain.updateSsl).not.toHaveBeenCalled();
   });

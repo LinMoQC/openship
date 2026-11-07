@@ -4,7 +4,7 @@ import {
   DeploymentControlSchemas, DeploymentSslSchemas,
   type CancellationResult, type CreateDeploymentResult, type Deployment,
   type DeploymentBuildStatus, type DeploymentRestorePlan, type DeploymentEventOptions,
-  type ListDeploymentsInput, type LogEntry,
+  type ListDeploymentsInput, type DeploymentPage, type LogEntry,
 } from "@repo/contracts";
 import type { ExecutionContext } from "./context";
 import type { DeploymentDependencies, PlatformDeploymentOperations, StoredDeployment } from "./deployments";
@@ -16,7 +16,7 @@ export interface DeploymentResourceDependencies {
   controls?: ResourceServices<typeof DeploymentControlSchemas>;
   ssl?: ScopedServices<typeof DeploymentSslSchemas>;
   get(id: string, organizationId: string): Promise<StoredDeployment>;
-  list(organizationId: string, input: ListDeploymentsInput): Promise<{ rows: StoredDeployment[]; total: number; page: number; perPage: number; projects?: Array<{ id: string; name: string }> }>;
+  list(organizationId: string, input: ListDeploymentsInput): Promise<Omit<DeploymentPage, "data"> & { rows: StoredDeployment[] }>;
   logs(id: string, organizationId: string, tail?: number): Promise<LogEntry[]>;
   buildStatus(id: string): Promise<DeploymentBuildStatus>;
   reconcile(id: string): void;
@@ -63,11 +63,13 @@ export function createDeploymentResourceOperations(deps: DeploymentDependencies)
     },
     async list(ctx: ExecutionContext, value: ListDeploymentsInput = {}) {
       const input = parseInput(ListDeploymentsSchema, value);
-      const context = await deps.authorization.authorize(ctx, { resourceType: "deployment", resourceId: "*", action: "read", scope: "list" });
-      if (input.projectId) await deps.authorization.authorize(context, { resourceType: "project", resourceId: input.projectId, action: "read" });
+      const context = await deps.authorization.authorize(ctx, input.projectId
+        ? { resourceType: "project", resourceId: input.projectId, action: "read", capability: "deployments:read" }
+        : { resourceType: "deployment", resourceId: "*", action: "read", scope: "list" });
       const result = await resources().list(context.organizationId, input);
       return { context, data: {
         data: result.rows.map(deps.present), total: result.total, page: result.page, perPage: result.perPage,
+        ...(result.summary ? { summary: result.summary } : {}),
         ...(result.projects ? { projects: result.projects } : {}),
       } };
     },

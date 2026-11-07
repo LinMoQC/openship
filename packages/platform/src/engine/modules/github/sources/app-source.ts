@@ -9,13 +9,14 @@
  * github.auth verbatim (multi-tenant org-scoped keys unchanged).
  *
  * Used two ways:
- *   - SaaS (CLOUD_MODE): the resolver returns this directly as THE GitHubSource
- *     (no gh, no merge).
+ *   - SaaS (CLOUD_MODE): the base source, optionally supplemented by the user's
+ *     personal token in the factory. No host/gh identity.
  *   - local + Openship Cloud connected: LocalGitHubSource (the merge) composes
  *     one of these as its App sub-source for installations + cloud-minted clone
  *     tokens, while gh drives listing.
  */
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { ghFetch } from "@repo/platform/engine/modules/github/github.http";
 import {
   getInstallationId,
@@ -91,7 +92,7 @@ export class GitHubAppSource implements GitHubSource {
     owner: string,
     installationId?: number,
   ): Promise<MappedRepository[]> {
-    const token = await getInstallationToken(this.ctx, owner, installationId).catch(() => null);
+    const token = await getInstallationToken(this.ctx, owner, installationId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/github/sources/app-source"); return null; });
     if (!token) return [];
     const perPage = 100;
     const MAX_PAGES = 50; // 5000 repos — a safety backstop, never a real limit
@@ -127,14 +128,15 @@ export class GitHubAppSource implements GitHubSource {
   async getConnectionState(): Promise<GitHubConnectionState> {
     const [status, customConfigured] = await Promise.all([
       this.userStatus(),
-      hasActiveGitHubSource(this.ctx.organizationId).catch(() => false),
+      hasActiveGitHubSource(this.ctx.organizationId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/github/sources/app-source"); return false; }),
     ]);
     const connected = customConfigured || (status.connected && status.tokenSource !== "cli");
     let hasInstallations: boolean | undefined;
     if (connected) {
       try {
         hasInstallations = (await this.installs()).length > 0;
-      } catch {
+      } catch (diagnosticFailure) {
+        observeCaughtError(diagnosticFailure, "platform/engine/modules/github/sources/app-source");
         hasInstallations = undefined;
       }
     }
@@ -169,7 +171,8 @@ export class GitHubAppSource implements GitHubSource {
         source: "app" as const,
       }));
       return { state, accounts };
-    } catch {
+    } catch (diagnosticFailure) {
+      observeCaughtError(diagnosticFailure, "platform/engine/modules/github/sources/app-source");
       return { state, accounts: [] };
     }
   }
@@ -193,6 +196,7 @@ export class GitHubAppSource implements GitHubSource {
         repos = await this.listInstallationRepos(primary.account.login, primary.id);
       }
     } catch (err) {
+      observeCaughtError(err, "platform/engine/modules/github/sources/app-source");
       errors.app = (err as Error).message;
     }
     return {

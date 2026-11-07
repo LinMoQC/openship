@@ -8,7 +8,10 @@
  * implementation and one set of resource limits.
  */
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { probeTcpDetailed, type PortScanResult, type TcpProbeResult } from "@repo/adapters";
+import { env } from "../config/env";
+import { resolvePinnedHost } from "./ssrf-guard";
 
 export interface PortReachabilityOptions {
   timeoutMs?: number;
@@ -50,15 +53,19 @@ export async function probePortsFromControlPlane(
   const queue = [
     ...new Set(ports.filter((port) => Number.isInteger(port) && port > 0 && port <= 65_535)),
   ].slice(0, maxPorts);
+  if (queue.length === 0) return [];
+  // Customer-managed hosts are still untrusted destinations when this code runs
+  // in SaaS. Resolve once and pin every probe; self-hosted LAN access is unchanged.
+  const dialHost = env.CLOUD_MODE ? (await resolvePinnedHost(host)).ip : host.trim();
   const observations = new Map<number, TcpProbeResult>();
 
   const workers = Array.from({ length: Math.min(concurrency, queue.length) }, async () => {
     for (let port = queue.shift(); port !== undefined; port = queue.shift()) {
-      const result = await probe(host.trim(), port, timeoutMs).catch((err: unknown) => ({
+      const result = await probe(dialHost, port, timeoutMs).catch((err: unknown) => { observeCaughtError(err, "platform/engine/lib/port-reachability"); return ({
         ok: false as const,
         reason: "error" as const,
         message: err instanceof Error ? err.message : "TCP probe failed",
-      }));
+      }); });
       observations.set(port, result);
     }
   });

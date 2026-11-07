@@ -2,9 +2,11 @@
 
 import { Icon as UiIcon } from "@repo/ui/icons";
 
+import { RouteProtectionButton } from "./RouteProtectionButton";
+import { useOptionalDeployment } from "@/context/DeploymentContext";
 import React, { useState } from "react";
 import { RoutingSettingsCard } from "@/components/routing/RoutingSettingsCard";
-import { Switch } from "@/components/ui/Switch";
+import { WwwDomainControls } from "./WwwDomainControls";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 import type { PublicEndpoint } from "@/context/deployment/types";
 import { createPublicEndpoint } from "@/context/deployment/types";
@@ -29,25 +31,18 @@ interface PublicEndpointsCardProps {
   /** Hide each route's internal Free/Custom toggle — for callers that drive the
    *  domain type from their own outer control (e.g. the migrate wizard). */
   hideTypeToggle?: boolean;
+  /** Preserve discovered path routing while editing imported proxy endpoints. */
+  preserveProxyPaths?: boolean;
   /** Allow removing EVERY domain (down to zero = internal-only). Off by default so
    *  deploy/migrate flows keep ≥1 route; the project domains tab opts in so a user
    *  can delete their only/last domain and re-add one. */
   allowRemoveAll?: boolean;
-  /** Optional "Include www." switch shown as the first row of the domain card,
-   *  for the apex custom domain. `apex` is the bare apex (null until one is typed);
-   *  `show` hides it for subdomains (where `www.<sub>` is nonsensical). Only the
-   *  primary/apex input gets the `www.` auto-strip — never the `www.<apex>` row. */
-  wwwToggle?: {
-    show: boolean;
-    included: boolean;
-    apex: string | null;
-    onToggle: (on: boolean) => void;
-  };
+  /** Offer the shared apex/www choice, including headerless service editors. */
+  allowWww?: boolean;
   /**
    * Offer the per-endpoint "Redirect to" control (a hostname answers a 30x to
    * another of the project's hostnames instead of serving). Off by default; the
-   * caller opts in where it applies — never for a cloud project, whose routing the
-   * managed edge owns.
+   * caller opts in where it applies. Opt in only when the destination preserves the complete request URL.
    */
   allowRedirects?: boolean;
 }
@@ -63,14 +58,17 @@ const PublicEndpointsCard: React.FC<PublicEndpointsCardProps> = ({
   hideHeader = false,
   portInline = false,
   hideTypeToggle = false,
+  preserveProxyPaths = false,
   allowRemoveAll = false,
-  wwwToggle,
+  allowWww = false,
   allowRedirects = false,
 }) => {
   const { t } = useI18n();
-  const { baseDomain } = usePlatform();
+  const deployment = useOptionalDeployment();
+  const { baseDomain, selfHosted } = usePlatform();
   const w = t.widgets.routing.publicEndpoints;
   const hasMultipleEndpoints = endpoints.length > 1;
+  const primaryId = endpoints.find((endpoint) => !endpoint.redirectTo)?.id;
   const newEndpointDomainType = useDefaultDomainType();
 
   /** Shared with the project Domains tab — one answer for "which host is this?". */
@@ -92,58 +90,60 @@ const PublicEndpointsCard: React.FC<PublicEndpointsCardProps> = ({
   const normalizeEndpointForMode = (
     endpoint: PublicEndpoint,
     linkedRuntimePort = runtimePort,
-  ): PublicEndpoint => (
+  ): PublicEndpoint =>
     hasServer
       ? {
           ...endpoint,
           port: endpoint.port || linkedRuntimePort || "",
-          targetPath: "",
+          targetPath: preserveProxyPaths ? endpoint.targetPath : "",
         }
       : {
           ...endpoint,
           port: "",
           targetPath: endpoint.targetPath || "/",
-        }
-  );
+        };
 
   const commitEndpoints = (nextEndpoints: PublicEndpoint[], nextRuntimePort = runtimePort) => {
     onChange(nextEndpoints, hasServer ? nextRuntimePort : undefined);
   };
 
-  const handleEndpointChange = (
-    endpointId: string,
-    updates: Partial<PublicEndpoint>,
-  ) => {
-    const isPrimaryEndpoint = endpoints[0]?.id === endpointId;
-    const nextRuntimePort = hasServer && isPrimaryEndpoint && typeof updates.port === "string"
-      ? (updates.port || runtimePort)
-      : runtimePort;
+  const handleEndpointChange = (endpointId: string, updates: Partial<PublicEndpoint>) => {
+    const isPrimaryEndpoint = primaryId === endpointId;
+    const nextRuntimePort =
+      hasServer && isPrimaryEndpoint && typeof updates.port === "string"
+        ? updates.port || runtimePort
+        : runtimePort;
 
     commitEndpoints(
-      endpoints.map((endpoint) => (
+      endpoints.map((endpoint) =>
         endpoint.id === endpointId
           ? normalizeEndpointForMode({ ...endpoint, ...updates }, nextRuntimePort)
-          : endpoint
-      )),
+          : endpoint,
+      ),
       nextRuntimePort,
     );
   };
 
   const handleAddEndpoint = () => {
     const lastEndpoint = endpoints[endpoints.length - 1];
+    const domainType = hideTypeToggle
+      ? (lastEndpoint?.domainType ?? newEndpointDomainType)
+      : newEndpointDomainType;
     commitEndpoints([
       ...endpoints,
-      normalizeEndpointForMode(createPublicEndpoint(
-        hasServer
-          ? {
-              port: lastEndpoint?.port || runtimePort || "",
-              domainType: newEndpointDomainType,
-            }
-          : {
-              targetPath: lastEndpoint?.targetPath || "/",
-              domainType: newEndpointDomainType,
-            },
-      )),
+      normalizeEndpointForMode(
+        createPublicEndpoint(
+          hasServer
+            ? {
+                port: lastEndpoint?.port || runtimePort || "",
+                domainType,
+              }
+            : {
+                targetPath: lastEndpoint?.targetPath || "/",
+                domainType,
+              },
+        ),
+      ),
     ]);
   };
 
@@ -155,48 +155,78 @@ const PublicEndpointsCard: React.FC<PublicEndpointsCardProps> = ({
     }
 
     const nextEndpoints = endpoints.filter((endpoint) => endpoint.id !== endpointId);
-    const nextRuntimePort = hasServer && endpoints[0]?.id === endpointId
-      ? (nextEndpoints[0]?.port || runtimePort || "")
-      : runtimePort;
+    const nextRuntimePort =
+      hasServer && endpoints[0]?.id === endpointId
+        ? nextEndpoints[0]?.port || runtimePort || ""
+        : runtimePort;
 
-    commitEndpoints(nextEndpoints, nextRuntimePort);
+    const removedHost = endpoints.find((endpoint) => endpoint.id === endpointId);
+    const host = removedHost ? endpointHostname(removedHost) : "";
+    commitEndpoints(
+      nextEndpoints.map((endpoint) =>
+        endpoint.redirectTo === host
+          ? { ...endpoint, redirectTo: "", redirectStatus: undefined }
+          : endpoint,
+      ),
+      nextRuntimePort,
+    );
   };
 
   const describeEndpointTarget = (endpoint: PublicEndpoint) => {
+    if (endpoint.redirectTo)
+      return interpolate(w.redirectSummary, { hostname: endpoint.redirectTo });
     if (hasServer) {
       const mappedPort = endpoint.port || runtimePort || "";
-      return mappedPort ? interpolate(w.mappedToPort, { port: mappedPort }) : w.noPortYet;
+      const target = mappedPort ? interpolate(w.mappedToPort, { port: mappedPort }) : w.noPortYet;
+      return preserveProxyPaths && endpoint.targetPath
+        ? `${target} · ${endpoint.exact ? "= " : ""}${endpoint.targetPath}`
+        : target;
     }
 
     return interpolate(w.mappedTo, { path: endpoint.targetPath || "/" });
   };
 
+  const endpointSummary = (endpoint: PublicEndpoint) => {
+    const host = endpointHostname(endpoint);
+    if (endpoint.redirectTo) return `${host} → ${endpoint.redirectTo}`;
+    if (!host) return describeEndpointTarget(endpoint);
+    return preserveProxyPaths && endpoint.targetPath
+      ? `${host} ${endpoint.exact ? "= " : ""}${endpoint.targetPath}`
+      : host;
+  };
+
+  const renderProtection = (endpoint: PublicEndpoint) => deployment && (
+    <RouteProtectionButton
+      hostname={endpointHostname(endpoint)}
+      projectId={deployment.config.projectId}
+      unsupported={!selfHosted || deployment.config.deployTarget === "cloud" || deployment.config.deployTarget === "cluster" || endpoint.domainType !== "custom" || endpointHostname(endpoint).startsWith("*.")}
+      draft={endpoint.protectionDraft}
+      onDraftChange={(protectionDraft) => handleEndpointChange(endpoint.id, { protectionDraft })}
+    />
+  );
+
   const renderRoutingCard = (endpoint: PublicEndpoint, actionSlot?: React.ReactNode) => {
-    const resolvedUrl = endpoint.domainType === "custom" && endpoint.customDomain && !endpoint.customDomain.startsWith("*.")
-      ? `https://${endpoint.customDomain}`
-      : null;
-    const readOnlyTarget = !allowPortEdit
-      ? {
-          label: hasServer ? w.exposedPort : w.staticPath,
-          value: hasServer ? (endpoint.port || runtimePort || w.auto) : (endpoint.targetPath || "/"),
-          icon: hasServer ? ("port" as const) : ("path" as const),
-        }
-      : undefined;
-
-    // Auto-strip `www.` on the primary/apex custom input only — NOT the
-    // `www.<apex>` variant endpoint (stripping it would collapse it into the apex).
-    const isWwwVariant =
-      !!wwwToggle?.apex &&
+    const resolvedUrl =
       endpoint.domainType === "custom" &&
-      endpoint.customDomain.trim().toLowerCase() === `www.${wwwToggle.apex}`;
-    const stripWww = !!wwwToggle && endpoint.domainType === "custom" && !isWwwVariant;
+      endpoint.customDomain &&
+      !endpoint.customDomain.startsWith("*.")
+        ? `https://${endpoint.customDomain}`
+        : null;
+    const readOnlyTarget =
+      !allowPortEdit && !endpoint.redirectTo
+        ? {
+            label: hasServer ? w.exposedPort : w.staticPath,
+            value: hasServer ? endpoint.port || runtimePort || w.auto : endpoint.targetPath || "/",
+            icon: hasServer ? ("port" as const) : ("path" as const),
+          }
+        : undefined;
 
-    // Redirect targets = the project's OTHER named hostnames. A closed list, so a
+    // Redirect targets are the project's other serving hostnames. A closed list, so a
     // redirect can never point off-site; an endpoint with no hostname yet (freshly
     // added row) isn't offerable as a target.
     const redirectTargets = allowRedirects
       ? endpoints
-          .filter((other) => other.id !== endpoint.id)
+          .filter((other) => other.id !== endpoint.id && !other.redirectTo)
           .map((other) => endpointHostname(other))
           .filter((hostname): hostname is string => !!hostname)
       : [];
@@ -207,13 +237,12 @@ const PublicEndpointsCard: React.FC<PublicEndpointsCardProps> = ({
         domain={endpoint.domain}
         customDomain={endpoint.customDomain}
         domainType={endpoint.domainType}
-        stripWww={stripWww}
         targetMode={hasServer ? "proxy" : "static"}
         targetPath={hasServer ? undefined : endpoint.targetPath}
         exposedPort={hasServer ? endpoint.port : undefined}
         readOnlyTarget={readOnlyTarget}
         liveUrl={resolvedUrl}
-        actionSlot={actionSlot}
+        actionSlot={<>{!hasMultipleEndpoints && renderProtection(endpoint)}{actionSlot}</>}
         portInline={portInline}
         hideTypeToggle={hideTypeToggle}
         redirect={
@@ -224,7 +253,7 @@ const PublicEndpointsCard: React.FC<PublicEndpointsCardProps> = ({
                 targets: redirectTargets,
                 onChange: ({ to, status }) =>
                   handleEndpointChange(endpoint.id, {
-                    redirectTo: to || undefined,
+                    redirectTo: to,
                     redirectStatus: to ? status : undefined,
                   }),
               }
@@ -233,12 +262,16 @@ const PublicEndpointsCard: React.FC<PublicEndpointsCardProps> = ({
         onDomainChange={(value) => handleEndpointChange(endpoint.id, { domain: value })}
         onCustomDomainChange={(value) => handleEndpointChange(endpoint.id, { customDomain: value })}
         onDomainTypeChange={(value) => handleEndpointChange(endpoint.id, { domainType: value })}
-        onExposedPortChange={hasServer && allowPortEdit
-          ? (value) => handleEndpointChange(endpoint.id, { port: value })
-          : undefined}
-        onTargetPathChange={!hasServer && allowPortEdit
-          ? (value) => handleEndpointChange(endpoint.id, { targetPath: value })
-          : undefined}
+        onExposedPortChange={
+          hasServer && allowPortEdit && !endpoint.redirectTo
+            ? (value) => handleEndpointChange(endpoint.id, { port: value })
+            : undefined
+        }
+        onTargetPathChange={
+          !hasServer && allowPortEdit && !endpoint.redirectTo
+            ? (value) => handleEndpointChange(endpoint.id, { targetPath: value })
+            : undefined
+        }
         saveMode={saveMode}
       />
     );
@@ -287,6 +320,14 @@ const PublicEndpointsCard: React.FC<PublicEndpointsCardProps> = ({
     </button>
   );
 
+  const wwwControls = allowWww && (
+    <WwwDomainControls
+      endpoints={endpoints}
+      allowRedirects={allowRedirects}
+      onChange={(next) => commitEndpoints(next, next.find((endpoint) => !endpoint.redirectTo)?.port || runtimePort)}
+    />
+  );
+
   // Headerless: no card chrome, no "Domain" header — the parent labels the
   // section. A single route leads with Free/Custom + the add "+" on its right;
   // multiple routes keep the collapsed rows and add via the bottom button.
@@ -297,30 +338,34 @@ const PublicEndpointsCard: React.FC<PublicEndpointsCardProps> = ({
           <>
             {endpoints.map((endpoint, index) => {
               const isOpen = expandedIds.has(endpoint.id);
-              const summary =
-                (endpoint.domainType === "custom" ? endpoint.customDomain : endpoint.domain) ||
-                describeEndpointTarget(endpoint);
+              const summary = endpointSummary(endpoint);
               return (
-                <div key={endpoint.id} className="rounded-xl border border-border/50 bg-background/40 overflow-hidden">
+                <div key={endpoint.id} className="rounded-xl bg-background overflow-hidden">
                   <div className="flex items-center justify-between gap-3 px-4 py-3">
                     <button
                       type="button"
                       onClick={() => toggleExpanded(endpoint.id)}
                       aria-expanded={isOpen}
-                      className="flex min-w-0 flex-1 items-center gap-2.5 text-left"
+                      className="flex min-w-0 flex-1 items-center gap-2.5 rounded-md text-start focus-visible:outline-2 focus-visible:outline-ring"
                     >
-                      <UiIcon name="chevron-down"
+                      <UiIcon
+                        name="chevron-down"
                         className={`size-4 shrink-0 text-muted-foreground transition-transform ${isOpen ? "" : "-rotate-90"}`}
                       />
                       <span className="min-w-0">
                         <span className="block text-sm font-semibold text-foreground leading-tight">
-                          {index === 0 ? w.primaryDomain : interpolate(w.domainN, { n: String(index + 1) })}
+                          {endpoint.redirectTo
+                            ? w.redirectDomain
+                            : endpoint.id === primaryId
+                              ? w.primaryDomain
+                              : interpolate(w.domainN, { n: String(index + 1) })}
                         </span>
                         <span className="block truncate text-sm text-muted-foreground">
                           {isOpen ? describeEndpointTarget(endpoint) : summary}
                         </span>
                       </span>
                     </button>
+                    {renderProtection(endpoint)}
                     <button
                       type="button"
                       onClick={() => handleRemoveEndpoint(endpoint.id)}
@@ -331,7 +376,11 @@ const PublicEndpointsCard: React.FC<PublicEndpointsCardProps> = ({
                       {w.remove}
                     </button>
                   </div>
-                  {isOpen && <div className="p-4 border-t border-border/40">{renderRoutingCard(endpoint)}</div>}
+                  {isOpen && (
+                    <div className="p-4 border-t border-border/40">
+                      {renderRoutingCard(endpoint)}
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -353,6 +402,7 @@ const PublicEndpointsCard: React.FC<PublicEndpointsCardProps> = ({
             </>,
           )
         )}
+        {wwwControls}
       </div>
     );
   }
@@ -383,69 +433,65 @@ const PublicEndpointsCard: React.FC<PublicEndpointsCardProps> = ({
       </div>
 
       <div className="p-4 space-y-4">
-        {hasMultipleEndpoints ? endpoints.map((endpoint, index) => {
-          const isOpen = expandedIds.has(endpoint.id);
-          const summary =
-            (endpoint.domainType === "custom" ? endpoint.customDomain : endpoint.domain) ||
-            describeEndpointTarget(endpoint);
-          return (
-            <div key={endpoint.id} className="rounded-xl border border-border/50 bg-background/50 overflow-hidden">
-              <div className="flex items-center justify-between gap-3 px-4 py-3">
-                <button
-                  type="button"
-                  onClick={() => toggleExpanded(endpoint.id)}
-                  aria-expanded={isOpen}
-                  className="flex min-w-0 flex-1 items-center gap-2.5 text-left"
+        {hasMultipleEndpoints
+          ? endpoints.map((endpoint, index) => {
+              const isOpen = expandedIds.has(endpoint.id);
+              const summary = endpointSummary(endpoint);
+              return (
+                <div
+                  key={endpoint.id}
+                  className="rounded-xl border border-border/50 bg-background/50 overflow-hidden"
                 >
-                  <UiIcon name="chevron-down"
-                    className={`size-4 shrink-0 text-muted-foreground transition-transform ${isOpen ? "" : "-rotate-90"}`}
-                  />
-                  <span className="min-w-0">
-                    <span className="block text-sm font-semibold text-foreground leading-tight">
-                      {index === 0 ? w.primaryDomain : interpolate(w.domainN, { n: String(index + 1) })}
-                    </span>
-                    <span className="block truncate text-sm text-muted-foreground">
-                      {isOpen ? describeEndpointTarget(endpoint) : summary}
-                    </span>
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleRemoveEndpoint(endpoint.id)}
-                  disabled={endpoints.length <= 1}
-                  className="inline-flex shrink-0 items-center gap-2 px-2.5 py-2 rounded-lg text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-40 disabled:hover:bg-transparent"
-                >
-                  <UiIcon name="trash" className="size-3.5" />
-                  {w.remove}
-                </button>
-              </div>
+                  <div className="flex items-center justify-between gap-3 px-4 py-3">
+                    <button
+                      type="button"
+                      onClick={() => toggleExpanded(endpoint.id)}
+                      aria-expanded={isOpen}
+                      className="flex min-w-0 flex-1 items-center gap-2.5 rounded-md text-start focus-visible:outline-2 focus-visible:outline-ring"
+                    >
+                      <UiIcon
+                        name="chevron-down"
+                        className={`size-4 shrink-0 text-muted-foreground transition-transform ${isOpen ? "" : "-rotate-90"}`}
+                      />
+                      <span className="min-w-0">
+                        <span className="block text-sm font-semibold text-foreground leading-tight">
+                          {endpoint.redirectTo
+                            ? w.redirectDomain
+                            : endpoint.id === primaryId
+                              ? w.primaryDomain
+                              : interpolate(w.domainN, { n: String(index + 1) })}
+                        </span>
+                        <span className="block truncate text-sm text-muted-foreground">
+                          {isOpen ? describeEndpointTarget(endpoint) : summary}
+                        </span>
+                      </span>
+                    </button>
+                    {renderProtection(endpoint)}
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveEndpoint(endpoint.id)}
+                      disabled={endpoints.length <= 1}
+                      className="inline-flex shrink-0 items-center gap-2 px-2.5 py-2 rounded-lg text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-40 disabled:hover:bg-transparent"
+                    >
+                      <UiIcon name="trash" className="size-3.5" />
+                      {w.remove}
+                    </button>
+                  </div>
 
-              {isOpen && (
-                <div className="p-4 border-t border-border/40">
-                  {renderRoutingCard(endpoint)}
+                  {isOpen && (
+                    <div className="p-4 border-t border-border/40">
+                      {renderRoutingCard(endpoint)}
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
-          );
-        }) : renderRoutingCard(
-          endpoints[0],
-          allowRemoveAll ? removeButton(endpoints[0].id) : undefined,
-        )}
+              );
+            })
+          : renderRoutingCard(
+              endpoints[0],
+              allowRemoveAll ? removeButton(endpoints[0].id) : undefined,
+            )}
 
-        {/* Single compact row, kept UNDER the domain input so toggling it (or its
-            appearance once a domain is typed) never shifts the input above. */}
-        {wwwToggle?.show && (
-          <div className="flex items-center justify-between gap-4 rounded-xl bg-muted/30 px-4 py-3">
-            <span className="text-[13px] font-medium text-foreground">
-              {t.projectSettings.domains.add.includeWww}
-            </span>
-            <Switch
-              checked={wwwToggle.included}
-              onChange={(next) => wwwToggle.onToggle(next)}
-              ariaLabel={t.projectSettings.domains.add.includeWww}
-            />
-          </div>
-        )}
+        {wwwControls}
       </div>
     </div>
   );

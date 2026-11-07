@@ -22,11 +22,24 @@ The last route, `GET|POST /api/auth/*`, forwards the raw request to Better Auth'
 sign-in flow needs lives here — there is no separate schema in this module because Better Auth owns the request
 and response shapes. The endpoints it serves (all under `/api/auth`) include:
 
-- **Credentials** — `POST /sign-in/email`, `POST /sign-up/email`, `POST /sign-out`, `POST /forget-password`,
-  `POST /reset-password`, `POST /verify-email`. Passwords are 8–128 chars; reset and verification emails only
-  send when SMTP is configured.
-- **OAuth** — `POST /sign-in/social` and `GET /callback/:provider` for GitHub and Google (each enabled only
-  when its client ID/secret is set).
+- **Credentials** — `POST /sign-in/email`, `POST /sign-up/email`, and `POST /sign-out`. Passwords are
+  8–128 characters. Email verification and password reset use codes through
+  `POST /email-otp/send-verification-otp`, `POST /email-otp/verify-email`, and
+  `POST /email-otp/reset-password`; delivery requires working instance mail or Cloud mail.
+- **OAuth and OIDC:** `POST /sign-in/social` and `GET /callback/:provider` for GitHub and Google (each enabled only
+  when its client ID/secret is set), plus `POST /sign-in/oauth2` (`providerId: "oidc"`) and
+  `GET /oauth2/callback/oidc` for a generic OpenID Connect provider when `OIDC_ISSUER`, `OIDC_CLIENT_ID`, and
+  `OIDC_CLIENT_SECRET` are configured.
+- **Passkeys** — `GET /passkey/generate-register-options`, `POST /passkey/verify-registration`,
+  `GET /passkey/generate-authenticate-options`, `POST /passkey/verify-authentication`,
+  `GET /passkey/list-user-passkeys`, and `POST /passkey/delete-passkey`. Use the Better Auth browser
+  client to perform the WebAuthn ceremony; raw credentials are never a substitute for it.
+- **Two-factor authentication** — `POST /two-factor/enable` returns an authenticator URI and recovery
+  codes after checking the current password. `POST /two-factor/verify-totp` confirms enrollment or a
+  pending login. `POST /two-factor/verify-backup-code` consumes a recovery code. Disabling protection
+  (`POST /two-factor/disable`) and replacing codes (`POST /two-factor/generate-backup-codes`) require
+  the current password. OAuth-only accounts can add their first password through
+  `POST /account-security/set-password` with a recent authenticated session.
 - **Organizations** — `/organization/*`: create, `set-active`, `list`, `invite-member`, `accept-invitation`,
   `update-member-role`, `remove-member`, `leave`, and more. Member-listing reads are additionally shielded so
   restricted/member roles can't read admin-tier data.
@@ -39,6 +52,13 @@ Better Auth's organization plugin only carries the role label (`owner`, `admin`,
 The actual authorization for the rest of the API is resolved against resource grants — see
 [Permissions](/docs/security/permissions).
 </Callout>
+
+For an account with 2FA enabled, a primary sign-in returns `{ "twoFactorRedirect": true }` instead of
+a usable session. Preserve the signed challenge cookie and submit an authenticator or recovery code;
+only successful verification issues the session. Social callbacks redirect to the dashboard's
+`/two-factor` page and resume their validated destination after verification. Account security endpoints
+are available only where local accounts are hosted, including Openship Cloud's account service and
+self-hosted VPS installations. See [Auth & sessions](/docs/security/auth#two-factor-authentication).
 
 ## Get the current session
 
@@ -118,6 +138,7 @@ the default API limit fires.
 | Operation | REST API |
 | --- | --- |
 | Handle browser sessions and authentication through Better Auth. | `GET /api/auth/*`<br />`Handler authentication` |
+| Complete a browser-bound Cloud repository authorization; ordinary GitHub sign-in callbacks remain handled by Better Auth. | `GET /api/auth/callback/github`<br />`Handler authentication` |
 | Handle sign-in, account, and session mutations through Better Auth. | `POST /api/auth/*`<br />`Handler authentication` |
 | Exchange a cloud auth `code` for a local session cookie. | `GET /api/auth/cloud-callback`<br />`Handler authentication` |
 | Electron polls this by `nonce` until the cloud sign-in resolves. | `GET /api/auth/desktop-auth-poll`<br />`Handler authentication` |

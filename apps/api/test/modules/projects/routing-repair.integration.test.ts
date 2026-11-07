@@ -9,6 +9,7 @@ import { createRepositories, schema, type Repositories } from "@repo/db/factory"
 import { createEncryption } from "@repo/db/encryption";
 import {
   DockerRuntime,
+  BuildLogger,
   NginxProvider,
   OPENRESTY_DEFAULT_PATHS,
   type RootChecked,
@@ -37,19 +38,16 @@ vi.mock("@repo/db", async (original) => ({
   tryAcquireAdvisoryLock: async () => ({ release: async () => {} }),
 }));
 vi.mock("@repo/platform/engine/lib/platform-config", () => ({
-  platform: () => ({ target: h.target, runtime: { name: "docker", verifyDomain: h.cloudVerify } }),
+  platform: () => ({ target: h.target, runtime: { name: "docker" }, routing: { verifyDomain: h.cloudVerify }, ssl: h.resolved.platform?.ssl }),
 }));
 vi.mock("@repo/platform/engine/lib/dns-resolver", () => ({
   resolveRecords: h.resolveRecords,
 }));
 vi.mock("@repo/platform/engine/lib/authorization", () => ({
-  authorization: { authorize: async (ctx: ExecutionContext) => ctx },
+  authorization: { authorize: async (ctx: ExecutionContext) => ctx, checkPermissionOnResource: async () => true },
 }));
 vi.mock("@repo/platform/engine/lib/self-app-routing", () => ({
   canRouteSelfApp: async () => false,
-}));
-vi.mock("@repo/platform/engine/lib/domain-claims", () => ({
-  routableWithoutOwnership: async () => false,
 }));
 vi.mock("@repo/platform/engine/lib/audit-emitter", () => ({
   audit: { recordAsync: vi.fn() },
@@ -98,14 +96,25 @@ vi.mock("@repo/platform/engine/modules/analytics/analytics-config.service", () =
 }));
 
 import { retryProjectRoutingOperation } from "@repo/platform/engine/modules/projects/project-routing-retry.operations";
+import { createProjectInspectionOperations } from "@repo/platform/engine/modules/projects/project-inspection.operations";
 import { manageDomainSsl } from "@repo/platform/engine/lib/domain-ssl";
 import { runOrphanSweep } from "@repo/platform/engine/modules/projects/orphan-gc-schedule";
 import { recoverProjectRouteCleanup } from "@repo/platform/engine/lib/project-route-recovery";
 import { connectionHostPortTargetKey } from "@repo/platform/engine/lib/host-port-target";
+import { resolveProjectRouteState } from "@repo/platform/engine/modules/domains/project-route.service";
+import {
+  buildProjectRouteDomains,
+  createTrackedSslProvider,
+  ensureRouteDomainRecord,
+  toRoutedDomainInputs,
+  withEnsuredDomainRecord,
+} from "@repo/platform/engine/lib/routing-domains";
+import { runDeployPipeline } from "../../../../../packages/adapters/src/runtime/deploy-pipeline";
 import {
   getDomain,
   verifyDomain,
   verifyPendingDomains,
+  addDomain,
 } from "@repo/platform/engine/modules/domains/domain.service";
 
 const routes = [
@@ -247,7 +256,7 @@ beforeAll(async () => {
       executor,
       runtime: {
         name: "docker",
-        supports: () => true,
+        supports: (cap: string) => ["containerInfo", "containerIp"].includes(cap),
         getContainerInfo: async (id: string) => {
           const route = routes.find((r) => `container-${r.name}` === id);
           return route
@@ -731,5 +740,137 @@ it.each([
       .delete(schema.orphanedResource)
       .where(eq(schema.orphanedResource.projectId, "predecessor"));
     await db.delete(schema.project).where(eq(schema.project.id, "predecessor"));
+  }
+});
+
+it("repairs webmail and reads its mail-owned certificate without creating a second domain owner", async () => {
+  const db = drizzle(client, { schema });
+  const route = { name: "webmail", hostname: "mail.example.net", port: 4080, ip: "10.0.0.8" };
+  routes.push(route);
+  await db.insert(schema.projectGroup).values({ id: "mail-group", organizationId: "org", name: "Webmail", slug: "webmail" });
+  await db.insert(schema.project).values({
+    id: "webmail-project", organizationId: "org", groupId: "mail-group", name: "Webmail", slug: "webmail",
+    serverId: "remote-server", routeStrategy: "container-ip",
+  });
+  await db.insert(schema.deployment).values({
+    id: "webmail-deployment", projectId: "webmail-project", organizationId: "org", branch: "main", status: "ready", containerId: "compose",
+    meta: { serverId: "remote-server", deployTarget: "server", runtimeMode: "docker", edgeUnsynced: true, deployWarning: "Earlier routing failure" },
+  });
+  await db.update(schema.project).set({ activeDeploymentId: "webmail-deployment" }).where(eq(schema.project.id, "webmail-project"));
+  await db.insert(schema.service).values({
+    id: "mail-service", projectId: "webmail-project", name: "webmail", kind: "compose", enabled: true, exposed: true,
+    exposedPort: "4080", ports: ["4080"], domainType: "custom", customDomain: route.hostname,
+  });
+  await db.insert(schema.serviceDeployment).values({
+    id: "live-webmail", deploymentId: "webmail-deployment", serviceId: "mail-service", containerId: "container-webmail", ip: route.ip, status: "running",
+  });
+  await h.repos.mailServer.upsert({ serverId: "remote-server", domain: "example.net", webmailProjectId: "webmail-project" });
+  const cert = makeTestCert([route.hostname], { issuerCN: "R11", issuerO: "Let's Encrypt" });
+  h.files.set(`/etc/letsencrypt/live/${route.hostname}/fullchain.pem`, cert.certPem);
+  h.files.set(`/etc/letsencrypt/live/${route.hostname}/privkey.pem`, cert.keyPem);
+  const owner = await h.repos.domain.create({
+    hostname: route.hostname, ownerType: "mail", projectId: null, status: "active", verified: true,
+    sslStatus: "active", sslExpiresAt: new Date("2099-01-01T00:00:00.000Z"), verificationToken: "owner-only-token",
+  });
+  const before = await h.repos.domain.findById(owner.id);
+  expect(await retryProjectRoutingOperation(context, "webmail-project")).toEqual({ ok: true });
+  const info = await createProjectInspectionOperations(vi.fn()).getInfo!(context, "webmail-project");
+  expect(info.project.routingUnsynced).toBe(false);
+  expect(info.project.routingRetry?.status).toBe("completed");
+  expect(info.project.routingClaims).toEqual([{
+    hostname: route.hostname, ownerType: "mail", verified: true, status: "active", sslStatus: "active",
+    sslExpiresAt: "2099-01-01T00:00:00.000Z", manualSsl: false,
+  }]);
+  expect(info.project.domains).toEqual([]);
+  expect(JSON.stringify(info.project.routingClaims)).not.toContain(owner.id);
+  expect(JSON.stringify(info)).not.toContain("owner-only-token");
+  expect(await h.repos.domain.findById(owner.id)).toEqual(before);
+  const vhost = [...h.files.entries()].find(([path, data]) => path.endsWith(".conf") && data.includes(`server_name ${route.hostname};`))?.[1];
+  expect(vhost).toContain("proxy_pass http://10.0.0.8:4080;");
+  expect(vhost).toContain(`ssl_certificate /etc/letsencrypt/live/${route.hostname}/fullchain.pem;`);
+  expect(issues).not.toHaveBeenCalled();
+});
+
+it("routes a recreated app on its first deploy after mid-build certificate reuse (#1281)", async () => {
+  const db = drizzle(client, { schema });
+  const hostname = "recreated.example.com";
+  const slug = "recreated-app";
+  const cert = makeTestCert([hostname], { issuerCN: "R11", issuerO: "Let's Encrypt" });
+  const certPath = `/etc/letsencrypt/live/${hostname}/fullchain.pem`;
+  h.files.set(certPath, cert.certPem);
+  h.files.set(`/etc/letsencrypt/live/${hostname}/privkey.pem`, cert.keyPem);
+  await db.insert(schema.projectGroup).values({
+    id: "recreated-group", organizationId: "org", name: "Recreated app", slug,
+  });
+  await db.insert(schema.project).values({
+    id: "previous-app", organizationId: "org", groupId: "recreated-group", name: "App",
+    slug, port: 8080, serverId: "remote-server",
+  });
+  await h.repos.domain.create({
+    projectId: "previous-app", hostname, domainType: "custom", targetPort: 8080,
+    verified: true, status: "active", sslStatus: "active",
+  });
+  await nginx.registerRoute({ domain: hostname, targetUrl: "http://10.0.0.9:8080", tls: true });
+  await nginx.removeRoute(hostname);
+  await db.delete(schema.project).where(eq(schema.project.id, "previous-app"));
+  // Project deletion removes its route and domain row, while the cert remains.
+  expect(await h.repos.domain.findByHostname(hostname)).toBeUndefined();
+  expect(h.files.get(certPath)).toBe(cert.certPem);
+
+  await db.insert(schema.project).values({
+    id: "recreated-app", organizationId: "org", groupId: "recreated-group", name: "App",
+    slug, port: 8080, serverId: "remote-server",
+  });
+  const project = (await h.repos.project.findById("recreated-app"))!;
+  const { domain } = await addDomain(context, { projectId: project.id, hostname });
+  expect(domain.targetPort).toBeNull();
+  const beforeBuild = await resolveProjectRouteState(project);
+  expect(beforeBuild.publicEndpoints).toEqual([]);
+  const verification = await verifyDomain(context, domain.id);
+  expect(verification).toMatchObject({ verified: true, sslStatus: "active" });
+  expect(verification.message).toContain("no new certificate was requested");
+  expect(h.files.has(`${OPENRESTY_DEFAULT_PATHS.sitesDir}/recreated-example-com.conf`)).toBe(false);
+
+  const rows = await h.repos.domain.listByProject(project.id);
+  const domainByHostname = new Map(rows.map((row) => [row.hostname, row]));
+  const planned = buildProjectRouteDomains({
+    project, projectDomains: rows, publicEndpoints: beforeBuild.publicEndpoints,
+    runtimeName: "docker", usesManagedRouting: false, defaultTargetPort: 8080,
+  });
+  const routable = [];
+  for (const route of planned) {
+    const ensured = await ensureRouteDomainRecord({ projectId: project.id, route, domainByHostname });
+    routable.push(withEnsuredDomainRecord(route, ensured.domain));
+  }
+  // Allow the real provider's reuse path, but fail any attempt to execute ACME.
+  const exec = vi.spyOn(h.resolved.platform.executor!, "exec");
+  issues.mockImplementation((host, options) => NginxProvider.prototype.provisionCert.call(nginx, host, options));
+  try {
+    const result = await runDeployPipeline({
+      canOverlap: true,
+      activate: async () => ({ containerId: "new-app-container" }),
+      deactivate: async () => { throw new Error("A first deploy has no previous container"); },
+      resolveTargetUrl: async () => "http://10.0.0.10:8080",
+    }, {
+      config: { deploymentId: "first-deploy", projectId: project.id, port: 8080 } as never,
+      domains: toRoutedDomainInputs(routable), routing: nginx,
+      ssl: createTrackedSslProvider(nginx, domainByHostname),
+    }, new BuildLogger(() => {}));
+    expect(result).toMatchObject({ status: "ready", containerId: "new-app-container" });
+    expect(result.routeWarnings).toBeUndefined();
+    const vhost = h.files.get(`${OPENRESTY_DEFAULT_PATHS.sitesDir}/recreated-example-com.conf`);
+    expect(vhost, "A ready first deploy must install the recreated hostname's vhost").toBeDefined();
+    expect(vhost).toContain("proxy_pass http://10.0.0.10:8080;");
+    expect(vhost).toContain(`ssl_certificate ${certPath};`);
+    expect(vhost).toContain("listen 443 ssl");
+    expect(vhost).toContain("return 301 https://");
+    expect(await h.repos.domain.findById(domain.id)).toMatchObject({
+      targetPort: 8080, verified: true, sslStatus: "active",
+    });
+    expect(h.files.get(certPath)).toBe(cert.certPem);
+    expect(exec.mock.calls.some(([command]) => /certbot\s+certonly/.test(command))).toBe(false);
+  } finally {
+    exec.mockRestore();
+    issues.mockRejectedValue(new Error("Existing certificates must be reused"));
   }
 });

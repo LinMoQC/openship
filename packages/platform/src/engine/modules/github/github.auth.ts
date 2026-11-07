@@ -15,12 +15,14 @@
  * GitHub's token endpoint on every request.
  */
 
+import { reportCaughtError as observeCaughtError, diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import { assertCloudTenantScope } from "../../lib/cloud/scope";
 import { mayUseInstanceGitIdentity } from "./github-instance-access";
 import crypto from "crypto";
 import { repos, db, schema, eq, and } from "@repo/db";
 import { APIError } from "better-auth/api";
-import { AppError, safeErrorMessage } from "@repo/core";
+import { AppError, safeErrorMessage, validateGitHubInstallationScope, matchesGitHubInstallationScope } from "@repo/core";
+import { assertGitHubRepoAccess } from "./github-access";
 import { env, localGitHubAppConfiguration } from "../../config/env";
 import { auth } from "../../lib/auth";
 import { cacheStore } from "../../lib/cache-store/index";
@@ -242,16 +244,16 @@ export async function getInstallationId(
   // For an owner not covered by a custom source, preserve the pre-source auth
   // mode. In cloud-app mode api.openship.io remains authoritative; a legacy
   // local snapshot must never shadow it.
-  const mode = await resolveGitHubFallbackAuthMode(ctx).catch(() => "none" as const);
+  const mode = await resolveGitHubFallbackAuthMode(ctx).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github.auth"); return "none" as const; });
   if (mode === "cloud-app") {
-    assertCloudTenantScope(ctx);
+    await assertCloudTenantScope(ctx);
     // ctx.organizationId is the canonical answer — permission.assert
     // has already rebound it to the resource-scoped org when this is a
     // resource-bound route, so we never need to guess memberships[0].
     const { cloudClient } = await import("../../lib/cloud/client");
     const list = await cloudClient({ organizationId })
       .github.installations()
-      .catch(() => null);
+      .catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github.auth"); return null; });
     if (!list) return null;
     const match = list.find((entry) => entry.login.toLowerCase() === owner.toLowerCase());
     if (!match) return null;
@@ -304,14 +306,14 @@ export async function getInstallationIdByOrg(
   // billing webhooks) that don't carry a per-request context. The
   // org owner's cloud-session is the right scope: if the owner is
   // cloud-connected the team's installs live on SaaS.
-  const ownerMember = await resolveOrgOwner(organizationId).catch(() => null);
+  const ownerMember = await resolveOrgOwner(organizationId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github.auth"); return null; });
   const mode = await resolveAuthModeForOrgOwner(ownerMember?.userId);
 
   if (mode === "cloud-app") {
     const { cloudClient } = await import("../../lib/cloud/client");
     const list = await cloudClient({ organizationId })
       .github.installations()
-      .catch(() => null);
+      .catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github.auth"); return null; });
     if (!list) return null;
     const match = list.find((entry) => entry.login.toLowerCase() === owner.toLowerCase());
     if (!match) return null;
@@ -368,9 +370,19 @@ export async function getInstallationToken(
      * always pass it.
      */
     repositories?: string[];
+    /** Actions jobs receive only explicitly requested repository permissions. */
+    permissions?: Record<string, "read" | "write">;
+    /** One-use job credentials must not reuse a token issued to another attempt. */
+    noCache?: boolean;
   } = {},
 ): Promise<string | null> {
   const organizationId = ctx.organizationId;
+  const scope = opts.permissions ? validateGitHubInstallationScope(opts.repositories, opts.permissions) : null;
+  if (scope) {
+    const access = Object.values(scope.permissions).includes("write") ? "write" : "read";
+    for (const repo of scope.repositories) await assertGitHubRepoAccess(ctx, { owner, repo }, access);
+    opts = { ...opts, ...scope, noCache: true };
+  }
 
   // Resolve a workspace-owned source before consulting the legacy mode. Custom
   // Apps are per owner; their presence elsewhere in the workspace must not turn
@@ -400,15 +412,24 @@ export async function getInstallationToken(
   // from the narrow key would silently over-grant, and a narrow token served from
   // the broad key would break unrelated callers. Sorted + lowercased so the same
   // repo set always produces the same key.
-  const repoScope = opts.repositories?.length
+  const repoScope = (opts.repositories?.length
     ? `:repos:${[...opts.repositories]
         .map((r) => r.toLowerCase())
         .sort()
         .join(",")}`
-    : "";
+    : "") + (opts.permissions ? `:permissions:${JSON.stringify(Object.fromEntries(Object.entries(opts.permissions).sort(([a], [b]) => a.localeCompare(b))))}` : "");
 
   if (mode === "cloud-app") {
-    assertCloudTenantScope(ctx);
+    if (opts.permissions) {
+      // A broad legacy mint response must never stand in for a narrowed job token.
+      await assertCloudTenantScope(ctx);
+      const { cloudClient } = await import("../../lib/cloud/client");
+      const minted = await cloudClient({ organizationId }).github.installationToken(owner, opts.repositories, opts.permissions);
+      if (!minted) return null;
+      if (!matchesGitHubInstallationScope(scope!, minted.scope)) throw new AppError("Update the Cloud connection before running Actions: it did not confirm the requested repository token scope", 502, "ACTIONS_TOKEN_SCOPE_INVALID");
+      return minted.token;
+    }
+    await assertCloudTenantScope(ctx);
     // Proxy through cloud. ctx.organizationId is the only source of
     // truth — no more memberships[0] fallback that could leak tokens
     // across the cache between users whose synthesized ids collide
@@ -470,7 +491,7 @@ export async function getInstallationToken(
   const sourceKey = custom?.source.id ?? "legacy";
   const cacheKey = `instToken:local:org:${organizationId}:${sourceKey}:${owner}:${installationId}${repoScope}`;
   const store = await cacheStore<string>(GH_TOKEN_NS, { maxSize: 5_000 });
-  const cachedRaw = await store.get(cacheKey);
+  const cachedRaw = opts.noCache ? null : await store.get(cacheKey);
   if (cachedRaw) {
     const cached = decodeTokenEnvelope(cachedRaw);
     if (cached && isCachedTokenStillFresh(cached)) return cached.token;
@@ -479,18 +500,23 @@ export async function getInstallationToken(
   try {
     const request = {
       method: "POST",
-      ...(opts.repositories?.length ? { body: { repositories: opts.repositories } } : {}),
+      ...((opts.repositories?.length || opts.permissions) ? { body: {
+        ...(opts.repositories?.length ? { repositories: opts.repositories } : {}),
+        ...(opts.permissions ? { permissions: opts.permissions } : {}),
+      } } : {}),
     };
     const data = custom
-      ? await githubAppFetch<{ token: string; expires_at: string }>(
+      ? await githubAppFetch<{ token: string; expires_at: string; permissions?: Record<string, "read" | "write">; repositories?: Array<{ name: string }> }>(
           custom.credentials,
           `/app/installations/${installationId}/access_tokens`,
           request,
         )
-      : await appFetch<{ token: string; expires_at: string }>(
+      : await appFetch<{ token: string; expires_at: string; permissions?: Record<string, "read" | "write">; repositories?: Array<{ name: string }> }>(
           `https://api.github.com/app/installations/${installationId}/access_tokens`,
           request,
         );
+    if (scope && !matchesGitHubInstallationScope(scope, { repositories: data.repositories?.map(repo => repo.name), permissions: data.permissions }))
+      throw new AppError("GitHub did not confirm the requested repository token scope", 502, "ACTIONS_TOKEN_SCOPE_INVALID");
     const envelope: CachedInstallationToken = {
       token: data.token,
       // GitHub's `expires_at` is the SOURCE OF TRUTH for token lifetime.
@@ -499,7 +525,7 @@ export async function getInstallationToken(
       // GitHub Enterprise variants and test fixtures).
       expiresAt: data.expires_at ?? new Date(Date.now() + 55 * 60 * 1000).toISOString(),
     };
-    await store.set(cacheKey, encodeTokenEnvelope(envelope), GITHUB_TOKEN_CACHE_TTL_SECONDS);
+    if (!opts.noCache) await store.set(cacheKey, encodeTokenEnvelope(envelope), GITHUB_TOKEN_CACHE_TTL_SECONDS);
     return envelope.token;
   } catch (err) {
     // Cascade MEDIUM — when GitHub returns 404 on /app/installations/:id
@@ -510,7 +536,8 @@ export async function getInstallationToken(
     // forever.
     const message = (err as Error).message ?? "";
     if (/\(404\)/.test(message) || /Not Found/i.test(message)) {
-      await dropStaleInstallationRows(owner, installationId, installation.sourceId).catch(() => {
+      await dropStaleInstallationRows(owner, installationId, installation.sourceId).catch((diagnosticFailure) => {
+        observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github.auth");
         /* best-effort */
       });
     }
@@ -532,7 +559,7 @@ async function dropStaleInstallationRows(
 ): Promise<void> {
   const rows = await repos.gitInstallation
     .findByInstallationIdForProvider(installationId, sourceId)
-    .catch(() => []);
+    .catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github.auth"); return []; });
   const matching = rows.filter((row) => row.owner.toLowerCase() === owner.toLowerCase());
   if (matching.length === 0) return;
   // A GitHub installation id is global for this App. A 404 means every local
@@ -546,7 +573,7 @@ async function dropStaleInstallationRows(
       invalidateOrgGitHubCache(id),
     ),
   );
-  console.warn(
+  errorDiagnostics.warn("platform/engine/modules/github/github.auth",
     `[GitHub] dropped stale gitInstallation row for ${owner} (installationId=${installationId}) — GitHub returned 404`,
   );
 }
@@ -554,14 +581,21 @@ async function dropStaleInstallationRows(
 // ─── User OAuth token ────────────────────────────────────────────────────────
 
 /**
- * Get the user's personal GitHub OAuth token stored by Better Auth.
+ * Get the repository grant on Cloud, or the existing Better Auth OAuth token.
  * Used for user-scoped operations (listing their orgs, etc.).
  */
 export async function getUserToken(userId: string): Promise<string | null> {
+  if (env.CLOUD_MODE) {
+    const { getRepositoryAuthorizationToken } = await import("./github-repository-authorization");
+    const token = await getRepositoryAuthorizationToken(userId);
+    if (token !== undefined) return token;
+  }
   try {
+    const account = await repos.account.findByProvider(userId, "github");
+    if (!account) return null;
     const tokens = await auth.api.getAccessToken({
       body: {
-        providerId: "github",
+        accountId: account.id,
         userId,
       },
     });
@@ -579,6 +613,7 @@ export async function getUserToken(userId: string): Promise<string | null> {
 // ─── GitHub API fetch helper ─────────────────────────────────────────────────
 
 export interface GitHubFetchOptions {
+  signal?: AbortSignal;
   /** Caller's request context. Carries userId + organizationId for the
    *  underlying `tokenFor` dispatcher (PAT → installation → OAuth chain).
    *  See `github.token.ts` for the resolution order. */
@@ -594,8 +629,8 @@ export interface GitHubFetchOptions {
    *  GHSA-hp2g-hw7g-f3vm, so pass it whenever the URL names a repo. */
   repo?: string;
   /**
-   * Narrow the mint gate's tier to "read". Defaults to the HTTP method: GET →
-   * "read", anything else → "write".
+   * Override the mint gate's required tier. Defaults to the HTTP method:
+   * GET → "read", anything else → "write".
    *
    * The method is only a PROXY for the tier — the tier is a property of what the
    * operation MEANS, and two mutating calls can sit on different sides of it.
@@ -603,12 +638,12 @@ export interface GitHubFetchOptions {
    * "deploy this repo", which a read grant authorizes; deleting the repo or
    * managing its webhooks is repo ADMINISTRATION, which it must not.
    *
-   * Deliberately typed `"read"` and not `GitHubAccessOp`: the only sound use is
-   * narrowing, so the type — not a comment someone has to obey — is what stops this
-   * from becoming a way to declare a management call harmless. Widening is what
-   * GHSA-hp2g-hw7g-f3vm did by accident.
+   * "write" on a GET requires management authority for a setup probe. It also
+   * disables anonymous/alternate-credential fallback so a public read cannot
+   * appear to confirm the credentials that will administer this repository.
+   * This raises the requirement; it never grants additional caller authority.
    */
-  authorizeAs?: "read";
+  authorizeAs?: "read" | "write";
   /**
    * Pin resolution to specific credential kinds, for an endpoint only ONE
    * credential can satisfy. Orthogonal to `authorizeAs`: that is AUTHORITY
@@ -621,9 +656,12 @@ export interface GitHubFetchOptions {
    * PAT can administer hooks, and pinning would break self-hosts with no App.
    */
   credential?: GitHubTokenSource[];
+  /** Selected server identity, eligible only for read-only github.com requests. */
+  serverId?: string;
   installationId?: number;
   params?: Record<string, unknown>;
   headers?: Record<string, string>;
+  response?: "json" | "redirect";
 }
 
 /**
@@ -644,13 +682,23 @@ export interface GitHubFetchOptions {
 export async function githubFetch<T = unknown>(opts: GitHubFetchOptions): Promise<T> {
   const method = opts.method ?? "GET";
   const readOnly = method === "GET" && (opts.authorizeAs ?? "read") === "read";
-  const rejectedSources: GitHubTokenSource[] = [];
+  // Bind the borrowed identity to the repository actually authorized, including
+  // its API origin. Read-tier POSTs and account/other-repository URLs cannot use it.
+  const repositoryUrl = opts.owner && opts.repo
+    ? `https://api.github.com/repos/${encodeURIComponent(opts.owner)}/${encodeURIComponent(opts.repo)}`
+    : null;
+  // WHATWG URL normalization removes plain and percent-encoded dot segments.
+  // Compare what fetch will send, rather than a prefix that traversal can escape.
+  const requestUrl = new URL(opts.url).href;
+  const serverRead = readOnly && repositoryUrl !== null &&
+    (requestUrl === repositoryUrl || requestUrl.startsWith(`${repositoryUrl}/`));
+  const rejectedSources: GitHubTokenSource[] = serverRead ? [] : ["server-token"];
   let authError: unknown;
   const rejectedCredential = (error: unknown) =>
     error instanceof Error && "credentialRejected" in error && error.credentialRejected === true;
   const customApiBase = opts.owner
     ? await resolveGitHubApiBaseUrl(opts.ctx.organizationId, opts.owner, opts.installationId).catch(
-        () => null,
+        (diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github.auth"); return null; },
       )
     : null;
 
@@ -665,6 +713,7 @@ export async function githubFetch<T = unknown>(opts: GitHubFetchOptions): Promis
       try {
         return await ghFetch<T>(ghToken, {
           url: opts.url, method, params: opts.params, headers: opts.headers,
+          response: opts.response, signal: opts.signal,
         });
       } catch (error) {
         if (!rejectedCredential(error)) throw error;
@@ -679,6 +728,8 @@ export async function githubFetch<T = unknown>(opts: GitHubFetchOptions): Promis
     owner: opts.owner,
     repo: opts.repo,
     installationId: opts.installationId,
+    ...(serverRead && !customApiBase
+      ? { serverId: opts.serverId } : {}),
     // A GET is a read; anything else mutates unless the caller declared its tier
     // explicitly. Threading the op means a mutating GitHub call can only mint a
     // token when the caller holds a WRITE grant on THIS repo — closing
@@ -702,6 +753,7 @@ export async function githubFetch<T = unknown>(opts: GitHubFetchOptions): Promis
     try {
       return await ghFetch<T>(result.token, {
         url, method, params: opts.params, headers: opts.headers,
+        response: opts.response, signal: opts.signal,
       });
     } catch (error) {
       // Never replay mutations, rate limits, outages, or ordinary not-found
@@ -714,14 +766,19 @@ export async function githubFetch<T = unknown>(opts: GitHubFetchOptions): Promis
 
   // Public github.com reads also work when a saved credential was revoked.
   // Enterprise sources must never resolve a same-named public GitHub repo.
-  if (readOnly && opts.allowAnonymous !== false && !customApiBase && opts.url.startsWith("https://api.github.com/")) {
+  if (readOnly && opts.allowAnonymous !== false && (!opts.response || opts.response === "json") &&
+      !customApiBase && opts.url.startsWith("https://api.github.com/")) {
     const publicData = await ghFetchPublic<T>({
-      url: opts.url, params: opts.params, headers: opts.headers,
+      url: opts.url, params: opts.params, headers: opts.headers, signal: opts.signal,
     });
     if (publicData !== null) return publicData;
   }
   if (authError) throw authError;
-  throw new AppError("No GitHub access token available. Please connect your GitHub account.", 403, "GITHUB_CONNECTION_REQUIRED");
+  throw new AppError(
+    "No GitHub credential is available for this repository and operation. Review your GitHub connection and repository access.",
+    403,
+    "GITHUB_TOKEN_REQUIRED",
+  );
 }
 
 // ─── User status helpers ─────────────────────────────────────────────────────
@@ -743,9 +800,9 @@ export async function getUserStatus(userId: string, ctx?: RequestContext) {
 
   // ── Cloud-app: status comes from openship.io ────────────────────────────
   if (mode === "cloud-app") {
-    if (ctx) assertCloudTenantScope(ctx);
+    if (ctx) await assertCloudTenantScope(ctx);
     const { cloudClient } = await import("../../lib/cloud/client");
-    const status = await cloudClient({ userId }).github.userStatus();
+    const status = await cloudClient(ctx ? { organizationId: ctx.organizationId } : { userId }).github.userStatus();
     if (!status?.connected) {
       // Diagnostic: the SaaS-side handler reported the user as not
       // connected. The most likely cause is that the local's
@@ -843,7 +900,7 @@ export async function getUserStatusWithDiagnostics(
         .where(and(eq(schema.account.userId, userId), eq(schema.account.providerId, "github")));
       githubRowCount = rows.length;
     } catch (err) {
-      console.log(`[cloud-saas:githubUserStatus] account lookup failed: ${safeErrorMessage(err)}`);
+      observeCaughtError(err, "platform/engine/modules/github/github.auth");
     }
     return { connected: false, githubAccountRowsForUser: githubRowCount };
   }
@@ -896,12 +953,8 @@ export async function getGitHubConnectionState(
   let appAvatar: string | undefined;
   let hasInstallations: boolean | undefined;
   try {
-    // App is connected ONLY when SaaS reports a real GitHub OAuth
-    // identity for this user. The Connect flow runs OAuth on SaaS first
-    // (creating a Better Auth `account` row for providerId='github'),
-    // so this signal is load-bearing. Without it the install webhook
-    // can't attribute installs to a SaaS user and the dashboard would
-    // be lying if it showed "connected".
+    // Cloud repository access uses the initiating user's GitHub grant.
+    // Installation ownership is recorded separately for the active workspace.
     const status = await getUserStatus(userId, ctx);
     appConnected = status.connected && status.tokenSource !== "cli";
     if (appConnected && status.connected) {
@@ -912,11 +965,13 @@ export async function getGitHubConnectionState(
       try {
         const installs = await getUserInstallations(ctx, status);
         hasInstallations = installs.length > 0;
-      } catch {
+      } catch (diagnosticFailure) {
+        observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github.auth");
         hasInstallations = undefined;
       }
     }
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github.auth");
     // Cloud unreachable / OAuth fetch failed / network blip. App side
     // is "not connected"; gh CLI fallback below still runs.
     appConnected = false;
@@ -998,7 +1053,7 @@ export async function getUserInstallations(
   const userId = ctx.userId;
   const organizationId = ctx.organizationId;
   const customConfigured =
-    !env.CLOUD_MODE && (await hasActiveGitHubSource(organizationId).catch(() => false));
+    !env.CLOUD_MODE && (await hasActiveGitHubSource(organizationId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github.auth"); return false; }));
   const customInstallations = customConfigured
     ? await getStoredInstallationsForOrganization(organizationId, true)
     : [];
@@ -1010,7 +1065,7 @@ export async function getUserInstallations(
     : await resolveGitHubAuthMode(ctx);
 
   if (mode === "cloud-app") {
-    assertCloudTenantScope(ctx);
+    await assertCloudTenantScope(ctx);
     // SaaS is the canonical source of truth — the GitHub App's webhook
     // fires to api.openship.io, not to us, so api.openship.io is the
     // only place that reliably knows about installations. We do NOT
@@ -1079,7 +1134,7 @@ export async function getUserInstallations(
       );
       await invalidateUserGitHubCache(userId);
     } catch (err) {
-      console.warn("[GitHub] Failed to sync installations:", (err as Error).message);
+      errorDiagnostics.warn("platform/engine/modules/github/github.auth", "[GitHub] Failed to sync installations:", (err as Error).message, err);
     }
 
     return mergeInstallations(customInstallations, installations);
@@ -1089,9 +1144,9 @@ export async function getUserInstallations(
     // behind a silent fallback to stale DB cache. The fallback itself is
     // intentional — a stale list is better than an empty UI — but the
     // warn makes the failure mode visible the next time it fires.
-    console.warn(
+    errorDiagnostics.warn("platform/engine/modules/github/github.auth",
       "[GitHub] /user/installations failed, falling back to stored installations:",
-      (err as Error).message,
+      (err as Error).message, err,
     );
     return getStoredInstallationsForOrganization(organizationId);
   }
@@ -1103,7 +1158,7 @@ async function getStoredInstallationsForOrganization(
 ): Promise<GitHubInstallation[]> {
   const [installations, sources] = await Promise.all([
     repos.gitInstallation.listByOrganization(organizationId),
-    repos.gitSource.listActiveByOrganization(organizationId).catch(() => []),
+    repos.gitSource.listActiveByOrganization(organizationId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github.auth"); return []; }),
   ]);
   const sourceById = new Map(sources.map((source) => [source.id, source]));
   return installations
@@ -1220,7 +1275,7 @@ export async function resolveGitHubAuthMode(ctx: RequestContext): Promise<GitHub
   // configuration. It takes precedence over the legacy process-wide mode: an
   // operator must not be able to save a valid App and then have every runtime
   // path silently keep using `gh` because GITHUB_AUTH_MODE was left at `cli`.
-  if (await hasActiveGitHubSource(ctx.organizationId).catch(() => false)) return "app";
+  if (await hasActiveGitHubSource(ctx.organizationId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github.auth"); return false; })) return "app";
 
   return resolveGitHubFallbackAuthMode(ctx);
 }
@@ -1246,7 +1301,8 @@ async function resolveGitHubFallbackAuthMode(ctx: RequestContext): Promise<GitHu
       ? await isCloudConnectedForOrg(ctx.organizationId)
       : await isCloudConnected(ctx.userId);
     if (connected) return "cloud-app";
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github.auth");
     // cloud-client import / DB read failed → fall through to cli.
   }
   return "cli";
@@ -1273,7 +1329,8 @@ async function resolveAuthModeForUserId(userId: string): Promise<GitHubAuthMode>
   try {
     const { isCloudConnected } = await import("../../lib/cloud/session");
     if (await isCloudConnected(userId)) return "cloud-app";
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github.auth");
     // If the cloud-client import / DB read fails, fall through to cli.
   }
   return "cli";
@@ -1290,7 +1347,7 @@ async function resolveAuthModeForOrgOwner(
   ownerUserId: string | undefined,
 ): Promise<GitHubAuthMode | "none"> {
   if (!ownerUserId) return "none";
-  return resolveAuthModeForUserId(ownerUserId).catch(() => "none" as const);
+  return resolveAuthModeForUserId(ownerUserId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github.auth"); return "none" as const; });
 }
 
 /**
@@ -1325,8 +1382,8 @@ export async function resolveInstallUrl(
     return createSourceInstallUrl(ctx, sourceId);
   }
   const preferredSource =
-    (await repos.gitSource.findDefault(organizationId).catch(() => undefined)) ??
-    (await repos.gitSource.listActiveByOrganization(organizationId).catch(() => []))[0];
+    (await repos.gitSource.findDefault(organizationId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github.auth"); return undefined; })) ??
+    (await repos.gitSource.listActiveByOrganization(organizationId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github.auth"); return []; }))[0];
   if (preferredSource) {
     return ctx.role === "owner"
       ? createSourceInstallUrl(ctx, preferredSource.id)
@@ -1335,7 +1392,7 @@ export async function resolveInstallUrl(
 
   const mode = await resolveGitHubAuthMode(ctx);
   if (mode === "cloud-app") {
-    assertCloudTenantScope(ctx);
+    await assertCloudTenantScope(ctx);
     // Bind the install to the active org so the resulting installation
     // belongs to the team, not the clicking member. ctx.organizationId
     // is the canonical answer.
@@ -1355,14 +1412,14 @@ export async function resolveInstallUrl(
     // open the install screen but silently orphan the install (HIGH #6).
     // Signal unreachable so the caller tells the user the truth instead
     // of handing them a dead link.
-    console.warn(
+    errorDiagnostics.warn("platform/engine/modules/github/github.auth",
       "[GitHub] install URL unavailable — Openship Cloud unreachable (cloud-app mode); refusing stateless local fallback",
     );
     return { url: "", state: "", cloudUnreachable: true };
   }
   if (mode === "app" && !env.CLOUD_MODE) {
     const state = crypto.randomBytes(24).toString("base64url");
-    await repos.githubInstallState.purgeExpired().catch(() => 0);
+    await repos.githubInstallState.purgeExpired().catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github.auth"); return 0; });
     await repos.githubInstallState.create({
       state,
       userId,
@@ -1403,7 +1460,7 @@ export async function consumeInstallState(
   expectedOrganizationId?: string,
 ): Promise<{ userId: string; organizationId: string | null } | null> {
   if (!state) return null;
-  const binding = await repos.githubInstallState.find(state).catch(() => null);
+  const binding = await repos.githubInstallState.find(state).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github.auth"); return null; });
   if (!binding) return null;
   if (
     binding.userId !== expectedUserId ||
@@ -1415,7 +1472,7 @@ export async function consumeInstallState(
     return null;
   }
   // Atomic delete-and-return so a second concurrent attempt can't ride.
-  const consumed = await repos.githubInstallState.consume(state).catch(() => null);
+  const consumed = await repos.githubInstallState.consume(state).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github.auth"); return null; });
   if (!consumed) return null;
   return {
     userId: consumed.userId,
@@ -1423,37 +1480,12 @@ export async function consumeInstallState(
   };
 }
 
-/**
- * Resolve the GitHub OAuth start URL for this user.
- *
- * Cloud-app mode (self-hosted + Openship Cloud connected): proxies to the
- * SaaS's /oauth-handoff endpoint, which mints a single-use bridge URL.
- * The browser opens that URL and the SaaS handles the entire OAuth
- * round-trip — local never has GitHub OAuth credentials. After OAuth
- * completes, the SaaS has a Better Auth `account` row for this user.
- *
- * App mode (this IS the SaaS): linkSocialAccount is called directly via
- * the controller's connectRedirect handler — the OAuth flow runs in the
- * same process. resolveOauthHandoffUrl is not used.
- *
- * cli mode (self-hosted + NO cloud): there's no GitHub OAuth flow
- * available — the user can only use gh CLI. Returns null.
- */
-export async function resolveOauthHandoffUrl(userId: string): Promise<{ url: string } | null> {
-  // userId-only path — the OAuth handoff is initiated before any org
-  // is in scope (it IS the connect flow). Use the internal resolver.
-  const mode = await resolveAuthModeForUserId(userId);
-  if (mode !== "cloud-app") return null;
-
-  const { cloudClient } = await import("../../lib/cloud/client");
-  return cloudClient({ userId }).github.oauthHandoff();
-}
 
 /**
  * Disconnect a user from a GitHub source.
  *
  * `source`:
- *   - "oauth" → remove the OAuth account row (Openship App / standalone OAuth)
+ *   - "oauth" → clear the Cloud repository grant; self-hosted unlinks OAuth
  *   - "cli"   → set the cli-suppression flag so the host's `gh auth token`
  *               is ignored even when present. NEVER touches the host's gh
  *               config - we only refuse to use it.
@@ -1466,9 +1498,12 @@ export async function disconnectUser(
   source: "oauth" | "cli" | "all" = "all",
 ): Promise<void> {
   if (source === "oauth" || source === "all") {
-    await repos.account.unlinkProvider(userId, "github");
+    if (env.CLOUD_MODE) {
+      const { disconnectRepositoryAuthorization } = await import("./github-repository-authorization");
+      await disconnectRepositoryAuthorization(userId);
+    } else await repos.account.unlinkProvider(userId, "github");
   }
-  if (source === "cli" || source === "all") {
+  if (!env.CLOUD_MODE && (source === "cli" || source === "all")) {
     // Also drop the stored device-flow token. Without this, "Disconnect" only
     // flipped the per-user opt-in while the credential itself stayed on the
     // instance — so the UI said disconnected and clones kept working. Dynamic
@@ -1489,13 +1524,13 @@ export async function disconnectUser(
   // and continue to use the SaaS bridge after the user disconnected.
   // Sweep each membership so the disconnect actually closes the gate.
   try {
-    const memberships = await repos.member.listByUser(userId).catch(() => []);
+    const memberships = await repos.member.listByUser(userId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/github/github.auth"); return []; });
     for (const m of memberships) {
       if (m.organizationId) {
         await invalidateOrgGitHubCache(m.organizationId);
       }
     }
   } catch (err) {
-    console.warn(`[GitHub] disconnect cache sweep failed for ${userId}: ${(err as Error).message}`);
+    errorDiagnostics.warn("platform/engine/modules/github/github.auth", `[GitHub] disconnect cache sweep failed for ${userId}: ${(err as Error).message}`, err);
   }
 }

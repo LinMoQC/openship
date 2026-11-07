@@ -39,6 +39,7 @@ export const ProjectSidebar = () => {
     tabs,
     access,
     domainsData,
+    availableUpdate,
     selectedDomain,
     setSelectedDomain,
     setPendingDomainAction,
@@ -51,9 +52,10 @@ export const ProjectSidebar = () => {
   // context so switching here also refetches the overview analytics).
   const domains = useMemo(
     () =>
-      (domainsData?.domains ?? [])
+      [...(domainsData?.domains ?? [])]
+        .sort((a: any, b: any) => Number(!!b.primary) - Number(!!a.primary))
         .map((d: any) => d?.domain)
-        .filter((d: unknown): d is string => typeof d === "string" && d.length > 0),
+        .filter((d: unknown): d is string => typeof d === "string" && d.length > 0 && !d.startsWith("*.")),
     [domainsData?.domains],
   );
 
@@ -61,8 +63,11 @@ export const ProjectSidebar = () => {
   // whether there's a public host, whether it's localhost, and the href — so the
   // sidebar no longer re-derives localhost or keys off an instance-wide flag.
   const isLocal = access.isLocal;
-  const hasDomain = !isLocal && !!access.host;
-  const activeDomain = hasDomain ? selectedDomain || access.host || "" : "";
+  const configuredDomain = domains[0] ?? "";
+  const hasDomain = !isLocal && !!(access.host || configuredDomain);
+  const activeDomain = hasDomain ? selectedDomain || access.host || configuredDomain : "";
+  const activeDomainRow = domainsData?.domains?.find((row: any) => row.domain === activeDomain);
+  const domainPending = hasDomain && activeDomain !== access.host && !activeDomainRow?.verified && activeDomainRow?.status !== "active";
   const canOpen = hasDomain ? !!activeDomain : !!access.url;
   const displayUrl = hasDomain ? activeDomain : (access.host ?? "");
   const siteHref = hasDomain ? `https://${activeDomain}` : (access.url ?? "#");
@@ -147,6 +152,9 @@ export const ProjectSidebar = () => {
                 ) : (
                   <span className="truncate text-sm font-medium text-foreground">{displayUrl}</span>
                 )}
+                {domainPending && (
+                  <span className="text-xs text-warning">{t.projectSettings.domains.status.pending}</span>
+                )}
                 <a
                   href={siteHref}
                   target="_blank"
@@ -228,6 +236,14 @@ export const ProjectSidebar = () => {
               >
                 <UiIcon name={Icon} className="size-5 shrink-0" />
                 {tab.label}
+                {tab.id === "deployments" && availableUpdate && (
+                  <span
+                    role="img"
+                    className="ms-auto size-1.5 shrink-0 rounded-full bg-warning-solid"
+                    aria-label={t.projectSettings.appSource.updateAvailable}
+                    title={t.projectSettings.appSource.updateAvailable}
+                  />
+                )}
                 {tab.id === "domains" && domainsAttention && (
                   <span
                     className="ms-auto size-1.5 rounded-full bg-warning-solid"
@@ -245,8 +261,9 @@ export const ProjectSidebar = () => {
 
 /** Mobile horizontal scroll tabs - rendered above content in left column */
 export const ProjectMobileTabs = () => {
-  const { projectData, projectNotFound, activeTabGroup, tabs, domainsData } = useProjectSettings();
+  const { projectData, projectNotFound, activeTabGroup, tabs, domainsData, availableUpdate } = useProjectSettings();
   const handleTabChange = useProjectTabNavigation();
+  const { t } = useI18n();
   const domainsAttention = domainsNeedAttention(projectData, domainsData);
 
   if (!projectData.id || projectNotFound) {
@@ -273,6 +290,14 @@ export const ProjectMobileTabs = () => {
             >
               <UiIcon name={Icon} className="size-4 shrink-0" />
               {tab.label}
+              {tab.id === "deployments" && availableUpdate && (
+                <span
+                  role="img"
+                  className="size-1.5 shrink-0 rounded-full bg-warning-solid"
+                  aria-label={t.projectSettings.appSource.updateAvailable}
+                  title={t.projectSettings.appSource.updateAvailable}
+                />
+              )}
               {tab.id === "domains" && domainsAttention && (
                 <span
                   className="size-1.5 rounded-full bg-warning-solid"

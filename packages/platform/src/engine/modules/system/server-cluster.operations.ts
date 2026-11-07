@@ -1,3 +1,4 @@
+import { observedAllSettled, reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { createHash, randomBytes } from "node:crypto";
 import {
   AppError,
@@ -45,7 +46,7 @@ import { sshManager } from "../../lib/ssh-manager";
 import { inspectHostIssuedIdentity } from "../../lib/host-port-target";
 import { withServerInventoryLock } from "../../lib/server-inventory-lock";
 import { audit, operationAuditContext } from "../../lib/audit-emitter";
-import { assertSelfHosted, assertServerExecution, requireSelfHostedServer } from "./server-access";
+import { assertSelfHosted, assertServerExecution, requireConnectedServer } from "./server-access";
 import { notifyNetworkSetup } from "./network-setup-bus";
 import { assertNetworkSetupAcceptingWork, deferNetworkSetupWork } from "./network-setup-lifecycle";
 
@@ -69,7 +70,7 @@ export async function authorizeMember(ctx: ExecutionContext, serverId: string) {
     resourceId: serverId,
     action: "admin",
   });
-  return requireSelfHostedServer(ctx, serverId);
+  return requireConnectedServer(ctx, serverId);
 }
 
 export async function onServer<T>(
@@ -188,7 +189,7 @@ export function presentCluster(row: ServerClusterRecord): ServerCluster {
     },
     members: row.members.map((m) => ({
       serverId: m.serverId,
-      name: m.name,
+      name: m.name ?? m.serverId,
       providerId: m.providerId,
       privateIp: m.privateIp,
       ...(m.interfaceName ? { interfaceName: m.interfaceName } : {}),
@@ -224,13 +225,13 @@ export async function eachMember<T>(
   concurrency = 4,
 ) {
   let next = 0;
-  const results = await Promise.allSettled(
+  const results = await observedAllSettled(
     Array.from({ length: Math.min(concurrency, items.length) }, async () => {
       while (next < items.length) {
         const item = items[next++]!;
         await fn(item);
       }
-    }),
+    }), "platform/engine/modules/system/server-cluster.operations",
   );
   const failure = results.find(
     (result): result is PromiseRejectedResult => result.status === "rejected",
@@ -397,6 +398,7 @@ export async function verifyClusterNetwork(
           message: null,
         });
       } catch (error) {
+        observeCaughtError(error, "platform/engine/modules/system/server-cluster.operations");
         report.hosts.push({
           serverId: member.serverId,
           ok: false,
@@ -436,6 +438,7 @@ export async function verifyClusterNetwork(
           ),
         );
       } catch (error) {
+        observeCaughtError(error, "platform/engine/modules/system/server-cluster.operations");
         const host = report.hosts.find((h) => h.serverId === probe.serverId)!;
         Object.assign(host, { ok: false, ...checkError(error) });
       }
@@ -476,6 +479,7 @@ export async function verifyClusterNetwork(
           }),
         );
       } catch (error) {
+        observeCaughtError(error, "platform/engine/modules/system/server-cluster.operations");
         report.peers.push(
           ...peers.map((peer) => ({
             sourceServerId: probe.serverId,
@@ -532,6 +536,7 @@ export async function verifyClusterNetwork(
               "MANAGED_NETWORK_INTERFACE_CHANGED",
             );
         } catch (error) {
+          observeCaughtError(error, "platform/engine/modules/system/server-cluster.operations");
           Object.assign(report.hosts.find((host) => host.serverId === member.serverId)!, {
             ok: false,
             ...checkError(error),
@@ -565,6 +570,7 @@ export async function verifyClusterNetwork(
             ),
           );
         } catch (error) {
+          observeCaughtError(error, "platform/engine/modules/system/server-cluster.operations");
           report.throughput!.push({
             sourceServerId: sourceId,
             targetServerId: peer.serverId,
@@ -606,7 +612,8 @@ export async function verifyClusterNetwork(
         ? "Connectivity checks passed, but a speed sample did not complete. Review the per-connection measurements and retry the speed test."
         : "Some private connections did not match the configured access. Check the connection results and run verification again.";
   } catch (error) {
-    await progressWrites.catch(() => undefined);
+    observeCaughtError(error, "platform/engine/modules/system/server-cluster.operations");
+    await progressWrites.catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/system/server-cluster.operations"); return undefined; });
     report.stage = "complete";
     failureMessage = checkError(error).message;
   } finally {
@@ -623,7 +630,8 @@ export async function verifyClusterNetwork(
           await onServer(ctx, probe.serverId, (executor) =>
             privateNetworkTools.stop(executor, probe),
           );
-        } catch {
+        } catch (diagnosticFailure) {
+          observeCaughtError(diagnosticFailure, "platform/engine/modules/system/server-cluster.operations");
           /* A revoked session cannot continue host operations. The listener expires locally. */
         }
       },

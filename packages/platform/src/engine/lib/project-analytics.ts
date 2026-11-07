@@ -12,8 +12,9 @@
  *   - analytics-scraper.ts  (periodic scrape via SSH)
  */
 
+import { reportCaughtError as observeCaughtError, diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import { findActiveDeployment } from "@repo/platform/engine/lib/active-deployment";
-import { safeErrorMessage } from "@repo/core";
+import { normalizeTrackedDomain, safeErrorMessage } from "@repo/core";
 import { repos, type Project } from "@repo/db";
 import {
   OPENRESTY_MGMT_PORT,
@@ -35,12 +36,7 @@ export type { TunnelStreamHandle } from "./ssh-tunnel";
  * Normalize a hostname to match OpenResty's tracking key format.
  * Lua `site_logger.lua` stores counters under lowercase, no-www keys.
  */
-export function normalizeTrackedDomain(hostname: string): string {
-  return hostname
-    .trim()
-    .toLowerCase()
-    .replace(/^www\./, "");
-}
+export { normalizeTrackedDomain } from "@repo/core";
 
 // ─── Project → domain + server resolution ────────────────────────────────────
 
@@ -64,7 +60,7 @@ export type ProjectTrafficSource =
 
 async function resolveTrafficRuntime(project: Project) {
   let deployTarget: string | null = null;
-  let serverId: string | null = null;
+  let serverId: string | null = project.serverId;
 
   if (project.activeDeploymentId) {
     const dep = await findActiveDeployment(project);
@@ -73,7 +69,7 @@ async function resolveTrafficRuntime(project: Project) {
     if (meta?.serverId) serverId = meta.serverId;
   }
 
-  return { deployTarget, serverId };
+  return { deployTarget: deployTarget ?? (project.workspaceId ? "cloud" : serverId ? "server" : null), serverId };
 }
 
 async function resolveProjectTrackedDomains(project: Project): Promise<string[]> {
@@ -146,7 +142,7 @@ async function buildTrafficSourcesForDomains(
   // No local row means this box is not a deploy target, so there is no edge of ours to
   // read and returning nothing is the correct answer, not a guess at another host.
   if (!serverId) {
-    const local = await repos.server.findLocal(project.organizationId).catch(() => undefined);
+    const local = await repos.server.findLocal(project.organizationId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/lib/project-analytics"); return undefined; });
     serverId = local?.id ?? null;
   }
   if (!serverId) return [];
@@ -287,6 +283,7 @@ async function execMgmt(
     if (!Number.isFinite(statusCode)) return null;
     return { statusCode, body: out.slice(nl + 1) };
   } catch (err) {
+    observeCaughtError(err, "platform/engine/lib/project-analytics");
     systemDebug("analytics", `execMgmt failed: ${err instanceof Error ? err.message : String(err)}`);
     return null;
   }
@@ -297,7 +294,8 @@ async function needsExecTransport(serverId: string): Promise<boolean> {
   try {
     const executor = await sshManager.acquire(serverId);
     return typeof executor.forwardPort !== "function";
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "platform/engine/lib/project-analytics");
     return false;
   }
 }
@@ -397,7 +395,7 @@ export async function postEdgeMgmt(
       systemDebug("analytics", `${path}: no serverId and no org to resolve the local one`);
       return;
     }
-    const local = await repos.server.findLocal(organizationId).catch(() => undefined);
+    const local = await repos.server.findLocal(organizationId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/lib/project-analytics"); return undefined; });
     if (!local) {
       systemDebug("analytics", `${path}: no local server row; nothing of ours to configure`);
       return;
@@ -405,7 +403,7 @@ export async function postEdgeMgmt(
     target = local.id;
   }
   await postMgmtJson(target, path, json).catch((err) =>
-    console.warn(`[edge-mgmt] ${path} failed for server ${target}: ${safeErrorMessage(err)}`),
+    errorDiagnostics.warn("platform/engine/lib/project-analytics", `[edge-mgmt] ${path} failed for server ${target}: ${safeErrorMessage(err)}`, err),
   );
 }
 
@@ -536,6 +534,7 @@ async function execMgmtStream(serverId: string, path: string) {
       finish();
     })
     .catch((err) => {
+      observeCaughtError(err, "platform/engine/lib/project-analytics");
       systemDebug("analytics", `execMgmtStream ended: ${err instanceof Error ? err.message : String(err)}`);
       finish();
     });

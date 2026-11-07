@@ -11,9 +11,9 @@ import {
   type OblienBillingApi, type OblienEntitlement, type OblienSubscription,
 } from "../../lib/oblien-billing-api";
 import { cloudNamespaceLimits, syncCloudResourceLimits } from "../../lib/cloud-resource-limits";
-import { offerReference, subscriptionPlan } from "./billing-catalog";
+import { supportedOfferReference, savedResourceLimits, subscriptionPlan } from "./billing-catalog";
 
-export const cloudBillingLockKey = (organizationId: string) => `billing:entitlement:${organizationId}`;
+export const cloudBillingLockKey = (organizationId: string, workspaceId?: string | null) => `billing:entitlement:${workspaceId ? `workspace:${workspaceId}` : organizationId}`;
 
 export interface ProviderBillingState {
   entitlement: OblienEntitlement;
@@ -49,13 +49,13 @@ export function resolvePlanGrant(row: BillingPlanGrant, organizationId: string, 
   const limits = planLimitsSchema.strict().safeParse(row.limits);
   const tier = row.planTierId as PlanTierId;
   if (row.organizationId !== organizationId || row.namespace !== namespace || !PLAN_IDS.includes(tier) || tier === "free" ||
-      !offer.success || !limits.success || offer.data.reference !== offerReference(tier) || !offer.data.policy || !offer.data.resourceLimits ||
+      !offer.success || !limits.success || !supportedOfferReference(offer.data.reference, tier) || !offer.data.policy || !offer.data.resourceLimits ||
       row.createdAt > now) {
     throw new AppError("The complimentary plan grant could not be verified", 503, "BILLING_PLAN_GRANT_INVALID");
   }
   return {
     id: row.id, tier, offer: offer.data, limits: limits.data,
-    resourceLimits: offer.data.resourceLimits, policy: offer.data.policy,
+    resourceLimits: savedResourceLimits(tier, offer.data), policy: offer.data.policy,
     expiresAt: row.expiresAt, period: planGrantPeriod(row.createdAt, now, row.expiresAt),
   };
 }
@@ -90,7 +90,7 @@ export async function reconcilePlanGrant(input: {
   const { organizationId, namespace, grants, billing, state } = input;
   const now = input.now ?? new Date();
   const syncLimits = input.syncLimits ?? syncCloudResourceLimits;
-  const row = await grants.current(organizationId);
+  const row = await grants.current(organizationId, namespace);
   if (!row) return { ...state, grant: null };
   const grant = resolvePlanGrant(row, organizationId, namespace, now);
 

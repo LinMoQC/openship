@@ -8,6 +8,7 @@
  * does is record `checked:false` so the dashboard stays silent.
  */
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { waitForPortListening, type BuildLogger, type RuntimeAdapter } from "@repo/adapters";
 import type { PortCheckResult } from "../../lib/deployment-runtime";
 
@@ -47,15 +48,32 @@ export async function auditPorts(
       const probe = await waitForPortListening(executor, port, {
         timeoutMs: PORT_AUDIT_TIMEOUT_MS,
       });
-      if (probe.listening) {
+      // The edge reaches a Docker deployment through the published host port, which
+      // Docker forwards to the container's own address, never its loopback. Bare
+      // apps run on the host itself, where the edge's 127.0.0.1 reaches them fine.
+      const loopbackOnly =
+        probe.checked && probe.listening && probe.loopbackOnly && runtime.name === "docker";
+      if (loopbackOnly) {
+        logger.log(
+          `Port check: port ${port} is only listening on loopback inside the container, ` +
+            `so the edge can't reach it. For a routed app, bind to 0.0.0.0 and redeploy, or route to its intended proxy.\n`,
+          "warn",
+        );
+      } else if (probe.listening) {
         logger.log(`Port check: port ${port} is listening.\n`, "info");
       } else if (probe.checked) {
         logger.log(`Port check: nothing is listening on port ${port} inside the deployment.\n`, "warn");
       }
-      results.push({ port, listening: probe.listening, checked: probe.checked });
+      results.push({
+        port,
+        listening: probe.listening,
+        checked: probe.checked,
+        ...(loopbackOnly ? { loopbackOnly: true } : {}),
+      });
     }
     return results;
   } catch (err) {
+    observeCaughtError(err, "platform/engine/modules/deployments/port-audit.service");
     // Acquiring the executor (or anything unexpected) failed — advisory only,
     // so degrade to "not checked" instead of surfacing an error.
     logger.log(`Port check skipped (${errMsg(err)}).\n`, "warn");

@@ -9,6 +9,7 @@
  * (or a full redeploy for `requiresRedeploy` fields).
  */
 
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import {
   getAppManagement,
   getAppSettings,
@@ -35,6 +36,7 @@ import { isStaticService, parseServicePort, resolveServicePort } from "../../lib
 import { mergeServiceDeployEnv } from "../deployments/compose/service-env-layers";
 import { serviceConnectionOutput } from "../services/service-connection-output";
 import { getTemplateForOrg } from "./catalog-source";
+import { nativeDatabaseOutputs } from "../projects/cluster-database-connections";
 import { repos, type Project, type Service } from "@repo/db";
 import type { ExecutionContext as RequestContext } from "@repo/platform";
 import { assertResourceInOrg } from "../../lib/resource-access";
@@ -190,6 +192,9 @@ export interface AppConnectionOutput {
   id: string;
   /** Stable identity for service-level links; names and aliases may change. */
   sourceServiceId?: string;
+  /** Stable native database identity, shared through the same connection operation. */
+  sourceDatabaseId?: string;
+  clusterId?: string;
   label: string;
   help?: string;
   /** Render masked with a reveal toggle. The real value is still sent (this is a
@@ -251,7 +256,7 @@ export interface AppConnectionView {
  * and it gets persisted into a second project's env by "Use in a project".
  */
 async function resolvePortOnlyHost(project: Project): Promise<string | null> {
-  const serverHost = await resolveProjectServerHost(project).catch(() => null);
+  const serverHost = await resolveProjectServerHost(project).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/apps/app-settings.service"); return null; });
   return serverHost && !isLoopbackHost(serverHost) ? serverHost : null;
 }
 
@@ -341,7 +346,13 @@ export async function getAppConnectionView(
   // an internal-address view so a plain single-app / compose / monorepo project
   // can be a linkable SOURCE ("Use in a project" → internal), not just catalog
   // apps. Known database images also resolve their configured credentials.
-  if (!connection) return synthesizeInternalConnectionView(project);
+  const databaseOutputs = await nativeDatabaseOutputs(project);
+  if (!connection) {
+    const view = project.clusterId
+      ? { outputs: [] as AppConnectionOutput[] }
+      : await synthesizeInternalConnectionView(project);
+    return { ...view, outputs: [...view.outputs, ...databaseOutputs] };
+  }
 
   const services = await repos.service.listByProject(projectId);
   const byName = new Map(services.map((s) => [s.name, s]));
@@ -367,7 +378,7 @@ export async function getAppConnectionView(
     if (publicUrls) return publicUrls;
     const domains: ProjectDomainRow[] = await repos.domain
       .listByProject(projectId)
-      .catch(() => []);
+      .catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/apps/app-settings.service"); return []; });
     publicUrls = buildPublicUrlLookup(
       services.map((svc) => ({
         name: svc.name,
@@ -468,6 +479,7 @@ export async function getAppConnectionView(
   // service already has its outputs, so never duplicate it with a generic URL.
   const extraServices = services.filter(service => !outputs.some(output => output.sourceServiceId === service.id));
   if (extraServices.length) outputs.push(...(await synthesizeInternalConnectionView(project, extraServices)).outputs);
+  outputs.push(...databaseOutputs);
 
   return {
     title: connection.title,
@@ -570,7 +582,8 @@ async function readConnectionServiceEnv(project: Project, services: Service[]) {
   const scoped = new Map<string, Record<string, string>>();
   for (const row of rows) {
     let value: string;
-    try { value = decrypt(row.value); } catch { continue; }
+    try { value = decrypt(row.value); } catch (diagnosticFailure) {
+      observeCaughtError(diagnosticFailure, "platform/engine/modules/apps/app-settings.service"); continue; }
     if (!row.serviceId) projectEnv[row.key] = value;
     else {
       const map = scoped.get(row.serviceId) ?? {};

@@ -33,7 +33,6 @@ const API_ENTRY = join(REPO_ROOT, "apps/api/src/index.ts");
 const MAX_PROXY_BODY = TRANSFER_CHUNK_BYTES + 64;
 const SECRET_VALUE = "transfer-secret-816-✓";
 const FILE_SECRET_VALUE = "file-resume-secret-816-✓";
-const FILE_PASSPHRASE = "issue-816-http-e2e-passphrase";
 
 interface RunningApi {
   child: ChildProcessByStdio<null, Readable, Readable>;
@@ -165,7 +164,10 @@ async function jsonRequest<T>(apiBase: string, path: string, init: RequestInit =
   });
   const text = await response.text();
   if (!response.ok) {
-    throw new Error(`${init.method ?? "GET"} ${path} returned ${response.status}: ${text}`);
+    const api = [...children].find((child) => child.baseUrl === apiBase);
+    throw new Error(
+      `${init.method ?? "GET"} ${path} returned ${response.status}: ${text}\n${api?.logs() ?? ""}`,
+    );
   }
   return JSON.parse(text) as T;
 }
@@ -446,15 +448,17 @@ it("transfers multiple HTTP chunks atomically and resumes a file import after re
     "/api/system/data-transfer/export",
     {
       method: "POST",
-      body: JSON.stringify({ passphrase: FILE_PASSPHRASE, selection: { history: [] } }),
+      body: JSON.stringify({ selection: { history: [] } }),
     },
   );
   expect(
-    findSecret(openTransferSecrets(destinationExport.secrets, FILE_PASSPHRASE), SECRET_VALUE),
+    findSecret(openTransferSecrets(destinationExport.secrets), SECRET_VALUE),
   ).toBe(true);
-  const transferredConfig = openTransferSecrets(destinationExport.secrets, FILE_PASSPHRASE)!;
+  expect(destinationExport.envelopeVersion).toBe(4);
+  expect(destinationExport.secrets).toMatchObject({ encoding: "plaintext" });
+  const transferredConfig = openTransferSecrets(destinationExport.secrets)!;
   for (const secret of [inlineSecret, buildSecret, fileSecret]) {
-    expect(JSON.stringify(destinationExport)).not.toContain(secret);
+    expect(JSON.stringify(destinationExport)).toContain(secret);
     expect(JSON.stringify(transferredConfig)).toContain(secret);
   }
   expect(transferredConfig.entries).toContainEqual(
@@ -476,14 +480,26 @@ it("transfers multiple HTTP chunks atomically and resumes a file import after re
   await mergeEnv(source.baseUrl, fileProject.id, [
     { key: "FILE_RESUME_SECRET", value: FILE_SECRET_VALUE, isSecret: true },
   ]);
+  // The destination now has an older copy of this project. Replacement must
+  // restore the changed source value and remove destination-only keys.
+  const updatedInstanceSecret = `${SECRET_VALUE}-updated`;
+  await mergeEnv(source.baseUrl, project.id, [
+    { key: "E2E_SECRET", value: updatedInstanceSecret, isSecret: true },
+  ]);
+  await mergeEnv(destination.baseUrl, project.id, [
+    { key: "DESTINATION_ONLY", value: "obsolete-destination-value", isSecret: true },
+  ]);
   const transferFile = await jsonRequest<DataTransferFile>(
     source.baseUrl,
     "/api/system/data-transfer/export",
     {
       method: "POST",
-      body: JSON.stringify({ passphrase: FILE_PASSPHRASE, selection: { history: [] } }),
+      body: JSON.stringify({ selection: { history: [] } }),
     },
   );
+  expect(transferFile.envelopeVersion).toBe(4);
+  expect(transferFile.secrets).toMatchObject({ encoding: "plaintext" });
+  expect(findSecret(openTransferSecrets(transferFile.secrets), updatedInstanceSecret)).toBe(true);
   const fileBytes = Buffer.from(JSON.stringify(transferFile), "utf8");
   expect(fileBytes.byteLength).toBeGreaterThan(TRANSFER_CHUNK_BYTES);
   const upload = await jsonRequest<{
@@ -526,7 +542,7 @@ it("transfers multiple HTTP chunks atomically and resumes a file import after re
   const imported = await terminalSse<ImportResult>(
     destination.baseUrl,
     `/api/system/data-transfer/import/session/${upload.uploadId}/finalize/stream`,
-    { passphrase: FILE_PASSPHRASE, mode: "wipe" },
+    { mode: "wipe" },
   );
   expect(imported.mode).toBe("wipe");
   expect(imported.secretsRehydrated).toBeGreaterThan(0);
@@ -543,12 +559,18 @@ it("transfers multiple HTTP chunks atomically and resumes a file import after re
     "/api/system/data-transfer/export",
     {
       method: "POST",
-      body: JSON.stringify({ passphrase: FILE_PASSPHRASE, selection: { history: [] } }),
+      body: JSON.stringify({ selection: { history: [] } }),
     },
   );
   expect(
-    findSecret(openTransferSecrets(finalExport.secrets, FILE_PASSPHRASE), FILE_SECRET_VALUE),
+    findSecret(openTransferSecrets(finalExport.secrets), FILE_SECRET_VALUE),
   ).toBe(true);
+  expect(findSecret(openTransferSecrets(finalExport.secrets), updatedInstanceSecret)).toBe(true);
+  expect(JSON.stringify(finalExport)).not.toContain("obsolete-destination-value");
+  const replacedEnv = await jsonRequest<{ data: Array<{ key: string }> }>(
+    destination.baseUrl, `/api/projects/${project.id}/env`,
+  );
+  expect(replacedEnv.data.some((entry) => entry.key === "DESTINATION_ONLY")).toBe(false);
 
   // Project downloads carry readable values without a password. The real HTTP
   // upload and SSE import must restore them under the destination's key while
@@ -571,7 +593,7 @@ it("transfers multiple HTTP chunks atomically and resumes a file import after re
     });
   const scopedFile = await scopedExport();
   expect(scopedFile.kind).toBe("openship-project-export");
-  expect(scopedFile.envelopeVersion).toBe(3);
+  expect(scopedFile.envelopeVersion).toBe(4);
   expect(scopedFile.secrets).toMatchObject({ encoding: "plaintext" });
   expect(JSON.stringify(scopedFile)).toContain("scoped-original");
   expect(scopedFile.dump.tables.project?.map((row) => row.id)).toEqual([scopedProject.id]);

@@ -33,6 +33,8 @@
  * doors — `checkPermission` or `canUseGitHubRepo`.
  */
 
+import type { Capability } from "./access-capabilities";
+
 /**
  * "create" is a collection-only capability: it authorizes creating NEW rows of a
  * type (only `{project,"*",[create]}` today) WITHOUT granting read/write/admin
@@ -41,38 +43,49 @@
 export type Permission = "read" | "write" | "admin" | "create";
 
 /**
+ * What a grant's `permissions` array may hold: the coarse levels above, or a
+ * fine-grained capability such as `domains:delete` (see access-capabilities.ts).
+ * Route checks still assert a coarse `Permission`.
+ */
+export type GrantPermission = Permission | Capability;
+
+/**
  * Every value a grant row's `resource_type` may hold. Wider than the grantable
  * set: the nested leaves are here because a permission tag names them, not
- * because a grant can key on them.
+ * because a grant can key on them. Runtime validators and the TypeScript union
+ * derive from this same list.
  */
-export type ResourceType =
-  | "project"
-  | "server"
-  | "mail_server"
-  | "backup_destination"
-  | "billing"
-  | "audit"
-  | "analytics"
-  | "github"
+export const RESOURCE_TYPES = [
+  "project",
+  "server",
+  "mail_server",
+  "backup_destination",
+  "billing",
+  "audit",
+  "analytics",
+  "github",
   // GitHub access control is default-deny and owner-granted. "github"
   // (resourceId "*") = all GitHub; "github_installation" (resourceId = the
   // account LOGIN, not an installation id) = every repo under one account;
   // "github_repository" (resourceId = "owner/repo") = a single repo.
-  | "github_installation"
-  | "github_repository"
-  | "permissions"
-  | "domain"
-  | "settings"
-  | "job"
-  | "terminal"
-  | "cloud"
-  | "notifications"
-  | "updates"
-  | "service"
-  | "deployment"
-  | "backup_policy"
-  | "backup_run"
-  | "backup_restore";
+  "github_installation",
+  "github_repository",
+  "permissions",
+  "domain",
+  "settings",
+  "job",
+  "terminal",
+  "cloud",
+  "notifications",
+  "updates",
+  "service",
+  "deployment",
+  "backup_policy",
+  "backup_run",
+  "backup_restore",
+] as const;
+
+export type ResourceType = (typeof RESOURCE_TYPES)[number];
 
 /**
  * Types whose only resourceId is "*" — they name a FEATURE, not a row, so a
@@ -218,11 +231,7 @@ export function isSensitiveGrantType(type: string): boolean {
  * and tools that always 404.
  */
 export const SELF_HOSTED_ONLY_GRANT_TYPES: readonly GrantableResourceType[] = [
-  "server",
   "mail_server",
-  // The jobs router is `localOnly`, so on the hosted control plane every job route
-  // 404s regardless of the grant.
-  "job",
 ];
 
 /** Grantable types that exist only on the hosted control plane. */

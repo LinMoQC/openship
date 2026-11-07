@@ -5,7 +5,7 @@ import { Icon as UiIcon } from "@repo/ui/icons";
 /**
  * The single, professional surface for updates + advisories, for BOTH the
  * desktop app and self-hosted servers:
- *   - a severity-colored advisory banner (critical always shows),
+ *   - a severity-colored advisory banner with saved runtime-notice visibility,
  *   - a subtle "update available" banner,
  *   - a one-time "what's new" card after an update lands,
  *   - a changelog details modal.
@@ -13,15 +13,30 @@ import { Icon as UiIcon } from "@repo/ui/icons";
  * in-app updater.
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { usePathname, useRouter } from "next/navigation";
+import Link from "next/link";
 import { changelogUrl, type AdvisorySeverity } from "@repo/core";
 import { useI18n, interpolate } from "@/components/i18n-provider";
 import CopyCommand, { SELF_UPDATE_COMMAND } from "@/components/shared/CopyCommand";
 import { useUpdates } from "./useUpdates";
+import { RuntimeSecurityDialog } from "./RuntimeSecurityDialog";
+import { useSecurityBannerPreference } from "./useSecurityBannerPreference";
+import DropdownMenu from "@/components/ui/DropdownMenu";
 
 const SEVERITY = {
-  critical: { border: "border-danger-border", bg: "bg-danger-bg", fg: "text-danger", Icon: "warning" },
-  recommended: { border: "border-warning-border", bg: "bg-warning-bg", fg: "text-warning", Icon: "alert-circle" },
+  critical: {
+    border: "border-danger-border",
+    bg: "bg-danger-bg",
+    fg: "text-danger",
+    Icon: "warning",
+  },
+  recommended: {
+    border: "border-warning-border",
+    bg: "bg-warning-bg",
+    fg: "text-warning",
+    Icon: "alert-circle",
+  },
   info: { border: "border-primary/30", bg: "bg-primary/10", fg: "text-primary", Icon: "info" },
 } as const;
 
@@ -53,12 +68,31 @@ export function UpdateCenter() {
     updatePhase,
     updateProgress,
     updateError,
+    securityOverview,
+    runtimeAdvisories,
+    refresh,
   } = useUpdates();
   const { t } = useI18n();
   const w = t.widgets.updates;
   const [notesOpen, setNotesOpen] = useState(false);
+  const [securityOpen, setSecurityOpen] = useState(false);
+  const pathname = usePathname();
+  const router = useRouter();
+  const securityBanners = useSecurityBannerPreference();
+  useEffect(() => setSecurityOpen(false), [pathname]);
 
-  const advisory = state?.advisories[0]; // most severe first
+  const advisory = state?.advisories.find(
+    (item) =>
+      securityBanners.enabled || !runtimeAdvisories?.some((runtime) => runtime.id === item.id),
+  );
+  const runtimeAdvisory = runtimeAdvisories?.find((item) => item.id === advisory?.id);
+  const affectedProjects = runtimeAdvisory?.projects ?? [];
+  const affectedServers = runtimeAdvisory?.servers ?? [];
+  const additionalResources =
+    Math.max(0, affectedProjects.length - 3) + Math.max(0, affectedServers.length - 3);
+  const runtimeSeverity =
+    affectedProjects[0]?.findings[0]?.severity ?? affectedServers[0]?.findings[0]?.severity;
+  const severityLabels = t.projectSettings.securityAdvisories.severity;
   // An in-flight download/install owns the top surface — suppress the advisory
   // banner so we never stack it next to its own progress bar.
   const updating = desktop && updatePhase !== "idle";
@@ -79,7 +113,9 @@ export function UpdateCenter() {
                 <div className="min-w-0 flex-1">
                   <p className="text-[13.5px] font-semibold text-foreground">{w.updateFailed}</p>
                   {updateError && (
-                    <p className="mt-0.5 truncate text-[12px] text-muted-foreground">{updateError}</p>
+                    <p className="mt-0.5 truncate text-[12px] text-muted-foreground">
+                      {updateError}
+                    </p>
                   )}
                 </div>
                 <button
@@ -121,57 +157,164 @@ export function UpdateCenter() {
       )}
 
       {/* ── Advisory banner (critical/recommended/info) ─────────────── */}
-      {!updating && advisory && (() => {
-        const s = SEVERITY[advisory.severity as AdvisorySeverity];
-        const Icon = s.Icon;
-        return (
-          <div className="px-4 pt-4 sm:px-6 sm:pt-6">
-            <div className={`flex items-start gap-3 rounded-2xl border ${s.border} ${s.bg} px-4 py-3.5`}>
-              <div className={`mt-0.5 shrink-0 ${s.fg}`}>
-                <UiIcon name={Icon} className="size-5" />
-              </div>
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
-                  <span className={`text-[11px] font-semibold uppercase tracking-wide ${s.fg}`}>{w.severity[advisory.severity as AdvisorySeverity]}</span>
-                  <span className="text-[14px] font-semibold text-foreground">{advisory.title}</span>
-                </div>
-                <p className="mt-0.5 text-[13px] leading-relaxed text-muted-foreground">{advisory.message}</p>
-                <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1.5">
-                  {advisory.action?.kind === "open-url" && advisory.action.url ? (
-                    <ExternalLinkBtn href={advisory.action.url}>{advisory.action.label}</ExternalLinkBtn>
-                  ) : advisory.action?.kind === "update" && desktop ? (
-                    <button
-                      type="button"
-                      onClick={beginUpdate}
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-foreground px-3 py-1.5 text-[13px] font-medium text-background transition-opacity hover:opacity-90"
-                    >
-                      <UiIcon name="download" className="size-3.5" />
-                      {advisory.action.label}
-                    </button>
-                  ) : advisory.action?.kind === "update" && mode === "selfhosted" && state?.customRuntime ? (
-                    <ExternalLinkBtn href={changelog}>{t.projects.release.adaptationPending}</ExternalLinkBtn>
-                  ) : advisory.action?.kind === "update" && mode === "selfhosted" ? (
-                    // A server can't be updated from the browser — the control
-                    // plane upgrades itself through the CLI. Show the command
-                    // instead of dropping the action entirely, which left the
-                    // operator with a critical banner and no way to act on it.
-                    <CopyCommand command={SELF_UPDATE_COMMAND} />
-                  ) : null}
-                  <ExternalLinkBtn href={changelog}>{w.viewChangelog}</ExternalLinkBtn>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => dismissAdvisory(advisory.id)}
-                aria-label={w.dismiss}
-                className="shrink-0 rounded-lg p-1 text-muted-foreground transition-colors hover:bg-foreground/[0.06] hover:text-foreground"
+      {!updating &&
+        advisory &&
+        (() => {
+          const s = SEVERITY[advisory.severity as AdvisorySeverity];
+          const Icon = s.Icon;
+          return (
+            <div className="px-4 pt-4 sm:px-6 sm:pt-6">
+              <div
+                className={`flex items-start gap-3 rounded-2xl border ${s.border} ${s.bg} px-4 py-3.5`}
               >
-                <UiIcon name="close" className="size-4" />
-              </button>
+                <div className={`mt-0.5 shrink-0 ${s.fg}`}>
+                  <UiIcon name={Icon} className="size-5" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className={`text-[11px] font-semibold uppercase tracking-wide ${s.fg}`}>
+                      {runtimeSeverity && Object.hasOwn(severityLabels, runtimeSeverity)
+                        ? severityLabels[runtimeSeverity as keyof typeof severityLabels]
+                        : w.severity[advisory.severity as AdvisorySeverity]}
+                    </span>
+                    <span className="text-[14px] font-semibold text-foreground">
+                      {advisory.title}
+                    </span>
+                  </div>
+                  {runtimeAdvisory ? (
+                    <ul
+                      className="mt-2 flex flex-wrap gap-2 text-[13px]"
+                      aria-label={t.projectSettings.securityAdvisories.affected}
+                    >
+                      {affectedServers.slice(0, 3).map((server) => (
+                        <li
+                          key={server.serverId}
+                          className="min-w-0 break-words rounded-lg bg-background/30 px-2.5 py-1"
+                        >
+                          {server.name}
+                        </li>
+                      ))}
+                      {affectedProjects.slice(0, 3).map((project) => (
+                        <li
+                          key={project.projectId}
+                          className="min-w-0 break-words rounded-lg bg-background/30 px-2.5 py-1"
+                        >
+                          <span className="font-medium">{project.name}</span>
+                          <span className="text-muted-foreground">
+                            {" "}
+                            ·{" "}
+                            {project.findings
+                              .map((finding) =>
+                                [finding.serviceName, ...finding.evidence]
+                                  .filter(Boolean)
+                                  .join(" · "),
+                              )
+                              .join("; ")}
+                          </span>
+                        </li>
+                      ))}
+                      {additionalResources > 0 && (
+                        <li className="self-center">+{additionalResources}</li>
+                      )}
+                    </ul>
+                  ) : (
+                    <p className="mt-0.5 text-[13px] leading-relaxed text-muted-foreground">
+                      {advisory.message}
+                    </p>
+                  )}
+                  <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1.5">
+                    {runtimeAdvisory && (
+                      <button
+                        type="button"
+                        onClick={() => setSecurityOpen(true)}
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-foreground px-3 py-1.5 text-[13px] font-medium text-background transition-opacity hover:opacity-90"
+                      >
+                        {interpolate(
+                          affectedServers.length
+                            ? t.projectSettings.hostSecurity.reviewResources
+                            : t.projectSettings.securityAdvisories.reviewApps,
+                          {
+                            count: affectedProjects.length + affectedServers.length,
+                          },
+                        )}
+                        <UiIcon name="arrow-right" className="size-3.5" />
+                      </button>
+                    )}
+                    {advisory.action?.kind === "open-url" && advisory.action.url ? (
+                      <ExternalLinkBtn href={advisory.action.url}>
+                        {advisory.action.label}
+                      </ExternalLinkBtn>
+                    ) : advisory.action?.kind === "update" && desktop ? (
+                      <button
+                        type="button"
+                        onClick={beginUpdate}
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-foreground px-3 py-1.5 text-[13px] font-medium text-background transition-opacity hover:opacity-90"
+                      >
+                        <UiIcon name="download" className="size-3.5" />
+                        {advisory.action.label}
+                      </button>
+                    ) : advisory.action?.kind === "update" && mode === "selfhosted" && state?.customRuntime ? (
+                      <ExternalLinkBtn href={changelog}>{t.projects.release.adaptationPending}</ExternalLinkBtn>
+                    ) : advisory.action?.kind === "update" && mode === "selfhosted" ? (
+                      // A server can't be updated from the browser — the control
+                      // plane upgrades itself through the CLI. Show the command
+                      // instead of dropping the action entirely, which left the
+                      // operator with a critical banner and no way to act on it.
+                      <CopyCommand command={SELF_UPDATE_COMMAND} />
+                    ) : null}
+                    {!runtimeAdvisory && (
+                      <ExternalLinkBtn href={changelog}>{w.viewChangelog}</ExternalLinkBtn>
+                    )}
+                    {runtimeAdvisory && (
+                      <Link
+                        href="/monitoring?tab=security"
+                        className="text-[13px] underline-offset-4 hover:underline"
+                      >
+                        {t.projectSettings.securityAdvisories.monitoring}
+                      </Link>
+                    )}
+                  </div>
+                </div>
+                <div className="flex shrink-0 items-center gap-1">
+                  {runtimeAdvisory && (
+                    <DropdownMenu
+                      trigger={<UiIcon name="settings" className="size-4" />}
+                      triggerLabel={t.projectSettings.securityAdvisories.bannerSettings}
+                      triggerClassName="rounded-lg p-1 text-muted-foreground hover:bg-foreground/[0.06] hover:text-foreground"
+                      actions={[
+                        {
+                          id: "hide-security-banners",
+                          label: t.projectSettings.securityAdvisories.hideBanners,
+                          onClick: () => securityBanners.setEnabled(false),
+                        },
+                        {
+                          id: "security-banner-settings",
+                          label: t.projectSettings.securityAdvisories.bannerSettings,
+                          onClick: () => router.push("/settings?tab=notifications"),
+                        },
+                      ]}
+                    />
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => dismissAdvisory(advisory.id)}
+                    aria-label={w.dismiss}
+                    className="shrink-0 rounded-lg p-1 text-muted-foreground transition-colors hover:bg-foreground/[0.06] hover:text-foreground"
+                  >
+                    <UiIcon name="close" className="size-4" />
+                  </button>
+                </div>
+              </div>
             </div>
-          </div>
-        );
-      })()}
+          );
+        })()}
+      {securityOpen && !!(affectedProjects.length + affectedServers.length) && (
+        <RuntimeSecurityDialog
+          overview={{ ...securityOverview, projects: affectedProjects, servers: affectedServers }}
+          onClose={() => setSecurityOpen(false)}
+          onChecked={refresh}
+        />
+      )}
 
       {/* A bare "newer version exists" no longer raises a banner — that's the
           nagging-every-release problem. It's surfaced quietly instead: the home
@@ -187,11 +330,11 @@ export function UpdateCenter() {
               <UiIcon name="sparkles" className="size-4.5" />
             </div>
             <div className="min-w-0 flex-1">
-              <p className="text-[14px] font-semibold text-foreground">{interpolate(w.updatedTo, { version: whatsNewVersion })}</p>
+              <p className="text-[14px] font-semibold text-foreground">
+                {interpolate(w.updatedTo, { version: whatsNewVersion })}
+              </p>
               <p className="mt-0.5 text-[12.5px] leading-relaxed text-muted-foreground">
-                {latest?.version === whatsNewVersion && latest.notes
-                  ? w.seeChanges
-                  : w.onLatest}
+                {latest?.version === whatsNewVersion && latest.notes ? w.seeChanges : w.onLatest}
               </p>
               <div className="mt-2.5 flex items-center gap-3">
                 {latest?.notes && latest.version === whatsNewVersion && (
@@ -229,7 +372,9 @@ export function UpdateCenter() {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between border-b border-border/50 px-5 py-4">
-              <h3 className="text-[15px] font-semibold text-foreground">{interpolate(w.whatsNewIn, { version: latest.version })}</h3>
+              <h3 className="text-[15px] font-semibold text-foreground">
+                {interpolate(w.whatsNewIn, { version: latest.version })}
+              </h3>
               <button
                 type="button"
                 onClick={() => setNotesOpen(false)}

@@ -14,10 +14,10 @@
  * digest to the publisher key embedded in this app. Missing proofs fail closed.
  */
 
+import { reportCaughtError as observeCaughtError, diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import { app, net, shell } from "electron";
 import {
-  changelogMarkdownUrl,
-  extractChangelogSection,
+  releaseDocuments,
   resolveDesktopUpdate,
   RELEASES_LATEST_API,
   type DesktopUpdateAsset,
@@ -38,9 +38,9 @@ import {
 } from "node:fs";
 import { open } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { advisoryManifestUrl, parseManifest, type AdvisoryManifest } from "@repo/core";
 import { isAllowedUpdateAssetUrl } from "./security";
 import { verifyUpdateSignature } from "./update-signature";
+import { fetchUpdateAsset } from "./update-download";
 
 export type UpdateAsset = DesktopUpdateAsset;
 export type UpdateInfo = Extract<DesktopUpdateCheck, { available: true }>;
@@ -91,7 +91,13 @@ async function checkForUpdateUncached(): Promise<UpdateCheck> {
     if (!tag) return { available: false, latest: null, manifest: null };
     // These are independent, fail-soft reads. A missing changelog must never
     // suppress a critical advisory (or the reverse).
-    const [manifest, changelogNotes] = await Promise.all([fetchManifest(tag), fetchChangelog(tag)]);
+    const documents = await releaseDocuments(tag, ((url, init) =>
+      net.fetch(url instanceof URL ? url.toString() : url, {
+        ...init,
+        headers: { Accept: "application/json, text/markdown", "User-Agent": "Openship-Desktop" },
+        signal: AbortSignal.timeout(10_000),
+      })) as typeof fetch);
+    const manifest = documents.manifest;
     return {
       ...resolveDesktopUpdate({
         releasePayload: data,
@@ -99,50 +105,14 @@ async function checkForUpdateUncached(): Promise<UpdateCheck> {
         arch: process.arch,
         currentVersion: app.getVersion(),
         manifest,
-        changelogNotes,
+        changelogNotes: documents.latest?.notes ?? null,
       }),
-      latest: { version: tag.replace(/^v/, ""), tag, notes: changelogNotes ?? "" },
+      latest: documents.latest,
       manifest,
     };
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "desktop/main/updater");
     return { available: false, latest: null, manifest: null };
-  }
-}
-
-/** Exact release section from the immutable changelog at this release tag. */
-async function fetchChangelog(tag: string): Promise<string | null> {
-  if (!tag) return null;
-  try {
-    const res = await net.fetch(changelogMarkdownUrl(tag), {
-      headers: { Accept: "text/markdown", "User-Agent": "Openship-Desktop" },
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!res.ok) return null;
-    return extractChangelogSection(await res.text(), tag);
-  } catch {
-    return null;
-  }
-}
-
-/**
- * The advisory manifest for a release tag, validated through the same
- * `parseManifest` the dashboard uses (it's untrusted third-party JSON as far as
- * any client is concerned).
- *
- * Fails CLOSED: no tag, unreachable, or malformed → null → no announcement → we
- * stay quiet. A broken manifest must never become an unexpected modal on launch.
- */
-async function fetchManifest(tag: string): Promise<AdvisoryManifest | null> {
-  if (!tag) return null;
-  try {
-    const res = await net.fetch(advisoryManifestUrl(tag), {
-      headers: { Accept: "application/json", "User-Agent": "Openship-Desktop" },
-      signal: AbortSignal.timeout(10_000),
-    });
-    if (!res.ok) return null;
-    return parseManifest(await res.json());
-  } catch {
-    return null;
   }
 }
 
@@ -174,6 +144,7 @@ export async function downloadUpdate(
 async function downloadVerifiedInstaller(asset: UpdateAsset, version: string, onProgress: (fraction: number) => void, dest: string): Promise<void> {
   const res = await fetchUpdateAsset(asset.url, AbortSignal.timeout(10 * 60_000));
   if (!res.ok || !res.body) {
+    await res.body?.cancel();
     throw new Error(`Download failed: HTTP ${res.status}`);
   }
 
@@ -210,13 +181,17 @@ async function downloadVerifiedInstaller(asset: UpdateAsset, version: string, on
   let sidecarError = "unreachable";
   try {
     const shaRes = await fetchUpdateAsset(`${asset.url}.sha256`, AbortSignal.timeout(10_000));
-    if (!shaRes.ok) sidecarError = `HTTP ${shaRes.status}`;
+    if (!shaRes.ok) {
+      sidecarError = `HTTP ${shaRes.status}`;
+      await shaRes.body?.cancel();
+    }
     else {
       const tok = (await readUpdateProof(shaRes)).trim().split(/\s+/)[0]?.toLowerCase();
       if (tok && /^[0-9a-f]{64}$/.test(tok)) expected = tok;
       else sidecarError = "malformed";
     }
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "desktop/main/updater");
     sidecarError = "unreachable";
   }
   if (!expected) {
@@ -233,27 +208,16 @@ async function downloadVerifiedInstaller(asset: UpdateAsset, version: string, on
   }
   try {
     const signature = await fetchUpdateAsset(`${asset.url}.sig`, AbortSignal.timeout(10_000));
-    if (!signature.ok) throw new Error("No publisher signature");
+    if (!signature.ok) {
+      await signature.body?.cancel();
+      throw new Error("No publisher signature");
+    }
     verifyUpdateSignature(JSON.parse(await readUpdateProof(signature)), { version, name: asset.name, sha256: digest });
-  } catch {
+  } catch (diagnosticFailure) {
+    observeCaughtError(diagnosticFailure, "desktop/main/updater");
     rmSync(dest, { force: true });
     throw new Error("Update signature is missing or invalid. Refusing to install this update.");
   }
-}
-
-/** Validate each redirect before issuing the next request, including sidecars. */
-async function fetchUpdateAsset(input: string, signal: AbortSignal): Promise<Response> {
-  let url = input;
-  for (let redirects = 0; redirects <= 5; redirects++) {
-    if (!isAllowedUpdateAssetUrl(url)) throw new Error("Untrusted update download destination.");
-    const response = await net.fetch(url, { redirect: "manual", signal, headers: { "User-Agent": "Openship-Desktop" } });
-    if (![301, 302, 303, 307, 308].includes(response.status)) return response;
-    await response.body?.cancel();
-    const next = response.headers.get("location");
-    if (!next) throw new Error("Update redirect has no destination.");
-    url = new URL(next, url).href;
-  }
-  throw new Error("Too many update redirects.");
 }
 
 async function readUpdateProof(response: Response): Promise<string> {
@@ -282,7 +246,7 @@ export function installUpdate(file: string): void {
     if (process.platform === "win32") return installWindows(file);
     return installLinux(file);
   } catch (err) {
-    console.error("[updater] seamless install failed, opening installer:", err);
+    errorDiagnostics.error("desktop/main/updater", "[updater] seamless install failed, opening installer:", err);
     fallbackOpen(file);
   }
 }

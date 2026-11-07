@@ -6,17 +6,19 @@ import React, { useState } from "react";
 import Link from "next/link";
 import { type Project } from "@/constants/mock";
 import { AppLogo } from "@/components/AppLogo";
+import { ProjectStackIcon } from "@/components/shared/ProjectStackIcon";
 import { getFrameworkConfig } from "@/components/import-project/Frameworks";
-import { getProjectStatus, projectDisplayDomain } from "@/utils/project-status";
+import { getProjectStatus, projectCardHref, projectDisplayDomain } from "@/utils/project-status";
 import { ProjectStatusBadge } from "@/components/shared/ProjectStatusBadge";
-import { useI18n } from "@/components/i18n-provider";
+import { useI18n, interpolate } from "@/components/i18n-provider";
 import { useModal } from "@/context/ModalContext";
 import { useToast } from "@/context/ToastContext";
 import { projectsApi, getApiErrorMessage } from "@/lib/api";
 import { timeAgo } from "@/lib/time";
 import { useImageFallback } from "@/hooks/useImageFallback";
 import type { Dictionary } from "@/i18n";
-import { ProjectReleaseMetadata, ProjectReleaseName, projectReleaseLabel } from "./ProjectReleaseMetadata";
+import { ReleaseEnvironmentChip } from "@/components/releases/release-ui";
+import { ProjectReleaseLine } from "./ProjectReleaseMetadata";
 
 /* ── Helpers ──────────────────────────────────────────────────────── */
 
@@ -68,8 +70,9 @@ const ProjectCard: React.FC<Props> = ({ project, preferAppLogo, updateAvailable,
   const [menuOpen, setMenuOpen] = useState(false);
   const status = getProjectStatus(project);
   const fw = getFrameworkConfig(project.framework);
+  // GitOps stacks are described by their manifest, not a detected framework.
+  const stackLabel = project.managementMode === "gitops" && (!project.framework || project.framework === "unknown") ? "GitOps" : fw.name;
   const favicon = useImageFallback(project.favicon);
-  const label = projectReleaseLabel(project, t);
 
   const isLocal = !!project.localPath;
   const hasRepo = !!(project.gitOwner && project.gitRepo);
@@ -83,9 +86,7 @@ const ProjectCard: React.FC<Props> = ({ project, preferAppLogo, updateAvailable,
   // A not-yet-deployed app reopens the install wizard (adopting its draft);
   // a deployed app opens as a normal project.
   const isDraftApp = !!project.isApp && status === "draft" && !!appTemplateId;
-  const clickTarget = isDraftApp
-    ? `/apps/new/${appTemplateId}?projectId=${project.id}`
-    : `/projects/${project.id}${project.managementMode === "gitops" ? "/release" : ""}`;
+  const clickTarget = projectCardHref(project);
 
   const confirmDeleteApp = () => {
     const id = showModal({
@@ -118,7 +119,7 @@ const ProjectCard: React.FC<Props> = ({ project, preferAppLogo, updateAvailable,
           → open in new tab) without nesting a <button> inside an <a>. It sits
           above the static content (captures row clicks) but below the draft menu
           (lifted with z-10), which stays independently clickable. */}
-      <Link href={clickTarget} aria-label={project.managementMode === "gitops" ? `${t.projects.release.plan} · ${label}` : label} className="absolute inset-0 z-0" />
+      <Link href={clickTarget} aria-label={project.name} className="absolute inset-0 z-0" />
 
       <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-3 gap-y-2 px-4 py-3.5 @xl/project-row:flex @xl/project-row:gap-4 @xl/project-row:px-5">
         {/* Icon — on the Apps page show the catalog app's brand logo; otherwise
@@ -135,20 +136,23 @@ const ProjectCard: React.FC<Props> = ({ project, preferAppLogo, updateAvailable,
               onError={favicon.onError}
             />
           ) : (
-            fw.icon("var(--foreground)")
+            <ProjectStackIcon framework={project.framework} />
           )}
         </div>
 
         {/* Name + domain */}
-        <div className={`min-w-0 text-start ${project.managementMode === "gitops" ? "@xl/project-row:flex-1" : "@xl/project-row:w-44 @xl/project-row:flex-none @3xl/project-row:w-56"}`}>
+        <div className="min-w-0 text-start @xl/project-row:w-44 @xl/project-row:flex-none @3xl/project-row:w-56">
           <div className="flex min-w-0 items-center gap-1.5">
-            <ProjectReleaseName project={project} />
+            <p className="min-w-0 truncate text-sm font-medium text-foreground" title={project.name}>{project.name}</p>
+            {project.managementMode === "gitops" && <ReleaseEnvironmentChip environment={project.releaseEnvironment} className="bg-muted/60 text-[10px]" />}
             {project.activeVersion != null && (
               <span
                 className="shrink-0 rounded-md bg-muted/60 px-1.5 py-0.5 font-mono text-[10px] font-medium text-muted-foreground"
-                title={`${t.projects.release.deploymentNumber} ${project.activeVersion}`}
+                title={interpolate(t.projects.card.liveVersion, {
+                  version: String(project.activeVersion),
+                })}
               >
-                {t.projects.release.deploymentNumber} {project.activeVersion}
+                v{project.activeVersion}
               </span>
             )}
             {updateAvailable && project.managementMode !== "gitops" && (
@@ -158,15 +162,15 @@ const ProjectCard: React.FC<Props> = ({ project, preferAppLogo, updateAvailable,
             )}
           </div>
           {domain && <p className="text-xs text-muted-foreground truncate mt-0.5">{domain}</p>}
-          <ProjectReleaseMetadata project={project} />
+          <ProjectReleaseLine project={project} className="mt-0.5" />
         </div>
 
         {/* Keep metadata on one line; reveal secondary fields when the row itself
             has room, including when the Projects sidebar narrows a desktop list. */}
         <div className="hidden min-w-0 flex-1 items-center gap-3 whitespace-nowrap @xl/project-row:flex">
           {/* Stack */}
-          <span className="inline-flex min-w-0 max-w-[40%] shrink-0 items-center gap-1.5 px-2 py-0.5 rounded-md bg-secondary text-xs th-text-body" title={fw.name}>
-            <span className="truncate">{fw.name}</span>
+          <span className="inline-flex min-w-0 max-w-[40%] shrink-0 items-center gap-1.5 px-2 py-0.5 rounded-md bg-secondary text-xs th-text-body" title={stackLabel}>
+            <span className="truncate">{stackLabel}</span>
           </span>
 
           {/* App marker — catalog-installed (Convex, webmail, …) */}

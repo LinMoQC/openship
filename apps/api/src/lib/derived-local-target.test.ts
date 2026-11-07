@@ -39,6 +39,8 @@ const h = vi.hoisted(() => ({
   target: "selfhosted" as "selfhosted" | "desktop" | "cloud",
   owningOrg: vi.fn(async (): Promise<string | null> => "org1"),
   docker: vi.fn(async () => ({ name: "docker" })),
+  routes: vi.fn(async () => {}),
+  adoptMeta: { deployTarget: "local", runtimeMode: "bare", adopt: true } as Record<string, unknown>,
 }));
 
 vi.mock("@repo/adapters", async (importOriginal) => ({
@@ -47,7 +49,11 @@ vi.mock("@repo/adapters", async (importOriginal) => ({
   ...(await importOriginal<Record<string, unknown>>()),
   createPlatform: async (config: Record<string, unknown>) => {
     h.configs.push(config);
-    return { target: "selfhosted", runtime: { name: config.runtime } };
+    return {
+      target: "selfhosted",
+      routing: {},
+      runtime: { name: config.runtime, supports: () => false },
+    };
   },
   createHostExecutor: () => h.hostExecutor(),
   DockerRuntime: { create: h.docker },
@@ -73,6 +79,27 @@ vi.mock("@repo/platform/engine/lib/startup/self-server", () => ({
 
 vi.mock("@repo/db", () => ({
   repos: {
+    deployment: {
+      findById: async () => ({
+        id: "dashboard-adopt",
+        projectId: "dashboard",
+        organizationId: "cloud-org",
+        containerId: "dashboard-adopt",
+        meta: h.adoptMeta,
+      }),
+    },
+    domain: {
+      listByProject: async () => [
+        {
+          id: "dashboard-domain",
+          hostname: "panel.example.com",
+          serviceId: null,
+          targetPort: 3001,
+          domainType: "custom",
+        },
+      ],
+    },
+    service: { listByDeployment: async () => [], listByProject: async () => [] },
     server: {
       getInOrganization: async (id: string) => ({
         id,
@@ -106,10 +133,80 @@ vi.mock("@repo/platform/engine/lib/provision-lock", () => ({
   createProvisionLock: (name: string) => ({ name, run: (f: () => unknown) => f() }),
 }));
 
+vi.mock("@repo/platform/engine/lib/route-apply.service", () => ({
+  reconcileProjectRoutes: h.routes,
+}));
+vi.mock("@repo/platform/engine/modules/route-rules/route-rule.service", () => ({
+  pushProjectRules: async () => {},
+}));
+vi.mock("@repo/platform/engine/modules/analytics/analytics-config.service", () => ({
+  pushProjectAnalyticsConfig: async () => {},
+}));
+
+const { reapplyProjectLiveRoutes } =
+  await import("@repo/platform/engine/modules/domains/project-route.service");
 const { resolveTargetPlatform, resolveDeploymentRuntimeForRead } = await import("@repo/platform/engine/lib/deployment-runtime");
 const { HostChannelUnavailableError } = await import("@repo/adapters");
 
 const last = () => h.configs[h.configs.length - 1] as Record<string, unknown>;
+
+const dashboardProject = {
+  id: "dashboard",
+  slug: "openship",
+  appTemplateId: "openship",
+  port: 3001,
+  workspaceId: null,
+  activeDeploymentId: "dashboard-adopt",
+  organizationId: "cloud-org",
+  webhookDomain: null,
+  hasServer: true,
+  workloadType: "service" as const,
+  outputDirectory: null,
+  routingConfig: null,
+  routeStrategy: null,
+};
+
+describe("self-app routing host ownership", () => {
+  it.each([true, false])(
+    "repairs a dashboard in a linked organization only on the trusted self-app path (%s)",
+    async (authorized) => {
+      const repair = reapplyProjectLiveRoutes(dashboardProject, [], { isSelfApp: authorized });
+      if (authorized) {
+        await repair;
+        expect(h.routes).toHaveBeenCalledWith(
+          dashboardProject,
+          expect.objectContaining({
+            registers: [
+              expect.objectContaining({
+                hostname: "panel.example.com",
+                targetUrl: "http://127.0.0.1:3001",
+              }),
+            ],
+          }),
+        );
+        expect(h.acquireHostChannel).toHaveBeenCalledTimes(1);
+      } else {
+        await expect(repair).rejects.toMatchObject({ code: "LOCAL_HOST_ACCESS_DENIED" });
+        expect(h.acquireHostChannel).not.toHaveBeenCalled();
+        expect(h.routes).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it("keeps server-bound self-app repair scoped to the deployment organization", async () => {
+    h.adoptMeta = {
+      deployTarget: "server",
+      serverId: "local-row",
+      runtimeMode: "bare",
+      adopt: true,
+    };
+    await expect(
+      reapplyProjectLiveRoutes(dashboardProject, [], { isSelfApp: true }),
+    ).rejects.toMatchObject({ code: "LOCAL_HOST_ACCESS_DENIED" });
+    expect(h.acquire).not.toHaveBeenCalled();
+    expect(h.routes).not.toHaveBeenCalled();
+  });
+});
 
 describe("local host authorization", () => {
   it.each([undefined, "another-org"])("denies an implicit local target for %s before acquiring the host", async (organizationId) => {
@@ -180,6 +277,8 @@ beforeEach(() => {
   h.target = "selfhosted";
   h.owningOrg.mockReset().mockResolvedValue("org1");
   h.docker.mockClear();
+  h.routes.mockClear();
+  h.adoptMeta = { deployTarget: "local", runtimeMode: "bare", adopt: true };
   h.configs = [];
   h.localRow = null;
   h.findCalls = 0;

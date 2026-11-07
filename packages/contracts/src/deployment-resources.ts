@@ -1,6 +1,6 @@
 import { Type, type Static } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import { DEPLOYMENT_HISTORY_STATUSES, type DeploymentHistoryFilter, type LogEntry, type PromptPayload } from "@repo/core";
+import { DEPLOYMENT_HISTORY_STATUSES, type DeploymentHistorySummary, type DeploymentHistoryFilter, type LogEntry, type PromptPayload } from "@repo/core";
 import { DeploymentSchema, type Deployment, type CreateDeploymentResult } from "./deployments";
 import type { DeploymentControlSchemas, DeploymentSslSchemas } from "./deployment-controls";
 import type { ResourceOperations, ScopedOperations } from "./resource-operations";
@@ -16,19 +16,24 @@ export const DeploymentHistoryFilters = {
 };
 export const ListDeploymentsSchema = Type.Object({
   ...DeploymentHistoryFilters,
+  days: Type.Optional(Type.Integer({ minimum: 1, maximum: 90 })),
   projectId: Type.Optional(ResourceIdSchema),
   environment: Type.Optional(Type.Union([Type.Literal("production"), Type.Literal("preview")])),
   page: Type.Optional(Type.Integer({ minimum: 1 })),
   perPage: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
 });
 export const DeploymentLogsSchema = Type.Object({ tail: Type.Optional(Type.Integer({ minimum: 1, maximum: 100_000 })) });
-export const RedeploySchema = Type.Object({ useExistingCommit: Type.Optional(Type.Boolean()) });
+export const RedeploySchema = Type.Object({
+  useExistingCommit: Type.Optional(Type.Boolean({ description: "Rebuild the selected deployment's commit instead of the latest commit." })),
+  reuseBuild: Type.Optional(Type.Boolean({ description: "Retry a failed deployment with its retained completed Docker images. Never rebuilds or pulls substitutes; mutually exclusive with useExistingCommit." })),
+});
 export const RespondSchema = Type.Object({ action: Type.String({ minLength: 1, maxLength: 256 }) });
 export const PinSchema = Type.Object({ pinned: Type.Optional(Type.Boolean()) });
 export const SkipPortCheckSchema = Type.Object({ target: Type.Union([Type.String({ minLength: 1 }), Type.Integer({ minimum: 1, maximum: 65535 })]) });
 
 export type ListDeploymentsInput = Static<typeof ListDeploymentsSchema>;
 export interface DeploymentPage {
+  summary?: DeploymentHistorySummary;
   data: Deployment[];
   total: number;
   page: number;
@@ -50,6 +55,10 @@ export interface DeploymentBuildStatus {
   status: string;
   deploymentStatus: string;
   is_active: boolean;
+  /** Terminal worker cleanup still holds the execution lease; absent on older servers. */
+  completionPending?: boolean;
+  /** A completed Docker image receipt is retained for this failed attempt. */
+  canRetryDeployment?: boolean;
   cancellationPending: boolean;
   decisionPending: boolean;
   pendingPrompt: PromptPayload | null;
@@ -98,7 +107,20 @@ export interface DeploymentResourceOperations extends ResourceOperations<typeof 
   events(id: string, options?: DeploymentEventOptions): AsyncIterable<DeploymentEvent>;
 }
 
+const OutcomeCountsSchema = {
+  total: Type.Integer({ minimum: 0 }), success: Type.Integer({ minimum: 0 }),
+  failed: Type.Integer({ minimum: 0 }), active: Type.Integer({ minimum: 0 }), canceled: Type.Integer({ minimum: 0 }),
+};
+export const DeploymentHistorySummarySchema = Type.Object({
+  ...OutcomeCountsSchema,
+  days: Type.Integer({ minimum: 1, maximum: 90 }),
+  avgBuildDurationMs: Type.Union([Type.Number({ minimum: 0 }), Type.Null()]),
+  daily: Type.Array(Type.Object({ ...OutcomeCountsSchema, date: Type.String() })),
+  projects: Type.Array(Type.Object({ ...OutcomeCountsSchema, projectId: ResourceIdSchema })),
+});
+
 export const DeploymentPageSchema = Type.Object({
+  summary: Type.Optional(DeploymentHistorySummarySchema),
   data: Type.Array(DeploymentSchema), total: Type.Integer({ minimum: 0 }),
   page: Type.Integer({ minimum: 1 }), perPage: Type.Integer({ minimum: 1 }),
   projects: Type.Optional(Type.Array(Type.Object({ id: ResourceIdSchema, name: Type.String() }))),
@@ -110,6 +132,8 @@ export const LogEntrySchema = Type.Object({
 const BuildStatusSchema = Type.Object({
   success: Type.Boolean(), deployment_id: ResourceIdSchema, project_id: ResourceIdSchema,
   status: Type.String(), deploymentStatus: Type.String(), is_active: Type.Boolean(),
+  completionPending: Type.Optional(Type.Boolean()),
+  canRetryDeployment: Type.Optional(Type.Boolean()),
   cancellationPending: Type.Boolean(), decisionPending: Type.Boolean(),
   pendingPrompt: Type.Union([Type.Null(), Type.Object({
     promptId: Type.String(), title: Type.String(), message: Type.String(),

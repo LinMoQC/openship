@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
 import { BuildLogger, CloudDockerRuntime, DEFAULT_RESOURCE_CONFIG, type BuildConfig } from "@repo/adapters";
+import { generateDockerfile } from "../../../../../../packages/adapters/src/runtime/docker-build-plan";
 import type { BuildConfigSnapshotLike } from "@repo/platform/engine/modules/deployments/build-config";
 import { describe, expect, it, vi } from "vitest";
 
@@ -13,7 +14,7 @@ import { describe, expect, it, vi } from "vitest";
 // (Importing the real @repo/db would also risk the PGlite single-instance lock.)
 const { listByProjectMock } = vi.hoisted(() => ({ listByProjectMock: vi.fn() }));
 vi.mock("@repo/db", () => ({
-  repos: { service: { listByProject: listByProjectMock } },
+  repos: { service: { listByProject: listByProjectMock, startServiceDeploymentTiming: vi.fn(async () => {}) } },
 }));
 vi.mock("@repo/platform/engine/modules/deployments/session-manager", () => ({
   broadcastServiceStatus: vi.fn(),
@@ -130,7 +131,8 @@ async function run(
   buildEnvVars: Record<string, string> = {},
   imageRefFor?: (item: Captured) => string,
   composeInterpolationEnv: Record<string, string> = buildEnvVars,
-  options: { cloud?: boolean; targetServiceIds?: Set<string>; refreshServiceIds?: Set<string> } = {},
+  options: { cloud?: boolean; targetServiceIds?: Set<string>; refreshServiceIds?: Set<string>;
+    buildResources?: BuildConfig["resources"]; onBuildMeasured?: (durationMs: number) => void } = {},
 ) {
   listByProjectMock.mockResolvedValue(services);
   const captured: Captured[] = [];
@@ -173,9 +175,10 @@ async function run(
     buildSessionId: "sess",
     composeInterpolationEnv,
     buildEnvVars,
-    buildResources: DEFAULT_RESOURCE_CONFIG,
+    buildResources: options.buildResources ?? DEFAULT_RESOURCE_CONFIG,
     targetServiceIds: options.targetServiceIds,
     refreshServiceIds: options.refreshServiceIds,
+    onBuildMeasured: options.onBuildMeasured,
   });
   return { result, captured, prepareSource: runtime.prepareComposeSource };
 }
@@ -185,6 +188,53 @@ function runCloud(services: unknown[], snapshot?: Partial<BuildConfigSnapshotLik
 }) {
   return run(services, undefined, snapshot, {}, undefined, {}, { ...options, cloud: true });
 }
+
+describe("service build phase measurement", () => {
+  it("records the shared wall clock across service builds rather than adding their durations", async () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1000);
+    const measured = vi.fn();
+    try {
+      const { result } = await run([
+        inlineService("first", { dockerfile: "FROM scratch" }),
+        inlineService("second", { dockerfile: "FROM scratch" }),
+      ], (_root, item) => {
+        now.mockReturnValue(item.serviceName === "first" ? 2000 : 3500);
+      }, undefined, {}, undefined, {}, { onBuildMeasured: measured });
+      expect(result.durationMs).toBe(2500);
+      expect(measured).toHaveBeenCalledExactlyOnceWith(2500);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("freezes elapsed build time when the runtime throws instead of returning a result", async () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1000);
+    const measured = vi.fn();
+    try {
+      await expect(run([
+        inlineService("broken", { dockerfile: "FROM scratch" }),
+      ], () => {
+        now.mockReturnValue(4500);
+        throw new Error("Build transport disconnected");
+      }, undefined, {}, undefined, {}, { onBuildMeasured: measured })).rejects.toThrow("Build transport disconnected");
+      expect(measured).toHaveBeenCalledExactlyOnceWith(3500);
+    } finally {
+      now.mockRestore();
+    }
+  });
+});
+
+describe("shared host build budget", () => {
+  it.each([true, false])("forwards the resolved host budget to every sequential build (Cloud: %s)", async cloud => {
+    const buildResources = { cpuCores: 0.5, memoryMb: 768, diskMb: 8192 };
+    const { captured } = await run([
+      repoService({ name: "api", id: "api" }), repoService({ name: "web", id: "web" }),
+    ], undefined, undefined, {}, undefined, {}, { cloud, buildResources });
+    expect(captured.map(item => [item.serviceName, item.config.resources])).toEqual([
+      ["api", buildResources], ["web", buildResources],
+    ]);
+  });
+});
 
 describe("Cloud Docker uses the shared Compose source planner", () => {
   it("sends inline files into one shared workspace context without an API-host source path", async () => {
@@ -239,10 +289,10 @@ describe("Cloud Docker uses the shared Compose source planner", () => {
 
   it("preserves the uploaded source identity and Compose directory for the shared builder", async () => {
     const { prepareSource, captured } = await runCloud([repoService({ build: "../api" })], {
-      uploadWorkspaceId: "upload-a", sourceStaged: true, rootDirectory: "deploy",
+      localPath: "/uploads/upload-a", rootDirectory: "deploy",
     });
-    expect(prepareSource.mock.calls[0]![0]).toMatchObject({ cloudWorkspaceId: "upload-a", sourceStaged: true, rootDirectory: "deploy" });
-    expect(captured[0]!.config).toMatchObject({ cloudWorkspaceId: "upload-a", sourceStaged: true, rootDirectory: "api", buildContextDirectory: "api" });
+    expect(prepareSource.mock.calls[0]![0]).toMatchObject({ localPath: "/uploads/upload-a", rootDirectory: "deploy" });
+    expect(captured[0]!.config).toMatchObject({ localPath: "/uploads/upload-a", rootDirectory: "api", buildContextDirectory: "api" });
   });
 
   it("can restore inline configuration mounts without rebuilding the retained image", async () => {
@@ -268,6 +318,19 @@ describe("Cloud Docker uses the shared Compose source planner", () => {
 });
 
 describe("prebuilt registry images (#878)", () => {
+  it("keeps retained artifacts local and acquires force-pulled registry digests before cutover", async () => {
+    const image = `docker.io/library/node@sha256:${"a".repeat(64)}`;
+    const service = { ...repoService({ build: null }), image: "node:22-alpine" };
+    const retained = await run([service], undefined, { handoverImages: { dinohash: image } });
+    expect(retained.result.preparedLocalImages.get("svc-1")).toBe(image);
+    const patch = await run([service], undefined, { handoverImages: { dinohash: image },
+      forcePullImages: true,
+    });
+    expect(patch.captured).toEqual([]);
+    expect(patch.result.imageRefs.get("svc-1")).toBe(image);
+    expect(patch.result.preparedLocalImages.size).toBe(0);
+  });
+
   it("keeps an image-only GHCR reference without invoking a source build", async () => {
     const image = "ghcr.io/acme/web:sha-abc123";
     const { result, captured } = await run([{ ...repoService({ build: null }), image }]);
@@ -282,6 +345,38 @@ describe("prebuilt registry images (#878)", () => {
     expect(captured).toHaveLength(1);
     expect(result.builtImageRefs.size).toBe(1);
     expect(result.externalCount).toBe(0);
+  });
+});
+
+describe.each([false, true])("monorepo runtime selection (cloud=%s)", (cloud) => {
+  it.each(["node", null])("builds a runnable Node image with framework %s", async (framework) => {
+    const { captured } = await run([{
+      ...repoService({
+        kind: "monorepo", build: null, dockerfile: null, framework,
+        buildCommand: "npm run build", startCommand: "node server.js",
+      }),
+      buildImage: "node:22-bookworm-slim", packageManager: "npm",
+    }], undefined, {
+      framework: "unknown", buildImage: "ubuntu:22.04", runtimeImage: "ubuntu:22.04",
+    }, {}, undefined, {}, { cloud });
+
+    const config = captured[0].config;
+    expect(config.buildImage).toBe("node:22-bookworm-slim");
+    expect(config.runtimeImage).toBe(config.buildImage);
+    const dockerfile = generateDockerfile(config);
+    expect(dockerfile).toContain("FROM node:22-bookworm-slim");
+    expect(dockerfile).not.toMatch(/FROM (?:ubuntu|undefined)/);
+    expect(dockerfile).toContain("node server.js");
+  });
+
+  it("fills an absent builder from the sub-app stack", async () => {
+    const { captured } = await run([repoService({
+      kind: "monorepo", build: null, dockerfile: null, framework: "node",
+      buildCommand: "npm run build", startCommand: "node server.js",
+    })], undefined, { framework: "unknown", buildImage: undefined, runtimeImage: "ubuntu:22.04" },
+    {}, undefined, {}, { cloud });
+    expect(captured[0].config).toMatchObject({ buildImage: "node:22", runtimeImage: "node:22" });
+    expect(generateDockerfile(captured[0].config)).not.toContain("FROM undefined");
   });
 });
 

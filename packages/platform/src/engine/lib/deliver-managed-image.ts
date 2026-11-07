@@ -1,3 +1,4 @@
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import {
   buildImage,
   imageExistsLocally,
@@ -8,6 +9,7 @@ import { posix } from "node:path";
 
 import { edgeBuildSpec } from "./edge-image";
 import { mailBuildSpec } from "./mail-image";
+import { buildKitBuildSpec } from "./buildkit-image";
 
 /**
  * Stage B of the managed-image pipeline: get OUR source built into the pinned image
@@ -37,7 +39,7 @@ import { mailBuildSpec } from "./mail-image";
  * the image absent and `docker pull`s the published tag.
  */
 export interface DeliverManagedImageOpts {
-  kind: "edge" | "mail";
+  kind: "edge" | "mail" | "buildkit";
   /** The resolved pinned ref — dev-suffixed in a checkout, plain APP_VERSION in prod. */
   image: string;
   /** The box the image is FOR — probed for the checkout, built on, shipped to. */
@@ -49,7 +51,7 @@ export async function deliverManagedImage(
   opts: DeliverManagedImageOpts,
 ): Promise<{ delivered: boolean }> {
   const { kind, image, targetExecutor, onLog } = opts;
-  const spec = kind === "edge" ? edgeBuildSpec() : mailBuildSpec();
+  const spec = { edge: edgeBuildSpec, mail: mailBuildSpec, buildkit: buildKitBuildSpec }[kind]();
   // No checkout to build from → prod / compiled install. The adapters gate pulls the
   // published tag; this returns without touching any daemon.
   if (!spec) return { delivered: false };
@@ -57,7 +59,7 @@ export async function deliverManagedImage(
   // (1) The content-derived tag is already present → the box is already on this exact
   // source. Skipping here keeps a per-reconcile deliver from re-shipping + rebuilding
   // unchanged source on every deploy.
-  if (await imageExistsLocally(targetExecutor, image).catch(() => false)) {
+  if (await imageExistsLocally(targetExecutor, image).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/lib/deliver-managed-image"); return false; })) {
     return { delivered: true };
   }
 
@@ -67,7 +69,7 @@ export async function deliverManagedImage(
   // (2) Is the checkout readable on the target itself? True for the self/local control
   // plane and a "This Machine" server row (same filesystem); false for a remote box.
   const dockerfileOnTarget = posix.join(spec.context, spec.dockerfile);
-  if (await targetExecutor.exists(dockerfileOnTarget).catch(() => false)) {
+  if (await targetExecutor.exists(dockerfileOnTarget).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/lib/deliver-managed-image"); return false; })) {
     await buildImage(targetExecutor, image, spec, onLog, kind);
     return { delivered: true };
   }
@@ -87,7 +89,9 @@ export async function deliverManagedImage(
       kind,
     );
   } finally {
-    await targetExecutor.rm(remoteContext).catch(() => {});
+    await targetExecutor.rm(remoteContext).catch((diagnosticFailure) => {
+      observeCaughtError(diagnosticFailure, "platform/engine/lib/deliver-managed-image");
+    });
   }
   return { delivered: true };
 }

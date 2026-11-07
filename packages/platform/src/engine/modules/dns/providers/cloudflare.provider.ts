@@ -1,3 +1,4 @@
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 /**
  * Cloudflare DNS provider.
  *
@@ -6,6 +7,7 @@
  * zone-scoped.
  */
 
+import { cloudflareRequest, CloudflareApiError } from "../../../lib/cloudflare-api";
 import type {
   DnsProvider,
   DnsProviderCredentials,
@@ -20,8 +22,7 @@ import {
   OPENSHIP_RECORD_COMMENT,
   isOpenshipManaged,
 } from "../types";
-
-const CF_API_BASE = "https://api.cloudflare.com/client/v4";
+import { quotedDnsTxt } from "../../../lib/dns-txt";
 
 /** Cloudflare's max page size for DNS record lists. */
 const PER_PAGE = 100;
@@ -43,20 +44,13 @@ const MAX_PAGES = 50;
  */
 const MAX_ZONE_CANDIDATES = 8;
 
-interface CfResponse<T> {
-  success: boolean;
-  errors: Array<{ code: number; message: string }>;
-  messages: string[];
-  result: T;
-  result_info?: { page: number; per_page: number; count: number; total_count: number; total_pages: number };
-}
-
 interface CfTokenVerifyResult {
   id: string;
   status: string;
 }
 
 interface CfZoneItem {
+  account?: {id:string};
   id: string;
   name: string;
   status: string;
@@ -74,76 +68,12 @@ interface CfDnsRecordItem {
   comment?: string | null;
 }
 
-/** api.cloudflare.com should never hang. This runs inline on `POST /domains`:
- *  zone discovery walks up to MAX_ZONE_CANDIDATES suffixes per credential and
- *  then lists+writes once per record, so an unbounded call holds the operator's
- *  request open long past the point their client gave up on it. */
-const CF_FETCH_TIMEOUT_MS = 15_000;
-
-/** Call the Cloudflare REST API, returning the whole envelope. */
-async function cfRequest<T>(
-  apiToken: string,
-  path: string,
-  options: RequestInit = {},
-): Promise<CfResponse<T>> {
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${apiToken}`,
-    "Content-Type": "application/json",
-    Accept: "application/json",
-    ...(options.headers as Record<string, string> | undefined),
-  };
-
-  // The deadline covers reading the body, not just the handshake: a response that
-  // never finishes streaming stalls the caller exactly like one that never arrives.
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), CF_FETCH_TIMEOUT_MS);
-
-  let res: Response;
-  let text: string;
-  try {
-    res = await fetch(`${CF_API_BASE}${path}`, {
-      ...options,
-      headers,
-      signal: controller.signal,
-    });
-    text = await res.text();
-  } catch (err) {
-    // DNS failure, TLS error, connection reset, or our own timeout —
-    // indistinguishable from a 5xx to the caller, and just as transient. 503 keeps
-    // `isTransient` true so the caller reports "couldn't check" rather than "not
-    // managed here".
-    throw new DnsApiError("cloudflare", 503, err instanceof Error ? err.message : String(err));
-  } finally {
-    clearTimeout(timer);
-  }
-
-  let body: CfResponse<T>;
-  try {
-    body = JSON.parse(text) as CfResponse<T>;
-  } catch {
-    throw new DnsApiError(
-      "cloudflare",
-      res.status,
-      `non-JSON response: ${text.slice(0, 150)}`,
-    );
-  }
-
-  if (!res.ok || !body.success) {
-    const detail = body.errors?.map((e) => e.message).filter(Boolean).join(", ");
-    throw new DnsApiError("cloudflare", res.status, detail || `HTTP ${res.status}`);
-  }
-
-  return body;
+/** Preserve the DNS provider's public error contract. */
+async function cfRequest<T>(token:string,path:string,options?:RequestInit) {
+  try { return await cloudflareRequest<T>(token,path,options); }
+  catch (error) { if(error instanceof CloudflareApiError) throw new DnsApiError("cloudflare",error.providerStatus,error.message); throw error; }
 }
-
-/** Call the API and return just the result payload. */
-async function cfFetch<T>(
-  apiToken: string,
-  path: string,
-  options: RequestInit = {},
-): Promise<T> {
-  return (await cfRequest<T>(apiToken, path, options)).result;
-}
+async function cfFetch<T>(token:string,path:string,options?:RequestInit):Promise<T> { return (await cfRequest<T>(token,path,options)).result; }
 
 /** Trailing dots and case are not part of a name's identity. */
 function normalizeName(name: string): string {
@@ -184,6 +114,8 @@ function zoneCandidates(hostname: string): string[] {
 export const cloudflareDnsProvider: DnsProvider = {
   name: "cloudflare",
 
+  formatContent(type, content) { return type === "TXT" ? quotedDnsTxt(content) : content; },
+
   descriptor: {
     name: "cloudflare",
     displayName: "Cloudflare",
@@ -209,6 +141,7 @@ export const cloudflareDnsProvider: DnsProvider = {
       }
       return { ok: false, reason: `Cloudflare reports this token as "${result.status}".` };
     } catch (err) {
+      observeCaughtError(err, "platform/engine/modules/dns/providers/cloudflare.provider");
       const reason =
         err instanceof DnsApiError && err.isAuthFailure
           ? "Cloudflare rejected this token. Check it was copied in full and has Zone:Read + DNS:Edit."
@@ -226,11 +159,11 @@ export const cloudflareDnsProvider: DnsProvider = {
       // reads as a configuration mistake the operator did not make.
       const zones = await cfFetch<CfZoneItem[]>(
         credentials.apiToken,
-        `/zones?name=${encodeURIComponent(candidate)}&status=active`,
+        `/zones?name=${encodeURIComponent(candidate)}&status=active${credentials.accountId?`&account.id=${encodeURIComponent(credentials.accountId)}`:""}`,
         { method: "GET" },
       );
 
-      const zone = zones?.[0];
+      const zone = zones?.find(zone=>!credentials.accountId || zone.account?.id===credentials.accountId);
       if (zone) {
         return { id: zone.id, name: zone.name, status: zone.status };
       }
@@ -273,6 +206,7 @@ export const cloudflareDnsProvider: DnsProvider = {
     input: DnsRecordInput,
   ): Promise<DnsRecord> {
     const name = normalizeName(input.name);
+    const content = this.formatContent!(input.type, input.content);
     const desiredTtl = input.ttl ?? 1; // 1 = "automatic" in Cloudflare
     const ownMarker = input.comment ?? OPENSHIP_RECORD_COMMENT;
 
@@ -302,7 +236,7 @@ export const cloudflareDnsProvider: DnsProvider = {
       const comment = isOpenshipManaged(target) ? ownMarker : target.comment;
 
       const unchanged =
-        target.content === input.content &&
+        target.content === content &&
         target.proxied === proxied &&
         target.ttl === desiredTtl &&
         (input.priority == null || target.priority === input.priority) &&
@@ -317,7 +251,7 @@ export const cloudflareDnsProvider: DnsProvider = {
           body: JSON.stringify({
             type: input.type,
             name,
-            content: input.content,
+            content,
             ttl: desiredTtl,
             proxied,
             ...(input.priority != null ? { priority: input.priority } : {}),
@@ -338,7 +272,7 @@ export const cloudflareDnsProvider: DnsProvider = {
         body: JSON.stringify({
           type: input.type,
           name,
-          content: input.content,
+          content,
           ttl: desiredTtl,
           proxied: input.proxied ?? false,
           ...(input.priority != null ? { priority: input.priority } : {}),

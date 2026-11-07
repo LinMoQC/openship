@@ -2,15 +2,17 @@
  * Verify signed provider events, deduplicate stable delivery IDs, and refresh
  * the organization from Oblien's current entitlement. Events never grant credits
  * or suspend workspaces locally. Failed synchronization returns 503; provider
- * delivery is best effort, so entitlement polling and the recurring sweep repair it.
+ * delivery retries durably; entitlement polling also refreshes the current state.
+ * Actions events queue a receipt check in their separate prepaid ledger, without
+ * changing the organization's application-server entitlement.
  */
+import { diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 export interface BillingWebhookResponse { status: number; payload: Record<string, unknown> }
-import { db, schema, repos, eq } from "@repo/db";
+import { db, schema, repos, eq, type Database } from "@repo/db";
+import { createAuditEventRepo, createAuditSettingsRepo } from "@repo/db/repos";
 import { safeErrorMessage } from "@repo/core";
 
-import { env } from "@repo/platform/engine/config/env";
-import { sendMail } from "@repo/platform/engine/lib/mail";
-import { audit } from "@repo/platform/engine/lib/audit-emitter";
+import { env, localDashboardUrl } from "@repo/platform/engine/config/env";
 import { notification } from "@repo/platform/engine/lib/notification-dispatcher";
 import * as quotaWrapper from "@repo/platform/engine/modules/billing/billing-oblien-quota";
 import {
@@ -20,6 +22,10 @@ import {
 } from "@repo/platform/engine/modules/billing/oblien-webhook-crypto";
 
 import { OBLIEN_WEBHOOK_EVENTS } from "../../lib/oblien-webhook-config";
+import { observeVerifiedBillingEvent } from "../cloud-analytics/billing";
+import { creditAlertNotification } from "./billing-credit-alert";
+import { findBillingOwnerByNamespace } from "./billing-namespace-owner";
+import { prepareCustomerPaymentEmails } from "../customer-email/payment";
 
 const ROUTED_EVENT_TYPES = new Set<string>(OBLIEN_WEBHOOK_EVENTS);
 
@@ -76,95 +82,6 @@ function parseDate(v: unknown): Date | null {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
-/* ───────── Org resolution by namespace ──────────────────────────────────── */
-
-async function findOrgByNamespace(namespace: string): Promise<string | null> {
-  const [row] = await db
-    .select({ id: schema.organization.id })
-    .from(schema.organization)
-    .where(eq(schema.organization.oblienNamespace, namespace))
-    .limit(1);
-  return row?.id ?? null;
-}
-
-/* ───────── Notification helpers ─────────────────────────────────────────── */
-
-async function notifyCreditsLow(orgId: string, usedPercent: number | null): Promise<void> {
-  try {
-    const { resolveOrgOwner } = await import("@repo/platform/engine/lib/org-actor");
-    const owner = await resolveOrgOwner(orgId, "first-member");
-    if (!owner?.user?.email) return;
-
-    const pct = usedPercent != null ? Math.round(usedPercent) : 80;
-    await sendMail({
-      to: owner.user.email,
-      subject: `You've used ${pct}% of this period's credits`,
-      html: `
-        <p>Hi ${owner.user.name ?? "there"},</p>
-        <p>Your workspace has used <strong>${pct}%</strong> of this period's credit allowance.</p>
-        <p>To avoid interruption when the cap is reached, you can top up or upgrade your plan at any time from the billing page.</p>
-        <p>— Openship</p>
-      `,
-      text: `Your workspace has used ${pct}% of this period's credit allowance. Top up or upgrade from the billing page to avoid interruption.`,
-      organizationId: orgId,
-    });
-  } catch (err) {
-    console.warn(
-      `[oblien-webhook] notifyCreditsLow failed for org ${orgId}: ${safeErrorMessage(err)}`,
-    );
-  }
-}
-
-async function notifyQuotaThreshold(
-  orgId: string,
-  data: OblienWebhookData,
-): Promise<void> {
-  const pct = num(data.percent) ?? num(data.threshold) ?? null;
-  try {
-    const { resolveOrgOwner } = await import("@repo/platform/engine/lib/org-actor");
-    const owner = await resolveOrgOwner(orgId, "first-member");
-    if (owner?.user?.email) {
-      const pctLabel = pct != null ? `${Math.round(pct)}%` : "a";
-      const detail =
-        num(data.used) != null && num(data.limit) != null
-          ? `<p>Used <strong>${data.used}</strong> of <strong>${data.limit}</strong> credits.</p>`
-          : "";
-      await sendMail({
-        to: owner.user.email,
-        subject: `Credit usage crossed ${pctLabel} of your quota`,
-        html: `
-          <p>Hi ${owner.user.name ?? "there"},</p>
-          <p>Your workspace has crossed the <strong>${pctLabel}</strong> usage threshold for this period.</p>
-          ${detail}
-          <p>Top up or upgrade from the billing page to avoid interruption when the cap is reached.</p>
-          <p>— Openship</p>
-        `,
-        text: `Your workspace crossed the ${pctLabel} usage threshold this period. Top up or upgrade from the billing page to avoid interruption.`,
-        organizationId: orgId,
-      });
-    }
-  } catch (err) {
-    console.warn(
-      `[oblien-webhook] notifyQuotaThreshold failed for org ${orgId}: ${safeErrorMessage(err)}`,
-    );
-  }
-
-  notification.emit({
-    organizationId: orgId,
-    eventType: "quota.threshold_fired",
-    resourceType: "organization",
-    resourceId: orgId,
-    payload: {
-      percent: pct,
-      used: num(data.used),
-      limit: num(data.limit),
-      service: typeof data.service === "string" ? data.service : null,
-    },
-  });
-}
-
-/* ───────── Per-event handlers ───────────────────────────────────────────── */
-
 /**
  * Refresh the org's usage snapshot. Credit fields are converted Oblien-credit
  * → milli (the openship internal unit) via the quota wrapper's single boundary
@@ -174,10 +91,11 @@ async function notifyQuotaThreshold(
 async function handleCreditsUsage(
   orgId: string,
   payload: OblienWebhookPayload,
+  currentBalance: number | null,
 ): Promise<void> {
   const d = payload.data ?? {};
   const u = d.usage ?? {};
-  const balance = num(d.balance);
+  const balance = currentBalance;
   const creditsUsed = num(d.credits_used);
   await repos.billingUsageSnapshot.upsert({
     organizationId: orgId,
@@ -192,54 +110,10 @@ async function handleCreditsUsage(
   });
 }
 
-/**
- * Depletion is INFORMATIONAL on our side. Oblien has already stopped the
- * namespace's workspaces via `onOverdraftAction: "stop_workspaces"` — we do
- * NOT suspend/activate anything (that would just race Oblien). We only record
- * the event + tell the org so they can top up / upgrade. Access is restored
- * automatically by Oblien once a topup/renewal lifts the ceiling above usage.
- */
-async function handleCreditsDepleted(orgId: string): Promise<void> {
-  const org = await repos.organization.findById(orgId);
-  if (!org) return;
-
-  await audit.record(
-    { organizationId: orgId, actorUserId: null, source: "webhook" },
-    {
-      eventType: "billing.credit_exhausted",
-      resourceType: "organization",
-      resourceId: orgId,
-      after: {
-        planTierId: org.planTierId,
-        oblienNamespace: org.oblienNamespace ?? null,
-      },
-    },
-  );
-  notification.emit({
-    organizationId: orgId,
-    eventType: "billing.credit_exhausted",
-    resourceType: "organization",
-    resourceId: orgId,
-    payload: {
-      planTierId: org.planTierId,
-      oblienNamespace: org.oblienNamespace ?? null,
-    },
-  });
-}
-
-async function handleCreditsLow(
-  orgId: string,
-  payload: OblienWebhookPayload,
-): Promise<void> {
-  const usedPercent =
-    num(payload.data?.used_percent) ?? num(payload.data?.threshold_percent);
-  await notifyCreditsLow(orgId, usedPercent);
-}
-
 /* ───────── Persistence helpers ──────────────────────────────────────────── */
 
 async function upsertWebhookEventProcessed(
-  tx: typeof db,
+  tx: Database,
   eventId: string,
   eventType: string,
 ): Promise<void> {
@@ -293,38 +167,94 @@ export async function handleOblienWebhook(
     return { status: 200, payload: { received: true } };
   }
   if (!namespace) return { status: 400, payload: { error: "missing namespace" } };
-  const orgId = await findOrgByNamespace(namespace);
-  if (!orgId) return { status: 200, payload: { received: true } };
-
+  let orgId: string | undefined;
   try {
-    await quotaWrapper.withCloudBillingLock(orgId, async (sync) => {
+    const owner = await findBillingOwnerByNamespace(namespace);
+    if (!owner) return { status: 200, payload: { received: true } };
+    const organizationId = orgId = owner.organizationId;
+    if (owner.kind === "management") {
+      const { syncManagementBilling } = await import("./management.service");
+      await syncManagementBilling(organizationId);
+      const enqueue = await prepareCustomerPaymentEmails({ organizationId, namespace, scope: "management", eventType, data: payload.data });
+      await db.transaction(async transaction => {
+        const tx = transaction as unknown as Database;
+        if (enqueue) await enqueue(tx);
+        await upsertWebhookEventProcessed(tx, eventId, eventType);
+      });
+      return { status: 200, payload: { received: true } };
+    }
+    if (owner.kind === "actions") {
+      // Actions funding is independent of a customer's monthly server. Only
+      // enqueue a fresh receipt check; event amounts never grant retail funds.
+      if (["payment.succeeded", "entitlement.changed"].includes(eventType) &&
+        (payload.data?.kind == null || payload.data.kind === "topup")) {
+        const { queueActionsPaymentCheck } = await import("../actions/billing-application");
+        const metadata = payload.data?.metadata;
+        const purchaseId = metadata && typeof metadata === "object" && !Array.isArray(metadata)
+          ? (metadata as Record<string, unknown>).orderId : undefined;
+        await queueActionsPaymentCheck(organizationId, {
+          eventId, eventType,
+          checkoutId: typeof payload.data?.checkoutId === "string" ? payload.data.checkoutId : undefined,
+          purchaseId: typeof purchaseId === "string" ? purchaseId : undefined,
+        });
+      } else {
+        await upsertWebhookEventProcessed(db, eventId, eventType);
+      }
+      return { status: 200, payload: { received: true } };
+    }
+    await quotaWrapper.withCloudBillingLock(organizationId, async (sync) => {
       const [existing] = await db.select({ processedAt: schema.oblienWebhookEvent.processedAt })
         .from(schema.oblienWebhookEvent)
         .where(eq(schema.oblienWebhookEvent.oblienEventId, eventId)).limit(1);
-      if (existing?.processedAt) return;
+      if (existing?.processedAt) {
+        await observeVerifiedBillingEvent(organizationId, eventType, payload.data, payload.timestamp);
+        return;
+      }
       // Every relevant notification refreshes provider truth. In particular,
       // old payment/suspension events cannot revert a newer paid entitlement.
-      const { entitlement } = await sync();
-      switch (eventType) {
-        case "credits.usage":
-          await handleCreditsUsage(orgId, payload);
-          break;
-        case "credits.depleted":
-        case "namespace.suspended":
-          if (entitlement.status === "credit_exhausted") await handleCreditsDepleted(orgId);
-          break;
-        case "credits.low":
-          await handleCreditsLow(orgId, payload);
-          break;
-        case "namespace.quota.threshold":
-          await notifyQuotaThreshold(orgId, payload.data ?? {});
-          break;
-      }
-      // Stamp only after the mirror succeeds. A failed read remains retryable.
-      await upsertWebhookEventProcessed(db, eventId, eventType);
-    });
+      const { entitlement, tier } = await sync({ syncResourceLimits: false });
+      if (entitlement.namespace !== namespace) throw new Error("Billing namespace changed during delivery");
+      // This historical display cache belongs to the old organization namespace.
+      // Workspace billing reads its own provider usage; never overwrite siblings.
+      if (eventType === "credits.usage" && !owner.workspaceId) await handleCreditsUsage(organizationId, payload, entitlement.quota.balance);
+      const alert = creditAlertNotification({ eventType, eventId, data: payload.data ?? {},
+        timestamp: payload.timestamp, organizationId, workspaceId: owner.workspaceId ?? undefined, entitlement, dashboardUrl: localDashboardUrl });
+      await observeVerifiedBillingEvent(organizationId, eventType, payload.data, payload.timestamp);
+      const enqueue = alert ? await notification.prepare(alert) : null;
+      const enqueueEmail = await prepareCustomerPaymentEmails({ organizationId, namespace, scope: "hosting",
+        workspaceId: owner.workspaceId, eventType, data: payload.data });
+      // No email is sent while holding this transaction. The receiver only ACKs
+      // once notifications, the exhaustion activity, and its checkpoint commit together.
+      await db.transaction(async transaction => {
+        const tx = transaction as unknown as Database;
+        if (enqueue) await enqueue(tx);
+        if (enqueueEmail) await enqueueEmail(tx);
+        if (alert?.eventType === "billing.credit_exhausted") {
+          await createAuditEventRepo(tx, createAuditSettingsRepo(tx)).create({
+            organizationId,
+            actorUserId: null,
+            eventType: alert.eventType,
+            resourceType: "organization",
+            resourceId: organizationId,
+            source: "webhook",
+            after: { planTierId: tier, oblienNamespace: namespace, sourceEventId: eventId },
+          });
+        }
+        await upsertWebhookEventProcessed(tx, eventId, eventType);
+      });
+    }, owner.workspaceId);
+    if (await repos.managementBilling.get(organizationId)) {
+      const { syncManagementBilling } = await import("./management.service");
+      await syncManagementBilling(organizationId);
+    }
+    if (owner.workspaceId) {
+      const { reconcileWorkspaceSubscriptionChange } = await import("./billing-plan-change");
+      await reconcileWorkspaceSubscriptionChange(organizationId, owner.workspaceId);
+      const { requestPaidWorkspaceProvisioning } = await import("../cloud-workspaces/cloud-workspace.service");
+      await requestPaidWorkspaceProvisioning(organizationId, owner.workspaceId);
+    }
   } catch (error) {
-    console.warn(`[oblien-webhook] synchronization failed for org ${orgId}: ${safeErrorMessage(error)}`);
+    errorDiagnostics.warn("platform/engine/modules/billing/oblien-webhook.service", `[oblien-webhook] synchronization failed for ${orgId ? `org ${orgId}` : `namespace ${namespace}`}: ${safeErrorMessage(error)}`, error);
     return { status: 503, payload: { error: "Billing synchronization temporarily unavailable" } };
   }
   return { status: 200, payload: { received: true } };

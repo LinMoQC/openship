@@ -1,3 +1,4 @@
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { SYSTEM, currentMailCertificateHealth, mailHostname } from "@repo/core";
 /**
  * @module issues
@@ -53,7 +54,9 @@ import {
   type ContainerIssue,
 } from "@repo/platform/engine/modules/system/server-containers.service";
 import { listOrganizationUpdates } from "@repo/platform/engine/modules/updates/updates.service";
+import { gitopsReleaseAttention } from "@repo/platform/engine/modules/updates/gitops-attention";
 import { desktopNetworkDisconnected } from "../../lib/desktop-network";
+import { isNetworkUnavailableError } from "../../lib/remote-state";
 import { nativeJobsEnabled } from "../../native/execution-policy";
 import { releaseUpdateStatus } from "./release-update-status";
 
@@ -319,6 +322,7 @@ const PENDING_TAB: Record<PendingActionKind, string> = {
   partial_decision: "deployments",
   port_advisory: "deployments",
   routing_unsynced: "domains",
+  runtime_health: "health",
   domain_unverified: "domains",
   ssl_error: "domains",
   routing_rules_dropped: "domains",
@@ -390,6 +394,7 @@ function updateIssue(row: UpdateRow): SystemIssue {
       currentLabel: row.currentLabel,
       latestLabel: row.latestLabel,
       latestInProgress: row.latestInProgress,
+      inProgressDeploymentId: row.inProgressDeploymentId,
       selfUpdate: isSelf,
       gitops,
       releaseState: row.detail?.releaseState,
@@ -403,7 +408,11 @@ function updateIssue(row: UpdateRow): SystemIssue {
       name: row.name,
       // Where the CLI command actually lives (`UpdatesTab`), not the project page
       // whose Update button would 403.
-      href: isSelf ? "/settings?tab=instance" : `/projects/${row.projectId}${gitops ? "/release" : ""}`,
+      href: isSelf
+        ? "/settings?tab=instance"
+        : row.inProgressDeploymentId
+          ? `/build/${row.inProgressDeploymentId}`
+          : `/projects/${row.projectId}${gitops ? "/release" : ""}`,
     },
     resolveWith: isSelf || gitops
       ? []
@@ -422,7 +431,6 @@ function updateIssue(row: UpdateRow): SystemIssue {
  * domain and update rows and no hint that servers exist.
  */
 async function canSeeInfra(ctx: RequestContext): Promise<boolean> {
-  if (env.CLOUD_MODE) return false;
   return checkPermissionOnResource(ctx, {
     resourceType: "server",
     resourceId: "*",
@@ -466,38 +474,60 @@ export async function listOrganizationIssues(
   });
   const [incidents, components, behind, pending, updates, names, mailServers, renewalJob] = await Promise.all([
     infra
-      ? repos.serviceIncident.listByOrg(organizationId, { status: "open" }).catch(() => [])
+      ? repos.serviceIncident.listByOrg(organizationId, { status: "open" }).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/issues/issues.service"); return []; })
       : Promise.resolve([]),
-    infra ? loadOrgContainerIssues(organizationId).catch(() => null) : Promise.resolve(null),
+    infra ? loadOrgContainerIssues(organizationId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/issues/issues.service"); return null; }) : Promise.resolve(null),
     infra
-      ? repos.serverContainerStatus.listBehindByOrg(organizationId).catch(() => [])
+      ? repos.serverContainerStatus.listBehindByOrg(organizationId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/issues/issues.service"); return []; })
       : Promise.resolve([]),
-    getOrgPendingActions(organizationId).catch(() => new Map<string, PendingAction[]>()),
-    listOrganizationUpdates(ctx).catch(() => []),
+    getOrgPendingActions(organizationId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/issues/issues.service"); return new Map<string, PendingAction[]>(); }),
+    listOrganizationUpdates(ctx, { behindOnly: true }).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/issues/issues.service"); return []; }),
     loadNames(organizationId),
-    mailVisible ? repos.mailServer.listByOrganization(organizationId).catch(() => []) : Promise.resolve([]),
-    mailVisible ? repos.job.findByKey("ssl:renew").catch(() => null) : Promise.resolve(null),
+    mailVisible ? repos.mailServer.listByOrganization(organizationId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/issues/issues.service"); return []; }) : Promise.resolve([]),
+    mailVisible ? repos.job.findByKey("ssl:renew").catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/issues/issues.service"); return null; }) : Promise.resolve(null),
   ]);
 
   const issues: SystemIssue[] = [];
 
-  if (infra && desktopNetworkDisconnected()) {
+  const visibleIncidents: ServiceIncident[] = [];
+  for (const row of incidents) if (await visibleIncident(row)) visibleIncidents.push(row);
+  // The transport's explicit network failure is a gap in observation across
+  // these targets, not evidence of one outage per server. Reuse the persisted
+  // incidents so this survives reloads and clears only after successful reads.
+  // Authorization precedes aggregation: even the count must not reveal a server.
+  const networkIncidents = visibleIncidents.filter(
+    (row) => row.kind === "server_unreachable" && isNetworkUnavailableError(row.reason),
+  );
+  const observerOffline = infra && desktopNetworkDisconnected();
+  if (observerOffline || networkIncidents.length > 0) {
     issues.push({
       id: "platform:monitoring-offline",
       kind: "monitoring_offline",
       severity: "action_required",
       scope: "platform",
       source: "component",
-      title: "This desktop is offline",
-      message: "The machine running Openship has no active network connection. Remote server health cannot be checked. Reconnect, then recheck monitoring.",
-      target: { scope: "platform", id: "desktop", name: "Openship", href: "/monitoring" },
+      title: "Openship",
+      message: "Openship cannot establish a network connection to the affected servers. Their current service health is unknown. Restore the connection, then recheck monitoring.",
+      details: {
+        connectionIssue: true,
+        observerOffline,
+        affectedServers: networkIncidents.map((row) => ({
+          id: row.serverId,
+          name: names.server.get(row.serverId ?? "") ?? row.serviceName,
+          reason: row.reason,
+        })),
+      },
+      target: { scope: "platform", id: "observer", name: "Openship", href: "/monitoring" },
       resolveWith: [],
     });
   }
 
   // Worst-first at the source level too, so the merge order matches the tiers and
   // ties inside a tier stay stable across polls.
-  for (const row of incidents) if (await visibleIncident(row)) issues.push(incidentIssue(row, names));
+  for (const row of visibleIncidents) {
+    if (networkIncidents.includes(row)) continue;
+    issues.push(incidentIssue(row, names));
+  }
 
   // A box we cannot reach tells us NOTHING about the containers on it — the cached
   // edge/mail rows are just the last thing we saw. Reporting "edge down" next to
@@ -554,10 +584,9 @@ export async function listOrganizationIssues(
 
   for (const row of updates) {
     if (!(await visible("project", row.projectId))) continue;
-    if (!row.behind && !(row.detail?.gitops === true && ["unknown", "blocked", "drift"].includes(String(row.detail?.releaseState)))) continue;
-    // Already deploying the newest version — there is nothing left to act on, and
-    // an "Update" button here is what made pressing it look like it did nothing.
-    if (row.latestInProgress) continue;
+    // Keep the row while its update finishes, including after cutover clears
+    // drift. Every surface can show progress instead of offering another update.
+    if (!row.behind && !row.latestInProgress && !gitopsReleaseAttention(row)) continue;
     issues.push(updateIssue(row));
   }
 
@@ -574,8 +603,8 @@ async function loadNames(organizationId: string) {
     repos.project
       .listByOrganization(organizationId, { perPage: 1000 })
       .then((r) => r.rows)
-      .catch(() => []),
-    repos.server.listByOrganization(organizationId).catch(() => []),
+      .catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/issues/issues.service"); return []; }),
+    repos.server.listByOrganization(organizationId).catch((diagnosticFailure) => { observeCaughtError(diagnosticFailure, "platform/engine/modules/issues/issues.service"); return []; }),
   ]);
   return {
     project: new Map(projects.map((p) => [p.id, p.name])),

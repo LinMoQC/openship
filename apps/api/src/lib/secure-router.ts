@@ -49,6 +49,8 @@ import {
 import { authMiddleware } from "../middleware/auth";
 import { rateLimiterFor } from "../middleware/rate-limiter";
 import { localOnly } from "../middleware/local-only";
+import { requireInstanceAdmin } from "../middleware/instance-admin";
+import { cloudResourceRouter } from "./cloud/resource-router";
 
 export interface SecureRouterOptions {
   /**
@@ -74,9 +76,7 @@ export interface SecureRouterOptions {
    * Every route on this router is self-hosted-only. Prefer this over
    * `r.use("*", localOnly)`: `use` is Hono middleware, so it never reaches the
    * route REGISTRY, and anything reading the registry to decide what a route can
-   * do sees a route that looks universally available. That is how all 11 jobs
-   * tools came to be advertised over MCP on the hosted control plane, where the
-   * jobs router 404s everything.
+   * do would otherwise advertise a tool that cannot run in Cloud.
    *
    * Folded into each registered spec's `localOnly`, so the registry is the single
    * answer to "does this route exist in this mode".
@@ -179,6 +179,9 @@ export function secureRouter<T extends Hono>(
     const authed = !isPublicSpec(mergedSpec) && !(mergedSpec as PermissionSpec).skipAuth;
     const rateLimitPolicy = mergedSpec.rateLimit ?? (authed ? "default-authed" : "default-anon");
     chain.push(rateLimiterFor(rateLimitPolicy));
+    if (!isPublicSpec(mergedSpec) && mergedSpec.instanceAdmin && !mergedSpec.authorizationHandledByOperation) {
+      chain.push(requireInstanceAdmin());
+    }
     chain.push(
       isPublicSpec(mergedSpec)
         ? publicRoute({ reason: mergedSpec.reason })
@@ -192,6 +195,10 @@ export function secureRouter<T extends Hono>(
     if (!isPublicSpec(mergedSpec) && (mergedSpec as PermissionSpec).body &&
         !(mergedSpec as PermissionSpec).bodyValidatedByOperation) {
       chain.push(tbValidator("json", (mergedSpec as PermissionSpec).body!));
+    }
+    if (!isPublicSpec(mergedSpec)) {
+      const gateway = cloudResourceRouter(`${basePath}${path}`, mergedSpec);
+      if (gateway) chain.push(gateway);
     }
     chain.push(...handlers);
 

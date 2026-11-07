@@ -32,6 +32,7 @@ import {
   TRANSFER_CONTROL_BODY_BYTES,
 } from "./data-transfer/chunk-store";
 import * as systemHealth from "./system-health.controller";
+import { createLocalCliSession } from "./local-cli.controller";
 
 const r = secureRouter(new Hono(), {
   module: "system",
@@ -59,6 +60,7 @@ r.public("get", "/setup", { reason: "Electron desktop client setup read - protec
 r.public("get", "/health", { reason: "CLI `openship doctor` — internal-token gated deep health rollup (DB liveness/migrations + project/service counts); the public /api/health is only a liveness stub" }, internalAuth, systemHealth.systemHealth);
 r.public("post", "/bootstrap-admin", { reason: "CLI first-admin creation — internal-token gated, one-shot before any admin exists (openship setup)" }, internalAuth, setup.bootstrapAdmin);
 r.public("post", "/reset-admin-password", { reason: "CLI password recovery — internal-token gated; resets the local admin login for a locked-out operator (openship reset-admin-password)" }, internalAuth, setup.resetAdminPassword);
+r.public("post", "/cli-session", { reason: "CLI on the installation host — requires the private internal token, refuses Cloud and browser callers, and creates a temporary session for the existing instance administrator" }, internalAuth, createLocalCliSession);
 r.public(
   "post",
   "/invite-signup",
@@ -133,11 +135,11 @@ r.delete("/servers/:id/github", { tag: "server:write", authorizationHandledByOpe
 // The `settings:*` tag admits plain members (lib/permission.ts discards the
 // action half), and requireRole("owner") would NOT help — see the middleware's
 // header for why an org-scoped role can't gate a whole-instance operation.
-r.post("/migration/preflight", { tag: "settings:admin", mcpExcluded: "Instance control-plane/team-mode migration uses a browser session and changes the instance identity. Use Settings → Team mode; application migration has dedicated /api/migration MCP tools." }, requireInstanceAdmin(), migration.preflight);
-r.post("/migration/start", { tag: "settings:admin", mcpExcluded: "Instance control-plane/team-mode migration uses a browser session and changes the instance identity. Use Settings → Team mode; application migration has dedicated /api/migration MCP tools." }, requireInstanceAdmin(), migration.start);
-r.post("/migration/start-cloud", { tag: "settings:admin", mcpExcluded: "Instance control-plane/team-mode migration uses a browser session and changes the instance identity. Use Settings → Team mode; application migration has dedicated /api/migration MCP tools." }, requireInstanceAdmin(), migration.startCloud);
-r.post("/migration/start-tunnel", { tag: "settings:admin", mcpExcluded: "Instance control-plane/team-mode migration uses a browser session and changes the instance identity. Use Settings → Team mode; application migration has dedicated /api/migration MCP tools." }, requireInstanceAdmin(), migration.startTunnel);
-r.post("/migration/switch-back", { tag: "settings:admin", mcpExcluded: "Instance control-plane/team-mode migration uses a browser session and changes the instance identity. Use Settings → Team mode; application migration has dedicated /api/migration MCP tools." }, requireInstanceAdmin(), migration.switchBack);
+r.post("/migration/preflight", { tag: "settings:admin", mcpExcluded: "Instance control-plane/team-mode migration uses a browser session and changes the instance identity. Use Settings → Instance → Instance location; application migration has dedicated /api/migration MCP tools." }, requireInstanceAdmin(), migration.preflight);
+r.post("/migration/start", { tag: "settings:admin", mcpExcluded: "Instance control-plane/team-mode migration uses a browser session and changes the instance identity. Use Settings → Instance → Instance location; application migration has dedicated /api/migration MCP tools." }, requireInstanceAdmin(), migration.start);
+r.post("/migration/start-cloud", { tag: "settings:admin", mcpExcluded: "Instance control-plane/team-mode migration uses a browser session and changes the instance identity. Use Settings → Instance → Instance location; application migration has dedicated /api/migration MCP tools." }, requireInstanceAdmin(), migration.startCloud);
+r.post("/migration/start-tunnel", { tag: "settings:admin", mcpExcluded: "Instance control-plane/team-mode migration uses a browser session and changes the instance identity. Use Settings → Instance → Instance location; application migration has dedicated /api/migration MCP tools." }, requireInstanceAdmin(), migration.startTunnel);
+r.post("/migration/switch-back", { tag: "settings:admin", mcpExcluded: "Instance control-plane/team-mode migration uses a browser session and changes the instance identity. Use Settings → Instance → Instance location; application migration has dedicated /api/migration MCP tools." }, requireInstanceAdmin(), migration.switchBack);
 
 /* ── Instance and project data export / import (instance-admin only) ─────
  * This moves the entire database including every org's data, and export
