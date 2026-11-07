@@ -90,6 +90,8 @@ describe("parseRsyncProgress", () => {
   test("extracts cumulative bytes from an --info=progress2 line", () => {
     expect(parseRsyncProgress("      1,234,567  12%  1.23MB/s    0:00:05")).toBe(1234567);
     expect(parseRsyncProgress("  512  100%  0.50MB/s    0:00:00 (xfr#1, to-chk=0/1)")).toBe(512);
+    expect(parseRsyncProgress("             47B 100%   47.0KB/s    0:00:00 (xfr#1, to-chk=0/2)")).toBe(47);
+    expect(parseRsyncProgress("          1.50MB  12%    3.00MB/s    0:00:05")).toBe(1572864);
   });
   test("returns null for non-progress lines", () => {
     expect(parseRsyncProgress("sending incremental file list")).toBeNull();

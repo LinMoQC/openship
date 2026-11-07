@@ -303,12 +303,15 @@ export class PathMissingError extends Error {
 }
 
 /** Parse an `rsync --info=progress2` line → cumulative bytes transferred, or
- *  null for a non-progress line. Format: "  1,234,567  12%  1.23MB/s  0:00:05". */
+ *  null for a non-progress line. Older rsync prints raw byte counts
+ *  ("  1,234,567  12%  1.23MB/s  0:00:05"); newer builds print sizes with a
+ *  unit ("  47B 100%", "  1.23MB  12%"). Unit sizes are approximate. */
+const RSYNC_UNITS: Record<string, number> = { "": 1, K: 1024, M: 1024 ** 2, G: 1024 ** 3, T: 1024 ** 4, P: 1024 ** 5 };
 export function parseRsyncProgress(line: string): number | null {
-  const m = line.match(/^\s*([\d,]+)\s+\d+%/);
+  const m = line.match(/^\s*([\d,]+(?:\.\d+)?)([KMGTP]?)(?:i?B)?\s+\d+%/i);
   if (!m) return null;
-  const n = Number(m[1]!.replace(/,/g, ""));
-  return Number.isFinite(n) ? n : null;
+  const n = Number(m[1]!.replace(/,/g, "")) * RSYNC_UNITS[m[2]!.toUpperCase()]!;
+  return Number.isFinite(n) ? Math.round(n) : null;
 }
 
 /** Build the rsync command for one path move (direction decides which end
