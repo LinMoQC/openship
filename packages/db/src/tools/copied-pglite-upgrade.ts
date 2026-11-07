@@ -53,7 +53,7 @@ export async function verifyCopiedPgliteUpgrade(input: Input) {
     const wrong = createEncryption("isolated-drill-deliberately-wrong-encryption-key");
     let wrongKeyRejected = false;
     try { await createConfigurationSecretsRepo(connection.db, wrong).assertReadable(); }
-    catch { wrongKeyRejected = true; }
+    catch { /* diagnostics-ignore: rejection is the expected result */ wrongKeyRejected = true; }
     finally { wrong.close(); }
     if (!wrongKeyRejected) throw new Error("Copied database has no validated ciphertext; wrong-key rejection is unproven");
     const migrations = Number((await connection.db.execute(sql`select count(*)::int as count from drizzle.__drizzle_migrations`)).rows[0]!.count);
@@ -66,7 +66,7 @@ export async function verifyCopiedPgliteUpgrade(input: Input) {
     await connection.close(); connection = undefined;
     let targetRejectedOldSnapshot = false, targetAcceptedCompatibleSnapshot = false;
     try { connection = await open(restored, input.targetMigrationsDirectory, "verify"); }
-    catch { targetRejectedOldSnapshot = true; }
+    catch { /* diagnostics-ignore: rejection is the expected result */ targetRejectedOldSnapshot = true; }
     if (migrationDelta > 0 && !targetRejectedOldSnapshot) throw new Error("Target schema verifier accepted a snapshot with pending migrations");
     if (migrationDelta === 0) {
       if (targetRejectedOldSnapshot || !connection || (await snapshot(connection.db, before.fields)).fingerprint !== before.fingerprint) throw new Error("Compatible target cannot verify the unchanged snapshot and original key");
@@ -80,5 +80,9 @@ if (process.argv[2] === "--drill") {
   try {
     const input: Input = JSON.parse(await readFile(process.argv[3]!, "utf8"));
     console.log(JSON.stringify(await verifyCopiedPgliteUpgrade(input)));
-  } catch { console.error("Isolated copied-platform migration/encryption/restore verification failed"); process.exitCode = 1; }
+  } catch {
+    // diagnostics-ignore: the drill reports only a fixed verdict; private database errors stay on the host.
+    process.stderr.write("Isolated copied-platform migration/encryption/restore verification failed\n");
+    process.exitCode = 1;
+  }
 }

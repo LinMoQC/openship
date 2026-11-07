@@ -1,3 +1,4 @@
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import YAML from "yaml";
 import { createHash } from "node:crypto";
 import { AppError } from "@repo/core";
@@ -99,7 +100,7 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
       const d = typeof receipt.deploymentId === "string" ? await repos.deployment.findById(receipt.deploymentId) : null;
       if (receipt.status !== "accepted" || receipt.environment !== "preview" || receipt.manifestCommit !== commit || releaseHash(receipt.manifest) !== releaseHash(manifest) || p?.organizationId !== ctx.organizationId || p.environmentType !== "preview" || p.activeDeploymentId !== d?.id || d?.status !== "ready" || d.commitSha !== commit) fail("PRT acceptance is missing, stale or no longer active");
       check("prt.acceptance", "PRT 验收回执", "pass", "准确清单已验收且仍是活动部署");
-    } catch { check("prt.acceptance", "PRT 验收回执", "unknown", "未取得仍有效的准确目标验收回执"); }
+    } catch (inspectionFailure) { observeCaughtError(inspectionFailure, "platform/releases/inspector"); check("prt.acceptance", "PRT 验收回执", "unknown", "未取得仍有效的准确目标验收回执"); }
     const policy = JSON.parse(await githubFile(ctx, b, "config/production-operators.json", main.sha)) as { mode: string; operators: string[] };
     check("production.operators", "生产操作人策略", policy.mode === "manual-dispatch" && policy.operators?.length > 0 ? "pass" : "fail", "生产工作流会再次验证当前用户与重跑操作人");
   } else {
@@ -157,9 +158,9 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
   const rawCompose = renderGitopsCompose(template, stack, manifest);
   const target: ReleaseTarget = { action: configuration ? "configure" : verification ? "verify" : rollback ? "rollback" : "release", workflowSha: main.sha, manifestCommit: commit, manifestHash: manifestHash(manifest), configurationHash, releaseId: manifest.releaseId, images, ossGitSha: manifest.ossGitSha ?? null, services: [...new Set(selected)].sort(), eventKey, acceptedReceipt, manifest };
   const env: Record<string, string> = {};
-  for (const row of await repos.project.listEnvVars(project.id, b.environment, null)) { try { env[row.key] = decrypt(row.value); } catch { fail("Saved environment configuration cannot be decrypted"); } }
+  for (const row of await repos.project.listEnvVars(project.id, b.environment, null)) { try { env[row.key] = decrypt(row.value); } catch (inspectionFailure) { observeCaughtError(inspectionFailure, "platform/releases/inspector"); fail("Saved environment configuration cannot be decrypted"); } }
   let parsed: ReturnType<typeof parseComposeFile>;
-  try { parsed = parseComposeFile(rawCompose, { env }); } catch { fail("Compose configuration cannot be parsed"); }
+  try { parsed = parseComposeFile(rawCompose, { env }); } catch (inspectionFailure) { observeCaughtError(inspectionFailure, "platform/releases/inspector"); fail("Compose configuration cannot be parsed"); }
   Object.assign(images, selectedImageExpectations(images, parsed!.services, selected));
   check("environment", "必需环境变量", parsed!.missingRequired.length ? "fail" : "pass", parsed!.missingRequired.length ? `缺少 ${parsed!.missingRequired.map(x => x.variable).join("、")}` : "必需变量已配置，值仅在服务器内解析");
   checks.push(...checkReleaseEnvironment(stack.releaseChecks?.environmentGroups ?? [], env));
@@ -184,7 +185,7 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
       try {
         const hashes = await inspectBoundHostConfiguration(runtime, b.stack, stack.hostConfig);
         check("configuration.files", "服务器配置文件", releaseHash(hashes) === releaseHash(stack.hostConfig.files) ? "pass" : "fail", "逐项核对准确配置目录内的文件内容摘要，仅显示验证状态");
-      } catch { check("configuration.files", "服务器配置文件", "unknown", "服务器配置路径或文件内容摘要无法确认"); }
+      } catch (inspectionFailure) { observeCaughtError(inspectionFailure, "platform/releases/inspector"); check("configuration.files", "服务器配置文件", "unknown", "服务器配置路径或文件内容摘要无法确认"); }
     }
     const savedRows = await repos.service.listByDeployment(active.id);
     const actualImages = { ...actualManifest?.services, ...actualManifest?.infrastructure };
@@ -194,7 +195,7 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
     const targetTopology = parsed.missingRequired.length ? null : await releaseTopologyVerifier(ctx, b, active, parsed, deployedRows);
     let topology: Awaited<ReturnType<typeof releaseTopologyVerifier>> | null = null;
     try { topology = await releaseTopologyVerifier(ctx, b, active, undefined, deployedRows); }
-    catch { check("runtime.topology", "准确部署拓扑", "unknown", "已部署配置、端口、网络或卷归属无法确认"); }
+    catch (inspectionFailure) { observeCaughtError(inspectionFailure, "platform/releases/inspector"); check("runtime.topology", "准确部署拓扑", "unknown", "已部署配置、端口、网络或卷归属无法确认"); }
     let verified = true;
     const converged = new Set<string>(), convergedToTarget = new Set<string>();
     for (const [name, expected] of Object.entries(actualImages)) {
@@ -215,7 +216,7 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
         check(`runtime.${name}`, `${name} 实际容器`, healthy ? "pass" : "fail", healthy ? "运行状态已确认" : "容器停止、不健康或任务未成功完成");
         if (healthy && actual.digest === expected.digest) converged.add(name);
         if (healthy && actual.digest === images[name]?.digest) convergedToTarget.add(name);
-      } catch { verified = false; check(`runtime.${name}`, `${name} 实际容器`, "unknown", "主机或镜像摘要无法确认"); }
+      } catch (inspectionFailure) { observeCaughtError(inspectionFailure, "platform/releases/inspector"); verified = false; check(`runtime.${name}`, `${name} 实际容器`, "unknown", "主机或镜像摘要无法确认"); }
     }
     current.verified = verified && actualManifest !== null;
     const oldTemplate = active.commitSha ? await githubFile(ctx, b, stack.templatePath, active.commitSha) : null;
@@ -270,7 +271,7 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
       // Verify before mutate: acceptance proves untouched tasks only after containers
       // change. Render the incumbent with the same renderer so only real moves differ.
       let incumbent: ReturnType<typeof parseComposeFile>["services"] | null = null;
-      try { incumbent = oldTemplate && oldStack && actualManifest ? parseComposeFile(renderGitopsCompose(oldTemplate, oldStack, actualManifest), { env }).services : null; } catch { incumbent = null; }
+      try { incumbent = oldTemplate && oldStack && actualManifest ? parseComposeFile(renderGitopsCompose(oldTemplate, oldStack, actualManifest), { env }).services : null; } catch (inspectionFailure) { observeCaughtError(inspectionFailure, "platform/releases/inspector"); incumbent = null; }
       const drifted = incumbent ? untouchedTaskDrift({ tasks: rows.filter(s => s.advanced?.runToCompletion === true).map(s => s.name), selected, incumbent: incumbent as unknown as Record<string, unknown>[], target: parsed!.services as unknown as Record<string, unknown>[] }) : null;
       check("task.scope", "范围外的一次性任务", drifted === null ? "unknown" : drifted.length ? "fail" : "pass",
         drifted === null ? "当前版本的任务定义无法解析" : drifted.length ? `${drifted.join("、")} 的定义随目标改变却不在发布范围内，替换容器后验收无法证明它，需加入范围` : "范围外的任务定义与当前版本一致");
@@ -302,11 +303,11 @@ export async function inspectRelease(ctx: ExecutionContext, b: ReleaseBinding, i
             const evidence = JSON.parse(await githubFile(ctx, b, `evidence/${b.stack}/${b.environment}/${image.gitSha}.json`, "release-audit"));
             const valid = migrationEvidenceMatches(evidence, { gitSha: image.gitSha!, digest: image.digest, environment: b.environment, deploymentId: active.id, databaseContainerId: database.containerId, execution }, delta);
             check("migration.evidence", "备份与隔离迁移演练", valid ? "pass" : "fail", valid ? "准确目标、当前数据库与动态迁移清单已有验证依据" : "演练依据不匹配当前数据库、准确目标或迁移清单");
-          } catch { check("migration.evidence", "备份与隔离迁移演练", "unknown", "缺少准确目标的备份、隔离恢复与迁移验证依据"); }
+          } catch (inspectionFailure) { observeCaughtError(inspectionFailure, "platform/releases/inspector"); check("migration.evidence", "备份与隔离迁移演练", "unknown", "缺少准确目标的备份、隔离恢复与迁移验证依据"); }
         }
-      } catch (error) { check("migration.history", "实际数据库迁移记录", error instanceof AppError && ["RELEASE_MIGRATION_POLICY_INVALID", "RELEASE_MIGRATION_LEDGER_INVALID"].includes(error.code ?? "") ? "fail" : "unknown", "目标迁移目录、执行策略或当前数据库记录无法确认"); }
+      } catch (error) { observeCaughtError(error, "platform/releases/inspector"); check("migration.history", "实际数据库迁移记录", error instanceof AppError && ["RELEASE_MIGRATION_POLICY_INVALID", "RELEASE_MIGRATION_LEDGER_INVALID"].includes(error.code ?? "") ? "fail" : "unknown", "目标迁移目录、执行策略或当前数据库记录无法确认"); }
     }
-    for (const [name, image] of Object.entries(images)) { try { await runtime.inspectReleaseImage(`${image.image}@${image.digest}`); check(`image.${name}`, `${name} 镜像`, "pass", "镜像存在、摘要与主机架构匹配，拉取权限有效"); } catch { check(`image.${name}`, `${name} 镜像`, "unknown", "镜像存在性、架构或拉取权限无法确认"); } }
+    for (const [name, image] of Object.entries(images)) { try { await runtime.inspectReleaseImage(`${image.image}@${image.digest}`); check(`image.${name}`, `${name} 镜像`, "pass", "镜像存在、摘要与主机架构匹配，拉取权限有效"); } catch (inspectionFailure) { observeCaughtError(inspectionFailure, "platform/releases/inspector"); check(`image.${name}`, `${name} 镜像`, "unknown", "镜像存在性、架构或拉取权限无法确认"); } }
   } finally { disposeRuntime(runtime); }
   if (!target.services.includes("platform-api")) check("migration", "数据库迁移", "pass", "本次准确服务范围不涉及数据库迁移所属服务");
   if (configuration) check("configuration.target", "仅应用 PRT 配置", current.verified && active.status === "ready" && actualManifest !== null && manifestHash(actualManifest) === target.manifestHash && releaseHash(current.images) === releaseHash(target.images) && current.ossGitSha === target.ossGitSha ? "pass" : "fail", "保留当前准确镜像，只重建明确选择的应用服务；不运行迁移或基础设施任务");

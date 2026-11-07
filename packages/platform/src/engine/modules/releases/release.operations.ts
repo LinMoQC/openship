@@ -1,3 +1,4 @@
+import { diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import { AppError, generateId } from "@repo/core";
 import { repos } from "@repo/db";
 import { DockerRuntime } from "@repo/adapters";
@@ -20,7 +21,7 @@ export const releaseDependencies: ReleaseDependencies = {
     // Acceptance was persisted before cleanup. A restart will retry pending cleanup
     // and must never restore an already accepted release.
     try { await settleReleaseCutovers(run, "commit"); }
-    catch { console.warn(`[release] retained container cleanup pending for ${run.id}`); }
+    catch (cleanupFailure) { errorDiagnostics.warn("platform/releases", `[release] retained container cleanup pending for ${run.id}`, cleanupFailure); }
   },
   recover: recoverReleaseCutovers,
   githubActor: releaseGithubActor, dispatch: dispatchRelease, workflow: releaseWorkflow, reconcile: reconcileRelease,

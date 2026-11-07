@@ -15,7 +15,7 @@ import { triggerManualBackup } from "./triggers/manual";
 import { withBackupRunLock } from "./backup-lock";
 import { presentBackupRun, presentBackupRestore, presentBackupArtifacts } from "./backup.presenters";
 import * as service from "./backup.service";
-import { requireGitopsRelease } from "../releases/release-gate";
+import { requireGitopsRelease } from "../releases/release-ownership";
 
 async function result<T>(work: () => Promise<T>, status = 400): Promise<T> {
   try { return await work(); }

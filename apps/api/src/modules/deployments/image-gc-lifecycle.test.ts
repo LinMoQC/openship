@@ -23,7 +23,7 @@ vi.mock("@repo/platform/engine/lib/active-deployment", () => ({
         },
 }));
 vi.mock("@repo/db", () => ({
-  repos: { deployment: { findLatestByProject: async () => h.latest } },
+  repos: { deployment: { findLatestByProject: async () => h.latest }, releases: { journals: async () => [] } },
 }));
 vi.mock("@repo/platform/engine/lib/deployment-runtime", () => ({
   resolveDeploymentRuntime: async (deployment: Deployment) => {

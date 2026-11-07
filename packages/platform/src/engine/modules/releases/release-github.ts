@@ -49,7 +49,7 @@ export async function githubRead<T>(ctx: ExecutionContext, b: ReleaseBinding, pa
       return value;
     });
     pendingReads.set(key, pending);
-    pending.finally(() => { if (pendingReads.get(key) === pending) pendingReads.delete(key); }).catch(() => {});
+    pending.finally(() => { if (pendingReads.get(key) === pending) pendingReads.delete(key); }).catch(() => { /* diagnostics-ignore: the awaiting caller observes this failure */ });
   }
   return structuredClone(await pending) as T;
 }

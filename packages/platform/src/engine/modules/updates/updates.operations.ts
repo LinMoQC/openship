@@ -1,7 +1,7 @@
 import type { UpdateDependencies } from "../../../updates";
 import { audit, operationAuditContext } from "../../lib/audit-emitter";
 import * as service from "./updates.service";
-import { requireGitopsRelease } from "../releases/release-gate";
+import { requireGitopsRelease } from "../releases/release-ownership";
 import { updateProjectRuntime } from "./runtime-update";
 import { checkProjectRuntimeImages } from "./runtime-image-check";
 import { organizationAdvisories } from "./security-overview";

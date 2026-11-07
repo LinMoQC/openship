@@ -7,7 +7,7 @@ import { resolveEffectiveTarget, type DeploymentMeta } from "../../lib/deploymen
 import { needsDomainSslCheck } from "../../lib/domain-ssl";
 import { platform } from "../../lib/platform-config";
 import { getDomain } from "./domain.service";
-import { requireGitopsRelease } from "../releases/release-gate";
+import { requireGitopsRelease } from "../releases/release-ownership";
 
 /** Reused at operation admission and before detached work mutates the target. */
 export async function domainExecution(ctx: ExecutionContext, id: string, verifying = false) {

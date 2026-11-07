@@ -24,7 +24,7 @@
 import { observedAllSettled, reportCaughtError as observeCaughtError, diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import { findActiveDeployment } from "@repo/platform/engine/lib/active-deployment";
 import crypto from "node:crypto";
-import { requireGitopsRelease } from "../releases/release-gate";
+import { requireGitopsRelease } from "../releases/release-ownership";
 import { repos } from "@repo/db";
 import { isServiceFailureStatus, safeErrorMessage, sanitizeProxySettings } from "@repo/core";
 // The SHARED bounded-concurrency limiter. This module grew a private copy (`runPool`)

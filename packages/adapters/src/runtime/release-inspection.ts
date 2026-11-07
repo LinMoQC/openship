@@ -24,7 +24,7 @@ export function localReleaseImage(ref: string, architecture: string, image: { Re
   const arch = architecture === "x86_64" ? "amd64" : architecture === "aarch64" ? "arm64" : architecture;
   return image.Os === "linux" && image.Architecture === arch && (image.RepoDigests ?? []).some(d => {
     const [name, digest] = d.split("@");
-    try { return !!name && `${canonicalRegistryImage(name).canonical}@${digest}` === wanted; } catch { return false; }
+    try { return !!name && `${canonicalRegistryImage(name).canonical}@${digest}` === wanted; } catch { /* diagnostics-ignore: an unparseable repo digest cannot match */ return false; }
   });
 }
 /** Read-only verification; neither credentials nor registry response bodies cross this boundary. */

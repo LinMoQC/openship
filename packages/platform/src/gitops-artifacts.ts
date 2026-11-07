@@ -1,3 +1,4 @@
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import type { Deployment, Service, ServiceDeployment } from "@repo/db";
 import { releaseHash } from "./releases";
 
@@ -70,7 +71,7 @@ export function composeTaskTreeHash(services: ReadonlyArray<Record<string, unkno
 export function untouchedTaskDrift(input: { tasks: string[]; selected: string[]; incumbent: ReadonlyArray<Record<string, unknown>>; target: ReadonlyArray<Record<string, unknown>> }): string[] {
   return input.tasks.filter(name => !input.selected.includes(name)).filter(name => {
     try { return composeTaskTreeHash(input.incumbent, name) !== composeTaskTreeHash(input.target, name); }
-    catch { return true; }
+    catch { /* diagnostics-ignore: an unreadable task definition counts as drift */ return true; }
   }).sort();
 }
 function deliberatelyExcluded(deployment: ArtifactDeployment, serviceId: string) {
@@ -121,7 +122,7 @@ export async function resolveObservedServiceArtifacts(deployment: ArtifactDeploy
   const unproven: string[] = [];
   for (const name of names) {
     try { resolved = await resolveReleaseServiceArtifacts(deployment, services, resolved, [name], reader); }
-    catch { unproven.push(name); }
+    catch (resolutionFailure) { observeCaughtError(resolutionFailure, "platform/gitops-artifacts"); unproven.push(name); }
   }
   return { rows: resolved, unproven };
 }

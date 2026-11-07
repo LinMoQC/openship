@@ -16,7 +16,7 @@ import { DockerRuntime } from "@repo/adapters";
 import { inspectMigrationExecution } from "./release-migrations";
 import { migrationExecutionMatches } from "../../../gitops-migrations";
 
-export const requireGitopsRelease = (id: string) => requireUnmanagedProject(id, releaseStore.binding);
+export { requireGitopsRelease } from "./release-ownership";
 export async function serverEnvironmentHash(projectId: string, environment: string) {
   const rows = await repos.project.listEnvVars(projectId, environment);
   // Hash encrypted storage, not plaintext values. This opaque stamp invalidates

@@ -1,4 +1,4 @@
-import { requireGitopsRelease } from "../releases/release-gate";
+import { requireGitopsRelease } from "../releases/release-ownership";
 import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { assertCloudProxyScope } from "../../lib/cloud/scope";
 import { AppError, NotFoundError, safeErrorMessage } from "@repo/core";

@@ -1,3 +1,4 @@
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import type Dockerode from "dockerode";
 import { randomUUID } from "node:crypto";
 import { deployDurablePreflightedService, type CutoverPersistence } from "./docker-cutover";
@@ -146,11 +147,10 @@ export async function deployPreflightedService(
       if (incumbent) {
         await incumbent
           .remove({ force: true })
-          .catch(() =>
-            warn(
-              "Healthy replacement is active; retained stopped container cleanup was deferred.\n",
-            ),
-          );
+          .catch((cleanupFailure) => {
+            observeCaughtError(cleanupFailure, "adapters/runtime/docker-preflight");
+            warn("Healthy replacement is active; retained stopped container cleanup was deferred.\n");
+          });
       }
     },
     async rollback() {

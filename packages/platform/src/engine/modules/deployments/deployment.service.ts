@@ -38,7 +38,7 @@ import { livePrimaryContainerId } from "../services/service-container";
 import { decryptEnvMap } from "../../lib/encryption";
 import { mergeServiceDeployEnv } from "./compose/service-env-layers";
 import * as sessionManager from "./session-manager";
-import { requireGitopsRelease } from "../releases/release-gate";
+import { requireGitopsRelease } from "../releases/release-ownership";
 import { planRejectRestore } from "./reject-restore";
 
 /**

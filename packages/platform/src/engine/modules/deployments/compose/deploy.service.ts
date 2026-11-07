@@ -2921,6 +2921,7 @@ async function deployComposeServicesCore(
           try {
             await runtime.waitForServiceCondition(containerId, rule.condition);
           } catch (error) {
+            observeCaughtError(error, "platform/engine/modules/deployments/compose/deploy.service");
             if (!rule.required) continue;
             dependencyFailure = `Required service ${dependency} did not satisfy ${rule.condition}: ${safeErrorMessage(error)}`;
             break;

@@ -15,7 +15,7 @@ import * as dnsChallenge from "./domain-dns-challenge.service";
 import { manageDomainSsl, needsDomainSslCheck } from "../../lib/domain-ssl";
 import { resolveManagedHostname } from "../../lib/routing-domains";
 import { domainExecution } from "./domain-execution";
-import { requireGitopsRelease } from "../releases/release-gate";
+import { requireGitopsRelease } from "../releases/release-ownership";
 import { isCustomerProject } from "../billing/management.service";
 export { domainExecution } from "./domain-execution";
 

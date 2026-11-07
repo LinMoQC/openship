@@ -5404,7 +5404,7 @@ OPENSHIP_BASES_PY`, { timeout: 5_000 });
 
   async inspectReleaseImage(ref: string) {
     const host = await this.docker.info();
-    const local = await this.docker.getImage(ref).inspect().catch(() => null);
+    const local = await this.docker.getImage(ref).inspect().catch(() => { /* diagnostics-ignore: absent locally, inspect the registry */ return null; });
     if (localReleaseImage(ref, host.Architecture, local)) return { digest: ref.split("@")[1]!, architecture: local!.Architecture };
     const auth = this.connectionOptions?.resolveRegistryAuth ? await this.connectionOptions.resolveRegistryAuth(ref) : await resolveDockerAuth(ref);
     return inspectRegistryImage(ref, host.Architecture, auth);

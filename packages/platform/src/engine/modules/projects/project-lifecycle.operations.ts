@@ -1,4 +1,4 @@
-import { requireGitopsRelease } from "../releases/release-gate";
+import { requireGitopsRelease } from "../releases/release-ownership";
 import type { ProjectControlSchemas } from "@repo/contracts";
 import type { ResourceServices } from "../../../resource-operations";
 import type { ProjectDependencies } from "../../../projects";

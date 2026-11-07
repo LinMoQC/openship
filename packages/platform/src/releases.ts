@@ -1,3 +1,4 @@
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { createHash } from "node:crypto";
 import { assertDeploymentsAvailable } from "./deployment-maintenance";
 import {
@@ -143,6 +144,7 @@ export function createReleaseOperations(authorization: Authorization, dependenci
             await deps().store.saveState(data);
             return data;
           } catch (error) {
+            observeCaughtError(error, "platform/releases");
             // Failure time and retry time must not replace the last successful evidence time.
             const failure = releaseInspectionFailure(error);
             const cached = await deps().store.cache(projectId);
@@ -158,7 +160,7 @@ export function createReleaseOperations(authorization: Authorization, dependenci
           }
         })();
         inspections.set(key, pending);
-        pending.finally(() => { if (inspections.get(key) === pending) inspections.delete(key); }).catch(() => {});
+        pending.finally(() => { if (inspections.get(key) === pending) inspections.delete(key); }).catch(() => { /* diagnostics-ignore: the awaiting caller observes this failure */ });
       }
       return { context, data: await pending };
     },
@@ -175,6 +177,7 @@ export function createReleaseOperations(authorization: Authorization, dependenci
         const fresh = await deps().inspect(context, row, {});
         await deps().store.saveState({ binding: row, ...fresh, kind: releaseStateKind(fresh.current, fresh.target, fresh.checks), checkedAt, stale: false, error: null });
       } catch (error) {
+        observeCaughtError(error, "platform/releases");
         const failure = releaseInspectionFailure(error);
         await deps().store.saveState({ binding: row, current: { deploymentId: null, images: {}, configurationHash: null, ossGitSha: null, verified: false }, target: null, checks: [failure], kind: "unknown", checkedAt, stale: true, error: failure.detail });
       }
@@ -221,6 +224,7 @@ export function createReleaseOperations(authorization: Authorization, dependenci
       deps().recordAudit?.(context, plan.projectId, "releaseSubmit", reserved.run.id);
       try { await deps().dispatch(context, b, plan, reserved.run); }
       catch (error) {
+        observeCaughtError(error, "platform/releases");
         // A request timeout does not establish failure. Persist ambiguity and reconcile by run name. Never repeat dispatch.
         const rejected = error instanceof AppError && error.statusCode >= 400 && error.statusCode < 500 && ![408, 429].includes(error.statusCode);
         await deps().store.updateRun(reserved.run.id, { stage: rejected ? "failed" : "dispatch_unknown", error: rejected ? "GitHub rejected workflow submission. Reconnect your account or check repository permissions." : "Workflow submission result is pending confirmation" }, "submitted");
@@ -241,6 +245,7 @@ export function createReleaseOperations(authorization: Authorization, dependenci
           const stage = await deps().recover?.(run, plan) ?? "action_required";
           return { context, data: await deps().store.updateRun(id, { stage, error: stage === "restored" ? "Previous containers were restored and verified" : "Manual recovery or reconciliation is required" }, "recovering") ?? run };
         } catch (error) {
+          observeCaughtError(error, "platform/releases");
           if (error instanceof AppError && error.code === "RELEASE_RECOVERY_PENDING") return { context, data: run };
           return { context, data: await deps().store.updateRun(id, { stage: "action_required", error: "Container recovery could not be verified" }, "recovering") ?? run };
         }
@@ -339,12 +344,13 @@ export function createReleaseOperations(authorization: Authorization, dependenci
         try {
           const fresh = await deps().inspect(context, b, {});
           await deps().store.saveState({ binding: b, ...fresh, kind: releaseStateKind(fresh.current, fresh.target, fresh.checks), checkedAt, stale: false, error: null });
-        } catch { /* Last successful evidence remains stale until the next poll. */ }
+        } catch (refreshFailure) { observeCaughtError(refreshFailure, "platform/releases"); /* Last successful evidence remains stale until the next poll. */ }
       }
       if (input.stage === "recovering") {
         let stage: "restored" | "action_required" = "action_required";
         try { stage = await deps().recover?.(updated!, plan) ?? "action_required"; }
         catch (error) {
+          observeCaughtError(error, "platform/releases");
           if (error instanceof AppError && error.code === "RELEASE_RECOVERY_PENDING")
             return { context, data: updated! };
           // The journal retains failures for manual recovery.

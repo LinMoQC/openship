@@ -1,4 +1,5 @@
 "use client";
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReleaseCheck, ReleasePlan, ReleaseRun, ReleaseStage, ReleaseState } from "@repo/contracts";
 import { Icon, type IconName } from "@repo/ui/icons";
@@ -18,11 +19,11 @@ const volatileSubmissionKeys = new Map<string, string>();
 function submissionKey(planId: string) {
   const name = `openship-release-key:${planId}`;
   let saved: string | null = null;
-  try { saved = sessionStorage.getItem(name); } catch { /* restricted storage */ }
+  try { saved = sessionStorage.getItem(name); } catch { /* diagnostics-ignore: restricted storage falls back to the page key */ }
   const existing = saved ?? volatileSubmissionKeys.get(name);
   if (existing) return existing;
   const key = crypto.randomUUID(); volatileSubmissionKeys.set(name, key);
-  try { sessionStorage.setItem(name, key); } catch { /* retain this page session key */ }
+  try { sessionStorage.setItem(name, key); } catch { /* diagnostics-ignore: restricted storage retains this page session key */ }
   return key;
 }
 export function ReleaseTab() {
@@ -101,7 +102,7 @@ export function ReleaseWorkspace({ projectData, apiClient = releasesApi }: { pro
         setGithubRequired(code === "GITHUB_USER_CONNECTION_REQUIRED" || code === "GITHUB_USER_PERMISSION_REQUIRED");
         setPending(isAbortError(e) || isNetworkError(e)); setError(getApiErrorMessage(e));
         // The backend owns idempotency. Look up the persisted run before offering a retry.
-        try { const latest = await apiClient.latest(id); if (ticket === generation.current && latest.data?.planId === plan.id) { setRun(latest.data); setPending(false); } } catch { /* retain the last confirmed state */ }
+        try { const latest = await apiClient.latest(id); if (ticket === generation.current && latest.data?.planId === plan.id) { setRun(latest.data); setPending(false); } } catch (lookupFailure) { observeCaughtError(lookupFailure, "dashboard/projects/release"); }
       }
     } finally { if (ticket === generation.current) setSubmitting(false); }
   }

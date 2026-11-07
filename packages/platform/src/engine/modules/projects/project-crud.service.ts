@@ -5,7 +5,7 @@ import { isCustomerServer } from "../billing/management.service";
 
 import { reportCaughtError as observeCaughtError, diagnostics as errorDiagnostics } from "@repo/core/diagnostics";
 import { activeDeploymentForProject, findActiveDeployment, listActiveServiceDeployments } from "@repo/platform/engine/lib/active-deployment";
-import { requireGitopsRelease } from "../releases/release-gate";
+import { requireGitopsRelease } from "../releases/release-ownership";
 import { projectReleaseOverview } from "./project-release-overview";
 import {
   repos,

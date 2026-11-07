@@ -247,7 +247,7 @@ const syncCmd = stackCommand("sync")
           ...(opts.releaseRun && { releaseRunId: opts.releaseRun }), ...(opts.manifestCommit && { manifestCommit: opts.manifestCommit }),
         });
         if (isJsonMode()) printJson({ services: rows }); else ok(`  Synced ${rows.length} service(s).`);
-      } catch (e) { rethrowCommandExit(e); fail(e); }
+      } catch (e) { observeCaughtError(e, "cli/commands/service"); rethrowCommandExit(e); fail(e); }
       return;
     }
     // No YAML dependency in the CLI: let Docker Compose parse + interpolate,

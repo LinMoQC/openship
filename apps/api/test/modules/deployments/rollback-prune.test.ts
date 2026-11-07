@@ -49,6 +49,7 @@ const h = vi.hoisted(() => ({
 vi.mock("@repo/db", () => ({
   withAdvisoryLock: async (_key: string, fn: () => Promise<unknown>) => fn(),
   repos: {
+    releases: { journals: async () => [] },
     project: {
       findById: async () => h.project,
       update: async () => {},

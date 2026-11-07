@@ -1,3 +1,4 @@
+import { reportCaughtError as observeCaughtError } from "@repo/core/diagnostics";
 import { DockerRuntime, type ServiceCutoverRecord } from "@repo/adapters";
 import { AppError } from "@repo/core";
 import { repos } from "@repo/db";
@@ -79,6 +80,7 @@ export async function recoverInterruptedReleaseCutovers() {
           const stage = await recoverReleaseCutovers(run, plan);
           await repos.releases.updateRun(id, { stage, error: stage === "restored" ? "Previous containers restored after interrupted cutover" : "Interrupted release includes services requiring manual reconciliation" }, "recovering");
         } catch (error) {
+          observeCaughtError(error, "platform/releases/cutover");
           if (error instanceof AppError && error.code === "RELEASE_RECOVERY_PENDING") continue;
           await repos.releases.updateRun(id, { stage: "action_required", error: "Interrupted cutover recovery could not be verified" }, "recovering");
         }
