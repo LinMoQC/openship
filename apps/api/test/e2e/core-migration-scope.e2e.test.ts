@@ -51,7 +51,7 @@ describeDockerE2E("Core migration failure preserves the exact service scope", ()
     expect(group.id).toBe(network.id);
     const database = await seedService(projectId, { name: "magic-postgres", image: GITOPS_POSTGRES_IMAGE, volumes: ["database-data:/var/lib/postgresql/data"], namespaceVolumes: true,
       environment: { POSTGRES_PASSWORD: "isolated-fixture-only", POSTGRES_DB: "fixture" },
-      advanced: { healthcheck: { test: ["CMD-SHELL", "pg_isready -U postgres -d fixture"], interval: "1s", timeout: "1s", retries: 60 } } });
+      advanced: { healthcheck: { test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d fixture"], interval: "1s", timeout: "1s", retries: 60 } } });
     const liveDatabase = await runtime.deployServiceWorkload(group, { projectId, slug, deploymentId: active.id, serviceName: database.name, image: GITOPS_POSTGRES_IMAGE,
       ports: [], volumes: database.volumes as string[], namespaceVolumes: true, environment: { POSTGRES_PASSWORD: "isolated-fixture-only", POSTGRES_DB: "fixture" }, advanced: database.advanced!, imageAlreadyPrepared: true });
     await runtime.waitForServiceCondition(liveDatabase.containerId, "service_healthy", 60_000);

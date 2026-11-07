@@ -49,7 +49,7 @@ describeDockerE2E("isolated PostgreSQL control-platform upgrade and matching rol
     expect(inspection.Mounts.some(mount => mount.Type === "bind")).toBe(false);
     // PostgreSQL may still be initializing. This check runs inside the isolated
     // container; it never dials a host or business database.
-    await command(["sh", "-c", "for n in $(seq 1 60); do pg_isready -U postgres -d platform >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1"]);
+    await command(["sh", "-c", "for n in $(seq 1 60); do pg_isready -h 127.0.0.1 -U postgres -d platform >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1"]);
     proxy = await isolatedPostgresProxy(docker, container);
     url = `postgresql://postgres:isolated-test-password@127.0.0.1:${proxy.port}/platform`;
     connection = await createDatabase({ driver: "pg", url, migrationsDir: prefix });
