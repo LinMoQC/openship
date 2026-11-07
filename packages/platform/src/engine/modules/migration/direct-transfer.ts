@@ -369,11 +369,20 @@ export async function runRsync(
   let lastTail = "";
   for (let attempt = 1; attempt <= RSYNC_MAX_ATTEMPTS; attempt++) {
     signal?.throwIfAborted();
+    // Output arrives in arbitrary chunks: one chunk can hold several \r/\n
+    // separated progress updates, and one update can span two chunks.
+    let partial = "";
+    const report = (segment: string) => {
+      const bytes = parseRsyncProgress(segment);
+      if (bytes != null) onProgress?.(bytes);
+    };
     const { code, output } = await initiatorExec.streamExec(command, (entry: LogEntry) => {
       if (!onProgress) return;
-      const bytes = parseRsyncProgress(entry.message);
-      if (bytes != null) onProgress(bytes);
+      const segments = (partial + entry.message).split(/[\r\n]/);
+      partial = segments.pop() ?? "";
+      for (const segment of segments) report(segment);
     }, { signal });
+    if (partial) report(partial);
     if (code === 0) return;
 
     lastTail = output.split("\n").filter(Boolean).slice(-4).join(" ");

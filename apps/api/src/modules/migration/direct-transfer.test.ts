@@ -69,6 +69,19 @@ describe("runRsync retry / bail", () => {
     await expect(runRsync(e, "rsync ...")).rejects.toThrow(/cannot read\/write the Docker volume path/i);
     expect(e.calls).toBe(1);
   });
+
+  test("reports progress from combined and split output chunks", async () => {
+    const chunks = ["sending incremental file list\nvalue.txt\r       2", "9 100%   0.00kB/s    0:00:00\r", "      58 100%   0.03kB/s    0:00:00 (xfr#1, to-chk=0/2)\n"];
+    const e = {
+      async streamExec(_command: string, onLog: (entry: { message: string }) => void) {
+        for (const message of chunks) onLog({ message });
+        return { code: 0, output: chunks.join("") };
+      },
+    } as unknown as CommandExecutor;
+    const seen: number[] = [];
+    await runRsync(e, "rsync ...", bytes => seen.push(bytes));
+    expect(seen).toEqual([29, 58]);
+  });
 });
 
 // ── Pure helpers ──────────────────────────────────────────────────────────────
