@@ -37,7 +37,7 @@ jobs:
 
   typecheck:
     name: Typecheck
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -91,7 +91,7 @@ jobs:
 
   test_suites:
     name: Tests (${{ matrix.suite }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -236,7 +236,7 @@ jobs:
     name: Test
     needs: [test_suites, actions-runner]
     if: ${{ always() }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
       - name: Require every test suite to pass
@@ -251,7 +251,7 @@ jobs:
 
   docs:
     name: Documentation
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -300,7 +300,7 @@ jobs:
   # slow the jobs above.
   webmail-server-test:
     name: Test webmail server
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -332,7 +332,7 @@ jobs:
 
   webmail-client-test:
     name: Test webmail client
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v7
