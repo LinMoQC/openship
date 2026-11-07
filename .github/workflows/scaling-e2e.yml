@@ -17,7 +17,7 @@ permissions:
 jobs:
   scaling:
     name: Scaling journey (${{ matrix.journey }})
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: ${{ fromJSON('{"application":30,"storage":80,"databases":105}')[matrix.journey] }}
     strategy:
       fail-fast: false

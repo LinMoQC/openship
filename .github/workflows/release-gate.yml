@@ -48,7 +48,7 @@ jobs:
 
   acme-dns:
     name: Wildcard HTTPS (real ACME + DNS)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -78,7 +78,7 @@ jobs:
 
   test:
     name: Typecheck + tests
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -173,7 +173,7 @@ jobs:
 
   sdk-package:
     name: Installed SDK (Node ${{ matrix.node }})
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     strategy:
       matrix:
         node: ['22', '24']
@@ -222,7 +222,7 @@ jobs:
   # See E2E_SCOPE in apps/api/vitest.e2e.config.ts.
   e2e-docker:
     name: E2E (real Docker, ${{ matrix.label }})
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     # Files remain serial within each disposable daemon. Split the growing
     # ordinary suite across two hosts so it fits the gate without relaxing tests.
     timeout-minutes: ${{ matrix.scope == 'fast' && 45 || 30 }}
